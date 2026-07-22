@@ -45,7 +45,10 @@ Relay-agent is a reliable task broker designed to connect your always-on AI agen
 
 - Windows 11, Linux, or macOS
 - Python 3.11+
-- Installed and logged-in AI CLI workers (`claude`, `codex`, `agy`)
+- At least one installed and logged-in worker CLI:
+  - `claude`
+  - `codex`
+  - `agy` — *optional, requires additional security verification*
 - *For Hermes Unattended Execution:* A dedicated low-privilege OS account is strictly required.
 
 ---
@@ -99,7 +102,9 @@ relay "Investigate today's major AI semiconductor news" --worker codex
 
 ### Structured Requests (Task Files)
 For long or structured tasks (recommended for agents), use a UTF-8 Markdown task file:
-```sh
+
+**Windows (PowerShell):**
+```powershell
 relay run `
   --task-file "D:\RelayInput\request.md" `
   --worker claude `
@@ -107,20 +112,65 @@ relay run `
   --machine
 ```
 
+**Linux / macOS:**
+```sh
+relay run \
+  --task-file "/home/relay/input/request.md" \
+  --worker claude \
+  --format json \
+  --machine
+```
+
+### Attachments
+Relay can pass files along with the prompt (must be inside permitted input directories for Hermes):
+```powershell
+relay run `
+  --task-file "D:\RelayInput\analyze.md" `
+  --attach "D:\RelayInput\report.pdf" `
+  --attach "D:\RelayInput\data.xlsx" `
+  --worker claude `
+  --format json
+```
+
 ---
 
 ## 🤖 Hermes AI & Multi-Worker Delegation
 
-By registering `skills/hermes-relay/SKILL.md` in your AI environment, **Hermes AI** can use Relay to delegate complex tasks and aggregate results.
+By registering the skill `skills/hermes-relay/SKILL.md` (Skill name: `use_relay_agent`) in your AI environment, **Hermes AI** can use Relay to delegate complex tasks and aggregate results.
 
 **Example:** "Ask agy, codex, and claude who the next US president will be, and aggregate the 200-word reasoning from each."
 
-To achieve this, the agent submits 3 separate asynchronous jobs:
+To achieve this without falling back to a different worker on failure, the agent submits 3 separate asynchronous jobs with `--no-fallback` and `--caller hermes`:
+
 ```sh
-relay submit --task-file "task.md" --worker claude --request-id "q-claude" --machine
-relay submit --task-file "task.md" --worker codex --request-id "q-codex" --machine
-relay submit --task-file "task.md" --worker antigravity --request-id "q-agy" --machine
+relay submit \
+  --task-file "task.md" \
+  --worker claude \
+  --format json \
+  --request-id "q-claude" \
+  --caller hermes \
+  --no-fallback \
+  --machine
+
+relay submit \
+  --task-file "task.md" \
+  --worker codex \
+  --format json \
+  --request-id "q-codex" \
+  --caller hermes \
+  --no-fallback \
+  --machine
+
+relay submit \
+  --task-file "task.md" \
+  --worker antigravity \
+  --format json \
+  --request-id "q-agy" \
+  --caller hermes \
+  --no-fallback \
+  --machine
 ```
+*(Note: If you omit `--no-fallback`, a failure in Claude might silently trigger a Codex retry, muddling which AI actually answered.)*
 
 **Asynchronous Flow:**
 1. Parse the `job_id` from the `submit` JSON receipt.
@@ -144,6 +194,7 @@ Check whether a model is listed or can be minimally verified. Claude uses a smal
 ```sh
 relay model-check --worker claude --model sonnet --machine
 ```
+> ⚠️ **Warning on Claude Probe**: A failed Claude model check (`ok: false`) does not strictly mean the model name is invalid. Authentication expiration, quota exhaustion, rate limits, or network timeouts will currently all return `false`.
 
 ---
 
@@ -159,7 +210,13 @@ When requesting `--format json`, the file written to your `--out` path will foll
   "sources": ["https://example.com"],
   "uncertainties": ["Market volatility makes this unpredictable"],
   "missing_items": [],
-  "artifacts": ["path/to/chart.csv"]
+  "artifacts": [
+    {
+      "name": "chart.csv",
+      "relative_path": "path/to/chart.csv",
+      "description": "Generated comparison chart"
+    }
+  ]
 }
 ```
 *Important*: The Relay receipt status (e.g., `completed`) indicates successful CLI execution. The internal JSON `status` (e.g., `complete` or `partial`) indicates the AI's self-reported success on the actual task logic.
@@ -192,7 +249,7 @@ Relay's daemon automatically deletes expired staging and workspace directories b
 - **Cancelled**: 14 days
 - **Orphan workspaces**: 7 days
 
-*Note: Automated cleanup applies to Relay's internal workspaces. Final output files and artifacts delivered to your `--out` paths are never automatically deleted.*
+*Note: Automated cleanup applies to Relay's internal workspaces. Final result files and artifacts delivered to the configured `--out` and `--artifacts` destinations are not automatically deleted.*
 
 ```sh
 relay cleanup --status
