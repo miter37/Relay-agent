@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import RelayError
+from ..model_catalog import ModelCatalog
 from ..models import AdapterSpec
 from ..util import json_dump, json_load, utc_now, which
 
@@ -161,6 +162,18 @@ class Adapter(ABC):
 
     def sandbox_mode(self) -> str:
         return "external-workspace"
+
+    def discover_models(
+        self,
+        *,
+        refresh: bool = False,
+        include_hidden: bool = False,
+        verify: bool = False,
+    ) -> ModelCatalog:
+        raise RelayError(
+            "MODEL_DISCOVERY_UNSUPPORTED",
+            f"{self.name} does not support model discovery",
+        )
 
     def classify_failure(self, exit_code: int | None, stderr: str) -> tuple[str, bool]:
         lower = stderr.lower()

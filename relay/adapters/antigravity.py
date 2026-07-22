@@ -6,6 +6,8 @@ from typing import Any
 
 from .base import Adapter, AdapterContext
 from ..errors import RelayError
+from ..model_catalog import ModelCatalog, DiscoveredModel
+from ..model_discovery import parse_agy_models
 
 
 class AntigravityAdapter(Adapter):
@@ -22,6 +24,38 @@ class AntigravityAdapter(Adapter):
 
     def permission_mode(self) -> str:
         return "dangerously-skip-permissions"
+
+    def discover_models(
+        self,
+        *,
+        refresh: bool = False,
+        include_hidden: bool = False,
+        verify: bool = False,
+    ) -> ModelCatalog:
+        code, stdout, stderr = self.capture(["models"], timeout=30)
+        if code != 0:
+            raise RelayError(
+                "MODEL_DISCOVERY_FAILED",
+                stderr.strip() or "agy models failed",
+            )
+        model_names = parse_agy_models(stdout)
+        discovered = [
+            DiscoveredModel(
+                id=m,
+                display_name=m,
+                selectable_name=m,
+                availability="available"
+            ) for m in model_names
+        ]
+        return ModelCatalog(
+            worker=self.name,
+            cli_version=self.version(),
+            status="ok",
+            source="agy_models",
+            account_scoped=True,
+            authoritative=True,
+            models=discovered
+        )
 
     def build_command(self, ctx: AdapterContext) -> tuple[list[str], bytes | None, dict[str, str]]:
         exe = self.executable()

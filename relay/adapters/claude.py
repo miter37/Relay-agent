@@ -6,6 +6,8 @@ from typing import Any
 
 from .base import Adapter, AdapterContext
 from ..errors import RelayError
+from ..model_catalog import ModelCatalog, DiscoveredModel
+from ..model_discovery import parse_claude_settings, probe_claude_model
 
 
 class ClaudeAdapter(Adapter):
@@ -21,6 +23,52 @@ class ClaudeAdapter(Adapter):
             "json_schema_hint": "--json-schema" in help_text,
             "warning": "Help output is advisory only; deep probe is authoritative.",
         }
+
+    def sandbox_mode(self) -> str:
+        return "external-workspace"
+
+    def discover_models(
+        self,
+        *,
+        refresh: bool = False,
+        include_hidden: bool = False,
+        verify: bool = False,
+    ) -> ModelCatalog:
+        exe = self.executable()
+        if not exe:
+            raise RelayError("WORKER_NOT_INSTALLED", "claude executable not found")
+
+        model_names = parse_claude_settings()
+        discovered = []
+        for m in model_names:
+            avail = "configured"
+            method = None
+            if verify:
+                ok = probe_claude_model(exe, m)
+                if ok:
+                    avail = "verified"
+                    method = "minimal_inference"
+                else:
+                    avail = "unavailable"
+            
+            discovered.append(DiscoveredModel(
+                id=m,
+                display_name=m,
+                selectable_name=m,
+                availability=avail,
+                verification_method=method,
+            ))
+            
+        return ModelCatalog(
+            worker=self.name,
+            cli_version=self.version(),
+            status="partial",
+            source="effective_settings",
+            account_scoped=False,
+            authoritative=False,
+            models=discovered,
+            warnings=["Claude Code does not expose a supported non-interactive full model-list command."]
+        )
 
     def permission_mode(self) -> str:
         return "bypassPermissions"

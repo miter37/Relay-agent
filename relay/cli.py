@@ -25,7 +25,7 @@ from .util import entrypoint_command, json_load, safe_resolve
 
 COMMANDS = {
     "run", "submit", "status", "wait", "result", "show", "logs", "cancel", "history", "rerun",
-    "doctor", "config", "cleanup", "daemon", "version", "init", "security",
+    "doctor", "config", "cleanup", "daemon", "version", "init", "security", "models", "model-check"
 }
 
 
@@ -121,6 +121,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     security = sub.add_parser("security")
     security.add_argument("--machine", action="store_true")
+    
+    models = sub.add_parser("models", help="List models available to installed workers")
+    models.add_argument("--worker", choices=["all", "claude", "codex", "antigravity"], default="all")
+    models.add_argument("--refresh", action="store_true")
+    models.add_argument("--include-hidden", action="store_true")
+    models.add_argument("--verify", action="store_true")
+    models.add_argument("--machine", action="store_true")
+
+    model_check = sub.add_parser("model-check", help="Verify that a worker can run a specific model")
+    model_check.add_argument("--worker", required=True, choices=["claude", "codex", "antigravity"])
+    model_check.add_argument("--model", required=True)
+    model_check.add_argument("--machine", action="store_true")
+
     sub.add_parser("version")
     return parser
 
@@ -338,6 +351,75 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(client.request("POST", "/shutdown") if client.health() else {"ok": True, "status": "already_stopped"}, machine)
         elif args.command == "security":
             _emit({"ok": True, **security_posture(config)}, machine)
+        elif args.command == "models":
+            from .model_discovery import get_model_catalog
+            workers = ["claude", "codex", "antigravity"] if args.worker == "all" else [args.worker]
+            results = []
+            
+            for w in workers:
+                try:
+                    adapter = __import__("relay.adapters", fromlist=["get_adapter"]).get_adapter(
+                        w, config.worker(w), config.path_value("adapter_spec_root")
+                    )
+                    catalog = get_model_catalog(config, adapter, refresh=args.refresh, include_hidden=args.include_hidden, verify=args.verify)
+                    results.append(catalog.to_dict())
+                except RelayError as err:
+                    results.append({
+                        "worker": w,
+                        "status": "error",
+                        "error_code": err.code,
+                        "error_message": err.message,
+                    })
+                except Exception as exc:
+                    results.append({
+                        "worker": w,
+                        "status": "error",
+                        "error_message": str(exc),
+                    })
+                    
+            from .util import utc_now
+            response = {
+                "schema_version": "1.0",
+                "generated_at": utc_now(),
+                "workers": results,
+            }
+            if not machine:
+                for w_data in results:
+                    print(f"\n{w_data.get('worker', 'Unknown').capitalize()}")
+                    if w_data.get("status") == "error":
+                        print(f"  Error: {w_data.get('error_message')}")
+                        continue
+                    for m in w_data.get("models", []):
+                        tags = []
+                        if m.get("availability"): tags.append(m["availability"])
+                        if m.get("is_default"): tags.append("default")
+                        tag_str = ", ".join(tags)
+                        print(f"  {m.get('id'):<30} {tag_str}")
+                    for w in w_data.get("warnings", []):
+                        print(f"  Warning: {w}")
+            else:
+                _emit(response, machine=True)
+                
+        elif args.command == "model-check":
+            from .model_discovery import probe_claude_model
+            # for codex and antigravity, we check catalog. For claude we actually probe if requested.
+            adapter = __import__("relay.adapters", fromlist=["get_adapter"]).get_adapter(
+                args.worker, config.worker(args.worker), config.path_value("adapter_spec_root")
+            )
+            exe = adapter.executable()
+            if not exe:
+                raise RelayError("WORKER_NOT_INSTALLED", f"{args.worker} executable not found")
+                
+            is_ok = False
+            if args.worker == "claude":
+                is_ok = probe_claude_model(exe, args.model)
+            else:
+                # for others, check catalog
+                from .model_discovery import get_model_catalog
+                cat = get_model_catalog(config, adapter, refresh=False)
+                is_ok = any(m.id == args.model or m.selectable_name == args.model for m in cat.models)
+                
+            _emit({"ok": is_ok, "worker": args.worker, "model": args.model}, machine)
         return 0
     except RelayError as err:
         _emit({"ok": False, "status": "failed", "error_code": err.code, "error_message": err.message, "details": err.details}, machine)

@@ -6,6 +6,8 @@ from typing import Any
 
 from .base import Adapter, AdapterContext
 from ..errors import RelayError
+from ..model_catalog import ModelCatalog, DiscoveredModel
+from ..model_discovery import list_codex_models
 
 
 class CodexAdapter(Adapter):
@@ -26,6 +28,51 @@ class CodexAdapter(Adapter):
 
     def sandbox_mode(self) -> str:
         return str(self.worker_config.get("sandbox", "workspace-write"))
+
+    def discover_models(
+        self,
+        *,
+        refresh: bool = False,
+        include_hidden: bool = False,
+        verify: bool = False,
+    ) -> ModelCatalog:
+        exe = self.executable()
+        if not exe:
+            raise RelayError("WORKER_NOT_INSTALLED", "codex executable not found")
+
+        try:
+            result = list_codex_models(
+                executable=exe,
+                timeout_seconds=20.0,
+                include_hidden=include_hidden,
+            )
+        except Exception as e:
+            raise RelayError("MODEL_DISCOVERY_FAILED", f"Codex app-server model list failed: {e}")
+
+        models = result if isinstance(result, list) else (result.get("data") or result.get("models", []))
+        discovered = []
+        for m in models:
+            discovered.append(DiscoveredModel(
+                id=m.get("slug") or m.get("id") or "",
+                display_name=m.get("displayName") or m.get("display_name") or "",
+                selectable_name=m.get("slug") or m.get("id") or "",
+                availability="available",
+                is_default=m.get("isDefault") or m.get("is_default") or False,
+                hidden=m.get("hidden", False),
+                reasoning_efforts=[r.get("reasoningEffort") for r in m.get("supportedReasoningEfforts", [])] if "supportedReasoningEfforts" in m else m.get("supported_reasoning_levels", []),
+                default_reasoning_effort=m.get("defaultReasoningEffort") or m.get("default_reasoning_level"),
+                metadata=m,
+            ))
+            
+        return ModelCatalog(
+            worker=self.name,
+            cli_version=self.version(),
+            status="ok",
+            source="app_server_model_list",
+            account_scoped=True,
+            authoritative=True,
+            models=discovered
+        )
 
     def build_command(self, ctx: AdapterContext) -> tuple[list[str], bytes | None, dict[str, str]]:
         exe = self.executable()
