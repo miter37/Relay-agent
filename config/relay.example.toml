@@ -47,7 +47,6 @@ default_model = ""
 sandbox = "workspace-write"
 approval = "never"
 live_search = true
-unsafe_yolo = false
 
 [workers.antigravity]
 enabled = false

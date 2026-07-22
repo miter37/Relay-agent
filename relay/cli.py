@@ -184,6 +184,14 @@ def _emit(value: Any, machine: bool = False) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
+def _receipt_exit_code(value: Any) -> int:
+    if not isinstance(value, dict):
+        return 0
+    if value.get("ok") is False or str(value.get("status", "")).lower() in {"failed", "cancelled"}:
+        return 2
+    return 0
+
+
 def _parse_config_value(text: str) -> Any:
     lower = text.lower()
     if lower in {"true", "false"}:
@@ -208,18 +216,28 @@ def _start_daemon(config: Config) -> dict:
     runtime.mkdir(parents=True, exist_ok=True)
     log_path = runtime / "daemon.log"
     command = entrypoint_command(["daemon", "serve"])
+    log_handle = log_path.open("ab")
     kwargs: dict[str, Any] = {
         "stdin": subprocess.DEVNULL,
-        "stdout": log_path.open("ab"),
+        "stdout": log_handle,
         "stderr": subprocess.STDOUT,
         "cwd": str(config.home),
         "env": {**os.environ, "RELAY_HOME": str(config.home)},
     }
+    if command[1:3] == ["-m", "relay"]:
+        source_root = Path(__file__).resolve().parent.parent
+        if (source_root / "relay").is_dir():
+            inherited = kwargs["env"].get("PYTHONPATH", "")
+            paths = [str(source_root), *([inherited] if inherited else [])]
+            kwargs["env"]["PYTHONPATH"] = os.pathsep.join(paths)
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen(command, **kwargs)
+    try:
+        subprocess.Popen(command, **kwargs)
+    finally:
+        log_handle.close()
     client = RPCClient(config)
     if not client.wait_until_healthy(12):
         raise RelayError("DAEMON_UNAVAILABLE", f"Daemon did not start. See {log_path}")
@@ -273,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "init":
             _emit({"ok": True, "config": str(config.init(force=args.force)), "home": str(config.home)}, machine)
         elif args.command == "run":
-            _emit(engine.run(_request_from_args(args, config)), machine)
+            result = engine.run(_request_from_args(args, config))
+            _emit(result, machine)
+            return _receipt_exit_code(result)
         elif args.command == "submit":
             client = _ensure_daemon(config)
             request = _request_from_args(args, config)
@@ -287,13 +307,15 @@ def main(argv: list[str] | None = None) -> int:
             except RelayError:
                 value = engine.show(args.job_id) if args.command == "show" else engine.receipt(args.job_id)
             _emit(value, machine)
+            if args.command in {"status", "result"}:
+                return _receipt_exit_code(value)
         elif args.command == "wait":
             deadline = time.monotonic() + args.timeout if args.timeout else None
             while True:
                 value = engine.receipt(args.job_id)
                 if value.get("status") in {"completed", "partial", "failed", "cancelled"}:
                     _emit(value, machine)
-                    break
+                    return _receipt_exit_code(value)
                 if deadline and time.monotonic() >= deadline:
                     raise RelayError("TIMEOUT", "Wait command timed out", True)
                 time.sleep(args.interval)

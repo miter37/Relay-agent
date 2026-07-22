@@ -54,7 +54,7 @@ Codex:
 
 - `approval=never`
 - `sandbox=workspace-write`
-- raw `--yolo` 기본 false
+- sandbox 우회 플래그를 사용하지 않음
 
 Antigravity:
 

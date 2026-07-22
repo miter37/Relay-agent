@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import shutil
 import threading
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,7 @@ from .adapters import get_adapter
 from .adapters.base import AdapterContext
 from .config import Config
 from .db import Database
-from .delivery import atomic_deliver_directory, atomic_deliver_file
+from .delivery import atomic_deliver_pair
 from .errors import RelayError
 from .models import JobRequest
 from .process_supervisor import run_supervised
@@ -27,8 +28,10 @@ from .util import (
     sha256_file,
     task_hash,
     utc_now,
+    is_within,
 )
 from .validation import (
+    materialize_artifact_payloads,
     reconcile_json_artifacts,
     scan_artifacts,
     validate_json_result,
@@ -93,10 +96,22 @@ class RelayEngine:
                 "After configuring ACL isolation, run: relay config set service_isolation_acknowledged true",
             )
         validate_attachment_paths(self.config, request.caller, request.attachments)
+        if request.workspace and request.caller.lower() in {"hermes", "service", "daemon"}:
+            workspace_root = safe_resolve(Path(request.workspace))
+            if not is_within(workspace_root, self.config.path_value("workspace_root")):
+                raise RelayError(
+                    "WORKSPACE_PATH_NOT_ALLOWED",
+                    f"Service workspace is outside the configured workspace root: {workspace_root}",
+                )
         computed_hash = task_hash(request.task, request.attachments, request.profile, request.worker, request.result_format)
         if request.request_id:
             existing = self.db.get_by_request_id(request.request_id)
             if existing:
+                if existing["task_hash"] != computed_hash:
+                    raise RelayError(
+                        "REQUEST_ID_CONFLICT",
+                        f"request_id is already associated with a different task: {request.request_id}",
+                    )
                 return existing, True
         if not request.force_new:
             minutes = int(self.config.get("soft_dedup_window_minutes", 30))
@@ -128,7 +143,20 @@ class RelayEngine:
             "fallback_enabled": 1 if fallback else 0,
             "request_json": json.dumps(request.to_dict(), ensure_ascii=False),
         }
-        self.db.create_job(row)
+        try:
+            self.db.create_job(row)
+        except sqlite3.IntegrityError:
+            if not request.request_id:
+                raise
+            existing = self.db.get_by_request_id(request.request_id)
+            if not existing:
+                raise
+            if existing["task_hash"] != computed_hash:
+                raise RelayError(
+                    "REQUEST_ID_CONFLICT",
+                    f"request_id is already associated with a different task: {request.request_id}",
+                )
+            return existing, True
         self.db.add_event(job_id, "JOB_CREATED", {"queued": queued, "request_id": request.request_id})
         return self.db.get_job(job_id) or row, False
 
@@ -146,7 +174,8 @@ class RelayEngine:
         return [x for x in chain if x in {"claude", "codex", "antigravity"} and not (x in seen or seen.add(x))]
 
     def _prepare_workspace(self, job_id: str, worker: str, request: JobRequest) -> dict[str, Path]:
-        workspace = self.config.path_value("workspace_root") / worker / job_id
+        workspace_root = safe_resolve(Path(request.workspace)) if request.workspace else self.config.path_value("workspace_root")
+        workspace = workspace_root / worker / job_id
         if workspace.exists():
             shutil.rmtree(workspace, ignore_errors=True)
         output_dir = ensure_dir(workspace / "output")
@@ -205,7 +234,11 @@ class RelayEngine:
                 if not job["fallback_enabled"]:
                     return self._fail_job(job_id, err.code, err.message, errors)
                 continue
-            paths = self._prepare_workspace(job_id, worker, request)
+            try:
+                paths = self._prepare_workspace(job_id, worker, request)
+            except RelayError as err:
+                errors.append({"worker": worker, "code": err.code, "message": err.message})
+                return self._fail_job(job_id, err.code, err.message, errors)
             ctx = AdapterContext(
                 job_id=job_id,
                 workspace=paths["workspace"],
@@ -301,11 +334,14 @@ class RelayEngine:
                 else:
                     validate_text_result(ctx.result_file, int(self.config.get("result_max_bytes")))
                     value = None
-                artifact_records = scan_artifacts(
-                    ctx.artifact_dir,
-                    int(self.config.get("artifact_max_files", 200)),
-                    int(self.config.get("artifact_max_total_bytes", 1024 * 1024 * 1024)),
-                )
+                max_artifact_files = int(self.config.get("artifact_max_files", 200))
+                max_artifact_bytes = int(self.config.get("artifact_max_total_bytes", 1024 * 1024 * 1024))
+                materialized_artifacts: list[str] = []
+                if value is not None:
+                    materialized_artifacts = materialize_artifact_payloads(
+                        value, ctx.artifact_dir, max_artifact_files, max_artifact_bytes
+                    )
+                artifact_records = scan_artifacts(ctx.artifact_dir, max_artifact_files, max_artifact_bytes)
                 if value is not None:
                     value = reconcile_json_artifacts(value, artifact_records)
                     ctx.result_file.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -317,8 +353,13 @@ class RelayEngine:
                 self.db.update_job(job_id, status="DELIVERING")
                 output_path = safe_resolve(Path(job["output_path"]))
                 artifact_path = safe_resolve(Path(job["artifact_path"]))
-                atomic_deliver_file(ctx.result_file, output_path, overwrite=request.overwrite)
-                atomic_deliver_directory(ctx.artifact_dir, artifact_path, overwrite=request.overwrite)
+                atomic_deliver_pair(
+                    ctx.result_file,
+                    output_path,
+                    ctx.artifact_dir,
+                    artifact_path,
+                    overwrite=request.overwrite,
+                )
                 for item in artifact_records:
                     self.db.add_artifact(
                         job_id,
@@ -340,6 +381,7 @@ class RelayEngine:
                     "missing_items_count": len(value.get("missing_items", [])) if value else None,
                     "result_sha256": sha256_file(output_path),
                     "artifacts_count": len(artifact_records),
+                    "materialized_artifacts_count": len(materialized_artifacts),
                     "attempted_workers": [e["worker"] for e in errors] + [worker],
                     "content_verified": False,
                     "content_verification_note": "Relay verifies delivery and format, not factual accuracy.",

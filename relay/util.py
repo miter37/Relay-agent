@@ -125,7 +125,16 @@ def entrypoint_command(extra: list[str]) -> list[str]:
             return [sys.executable, entry, *extra]
         return [entry, *extra]
     argv0 = Path(sys.argv[0])
+    for candidate in (argv0, Path(__file__)):
+        marker = ".pyz/"
+        text = str(candidate)
+        if marker in text:
+            archive = Path(text.split(marker, 1)[0] + ".pyz")
+            if archive.exists():
+                return [sys.executable, str(archive.resolve()), *extra]
     if argv0.suffix.lower() in {".pyz", ".py"} and argv0.exists():
+        if argv0.name == "__main__.py":
+            return [sys.executable, "-m", "relay", *extra]
         return [sys.executable, str(argv0.resolve()), *extra]
     return [sys.executable, "-m", "relay", *extra]
 

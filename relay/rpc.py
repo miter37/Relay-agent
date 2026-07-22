@@ -32,6 +32,19 @@ class RPCClient:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                payload = {}
+            if isinstance(payload, dict) and payload.get("error_code"):
+                raise RelayError(
+                    str(payload["error_code"]),
+                    str(payload.get("error_message") or f"Relay daemon returned HTTP {exc.code}"),
+                    bool(payload.get("retryable", False)),
+                    payload.get("details"),
+                ) from exc
+            raise RelayError("DAEMON_UNAVAILABLE", f"Relay daemon returned HTTP {exc.code}", True) from exc
         except (urllib.error.URLError, ConnectionError, TimeoutError, json.JSONDecodeError) as exc:
             raise RelayError("DAEMON_UNAVAILABLE", f"Relay daemon is unavailable: {exc}", True) from exc
 

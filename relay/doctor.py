@@ -14,7 +14,7 @@ from .models import AdapterSpec, JobRequest
 from .process_supervisor import run_supervised
 from .request_builder import STANDARD_JSON_SCHEMA, write_schema
 from .util import ensure_dir, json_dump, new_job_id, utc_now
-from .validation import scan_artifacts, validate_json_result
+from .validation import materialize_artifact_payloads, scan_artifacts, validate_json_result
 
 
 class Doctor:
@@ -101,6 +101,7 @@ Do not ask questions. Do not wait for user input.
                 raise RelayError(code, f"Probe exited with code {outcome.exit_code}")
             adapter.normalize_output(ctx, outcome.stdout_path, outcome.stderr_path)
             value = validate_json_result(result_file, 5 * 1024 * 1024)
+            materialize_artifact_payloads(value, artifact_dir, 10, 10 * 1024 * 1024)
             artifacts = scan_artifacts(artifact_dir, 10, 10 * 1024 * 1024)
             artifact_ok = any(
                 item["relative_path"] == "probe-artifact.txt"

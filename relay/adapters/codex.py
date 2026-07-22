@@ -85,9 +85,6 @@ class CodexAdapter(Adapter):
             "--sandbox",
             str(ctx.config.get("sandbox", "workspace-write")),
         ]
-        if ctx.config.get("dangerously_skip_permissions", True):
-            args.append("--dangerously-bypass-approvals-and-sandbox")
-
         args.extend([
             "--skip-git-repo-check",
             "--color",
@@ -106,7 +103,10 @@ class CodexAdapter(Adapter):
         prompt = (
             "Read request.md in the current working directory and complete it without asking questions. "
             "Return only the requested final JSON or text. "
-            "Any artifact files must be created only in ./artifacts and must contain the exact requested content."
+            "For JSON work: Do not attempt direct filesystem writes for artifacts. Put every artifact's exact "
+            "content in the structured artifacts payload required by schema.json; Relay will safely materialize "
+            "the files, and the valid artifact payload counts as completed work. Artifact relative_path values "
+            "are relative to ./artifacts and must not start with artifacts/."
         ).encode("utf-8")
         env = {
             "RELAY_PROVIDER_NAME": "codex",

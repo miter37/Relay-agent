@@ -4,6 +4,7 @@ import json
 import shutil
 from pathlib import Path
 
+from .errors import RelayError
 from .models import JobRequest
 from .util import ensure_dir, sha256_file
 
@@ -20,7 +21,20 @@ STANDARD_JSON_SCHEMA = {
         "sources": {"type": "array", "items": {"type": "string"}},
         "uncertainties": {"type": "array", "items": {"type": "string"}},
         "missing_items": {"type": "array", "items": {"type": "string"}},
-        "artifacts": {"type": "array", "items": {"type": "string"}},
+        "artifacts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["relative_path", "description", "encoding", "content"],
+                "properties": {
+                    "relative_path": {"type": "string"},
+                    "description": {"type": "string"},
+                    "encoding": {"type": "string", "enum": ["utf-8", "base64"]},
+                    "content": {"type": "string"},
+                },
+            },
+        },
     },
 }
 
@@ -37,7 +51,7 @@ def copy_attachments(request: JobRequest, input_dir: Path) -> list[dict]:
     for source_text in request.attachments:
         source = Path(source_text).expanduser().resolve()
         if not source.is_file():
-            raise FileNotFoundError(f"Attachment not found: {source}")
+            raise RelayError("ATTACHMENT_NOT_FOUND", f"Attachment not found: {source}")
         name = source.name
         stem, suffix = source.stem, source.suffix
         index = 2
@@ -58,7 +72,12 @@ def build_request_markdown(
     attachments: list[dict],
 ) -> str:
     format_rules = (
-        "Return a UTF-8 JSON object matching schema.json exactly. Do not wrap it in Markdown fences."
+        "Return a UTF-8 JSON object matching schema.json exactly. Do not wrap it in Markdown fences.\n"
+        "- For every requested artifact, include an artifacts entry with relative_path, description, encoding, "
+        "and exact content. Use encoding=utf-8 for text and encoding=base64 for binary content. Relay "
+        "materializes this payload into the artifact directory, so a valid payload is sufficient to complete "
+        "the artifact request. You may also create the file directly. relative_path is relative to the artifact "
+        "directory; do not prefix it with artifacts/."
         if request.result_format == "json"
         else "Return a non-empty UTF-8 plain-text result."
     )

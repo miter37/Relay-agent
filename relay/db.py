@@ -260,8 +260,10 @@ class Database:
     def request_cancel(self, job_id: str) -> bool:
         with self.connect() as conn:
             cursor = conn.execute(
-                "UPDATE jobs SET status='CANCEL_REQUESTED',updated_at=? "
+                "UPDATE jobs SET status=CASE WHEN status='QUEUED' THEN 'CANCELLED' "
+                "ELSE 'CANCEL_REQUESTED' END, completed_at=CASE WHEN status='QUEUED' "
+                "THEN ? ELSE completed_at END, updated_at=? "
                 "WHERE job_id=? AND status IN ('QUEUED','PREPARING','RUNNING')",
-                (utc_now(), job_id),
+                (utc_now(), utc_now(), job_id),
             )
             return cursor.rowcount > 0

@@ -10,7 +10,11 @@ TARGET = ROOT / "relay.pyz"
 
 with tempfile.TemporaryDirectory() as tmp:
     stage = Path(tmp)
-    shutil.copytree(ROOT / "relay", stage / "relay")
+    shutil.copytree(
+        ROOT / "relay",
+        stage / "relay",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     zipapp.create_archive(stage, TARGET, interpreter="/usr/bin/env python3", main="relay.cli:main", compressed=True)
 
 print(TARGET)
