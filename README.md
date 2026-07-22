@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>🚀 Relay</h1>
+  <h1>🚀 Relay-agent</h1>
   <p><strong>A reliable delegation broker for AI CLIs (Claude, Codex, Antigravity) on Windows, Linux, and macOS.</strong></p>
 
   <p>
@@ -11,7 +11,7 @@
   </p>
 </div>
 
-> **Note on Guarantees**: Relay validates the execution and delivery contract (result-file creation, encoding, schema, artifact paths, and process completion). It **does not** verify the factual accuracy or reasoning quality of the AI-generated content.
+> **Note on Guarantees**: Relay-agent validates the execution and delivery contract (result-file creation, encoding, schema, artifact paths, and process completion). It **does not** verify the factual accuracy or reasoning quality of the AI-generated content.
 
 > **Note on Cross-platform**: Cross-platform code paths are implemented, but provider-specific behavior must be validated on the target machine with `relay doctor --deep`. Some Windows and macOS operational paths still require field validation.
 
@@ -31,7 +31,7 @@
 
 ## ✨ Key Features
 
-Relay is a reliable task broker designed to connect your always-on AI agents with powerful coding CLIs.
+Relay-agent is a reliable task broker designed to connect your always-on AI agents with powerful coding CLIs.
 
 - 🤖 **3 Major AI CLIs Supported**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
 - 🤝 **Perfect for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay and retrieve the final results asynchronously.

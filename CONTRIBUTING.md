@@ -1,6 +1,6 @@
-# Contributing to Relay
+# Contributing to Relay-agent
 
-First off, thank you for considering contributing to Relay! We welcome PRs, bug reports, and suggestions.
+First off, thank you for considering contributing to Relay-agent! We welcome PRs, bug reports, and suggestions.
 
 ## Development Setup
 
@@ -11,7 +11,7 @@ First off, thank you for considering contributing to Relay! We welcome PRs, bug 
    ```
 2. **Ensure Python 3.11+ is installed.**
 3. **Run local tests:**
-   Relay includes mock tests that do not call real APIs.
+   Relay-agent includes mock tests that do not call real APIs.
    ```sh
    PATH="$PWD/mocks:$PATH" PYTHONPATH=. python -m unittest tests.test_relay.RelayTests -v
    ```
@@ -28,4 +28,4 @@ First off, thank you for considering contributing to Relay! We welcome PRs, bug 
 
 - Keep code simple and explicit.
 - Follow PEP 8 guidelines where possible.
-- Avoid introducing heavy third-party dependencies; Relay aims to use the Python standard library as much as possible.
+- Avoid introducing heavy third-party dependencies; Relay-agent aims to use the Python standard library as much as possible.
