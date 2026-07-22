@@ -23,17 +23,15 @@
 
 ---
 
-## ✨ Key Guarantees
+## ✨ Features & Guarantees
 
-Relay delegates one-off tasks to AI CLIs safely and returns JSON/TXT outputs predictably.
+Relay runs AI CLIs securely and returns files reliably.
 
-- 🛡️ **Safe Probing**: Audits CLI installation (`doctor --deep`) before execution.
-- 📂 **Workspace Isolation**: AI runs in an isolated workspace, not in your final directories.
-- ✅ **Atomic Delivery**: Validates existence, UTF-8, and JSON schema before moving results.
-- 🗄️ **SQLite History**: Logs jobs, attempts, errors, and artifact hashes.
-- ⚡ **Graceful Fallback**: Automatically falls back to a different worker on technical failure.
-
-*Note: Relay guarantees delivery, format, and execution contracts, NOT the factual correctness of the AI's output.*
+- 🛡️ **Checks Installation**: Makes sure the CLI is properly installed (`doctor --deep`) before running.
+- 📂 **Isolated Workspace**: AI runs in a temporary folder to avoid messing with your project files.
+- ✅ **Clean Results**: Ensures the output is actually JSON/TXT before delivering it to you.
+- 🗄️ **History**: Saves logs of all jobs, errors, and files in SQLite.
+- ⚡ **Auto-Fallback**: If one CLI breaks, it can automatically try another one.
 
 ---
 
@@ -93,19 +91,21 @@ relay "Summarize this document" --format txt --attach "D:\Input\report.pdf"
 
 ---
 
-## 🤖 Hermes & Background Tasks
+## 🤖 Hermes AI & Agent Delegation
 
-Relay excels at handling long-running, asynchronous tasks via its daemon.
+By registering `skills/hermes-relay/SKILL.md` in your AI environment, **Hermes AI** can use Relay to delegate complex tasks to the 3 main AI CLIs (Antigravity, Codex, Claude Code) and aggregate their results.
+
+**Example Delegation Request:**
+> "Hermes: agy, codex, claude code 에게 다음의 내용을 모두 물어보고 답변을 취합해 알려줘.
+> '다음 미국 대통령은 누가 될 것 같은가, 인물을 한명 답하고 그 근거를 200자로 적어서 답할 것'."
+
+Under the hood, Hermes will use Relay's daemon to submit long-running jobs and track them asynchronously.
 
 ```powershell
-relay config set service_isolation_acknowledged true
-
 relay submit `
-  --task-file "D:\Hermes\relay-input\telegram-8821.md" `
+  --task-file "D:\Hermes\relay-input\president-task.md" `
   --format json `
-  --out "D:\Hermes\relay-results\telegram-8821.json" `
-  --artifacts "D:\Hermes\relay-artifacts\telegram-8821" `
-  --request-id "telegram-chat123-message8821" `
+  --out "D:\Hermes\relay-results\result.json" `
   --caller hermes `
   --machine
 ```
