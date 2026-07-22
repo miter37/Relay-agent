@@ -18,6 +18,8 @@ def parse_agy_models(text: str) -> list[str]:
 
 
 import subprocess
+import queue
+import threading
 import time
 from typing import Any
 
@@ -60,26 +62,31 @@ def list_codex_models(
             },
         })
 
-        initialized = False
         deadline = time.monotonic() + timeout_seconds
+        messages: queue.Queue[str | None] = queue.Queue()
 
-        while time.monotonic() < deadline:
-            line = process.stdout.readline()
-            if not line:
-                if process.poll() is not None:
-                    raise RuntimeError("Codex app-server exited during initialization")
-                continue
+        def read_stdout() -> None:
+            for raw_line in process.stdout:
+                messages.put(raw_line)
+            messages.put(None)
 
-            message = json.loads(line)
+        threading.Thread(target=read_stdout, name="codex-model-reader", daemon=True).start()
 
+        def next_message() -> dict[str, Any]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Codex app-server response timed out")
+            line = messages.get(timeout=remaining)
+            if line is None:
+                raise RuntimeError("Codex app-server closed its output stream")
+            return json.loads(line)
+
+        while True:
+            message = next_message()
             if message.get("id") == 1:
                 if "error" in message:
                     raise RuntimeError(str(message["error"]))
-                initialized = True
                 break
-
-        if not initialized:
-            raise TimeoutError("Codex app-server initialization timed out")
 
         send({"method": "initialized", "params": {}})
         send({
@@ -92,15 +99,8 @@ def list_codex_models(
             },
         })
 
-        while time.monotonic() < deadline:
-            line = process.stdout.readline()
-            if not line:
-                if process.poll() is not None:
-                    raise RuntimeError("Codex app-server exited before model response")
-                continue
-
-            message = json.loads(line)
-
+        while True:
+            message = next_message()
             if message.get("id") != 2:
                 continue
 
@@ -189,8 +189,17 @@ def get_model_catalog(config: Any, adapter: Any, refresh: bool = False, include_
                     from .model_catalog import ModelCatalog, DiscoveredModel
                     models = [DiscoveredModel(**m) for m in cached.get("models", [])]
                     cached["models"] = models
-                    # If we don't need to verify, or it's already verified
-                    return ModelCatalog(**{k:v for k,v in cached.items() if k != "generated_at"})
+                    # A verification request must not reuse a catalog that only contains
+                    # configured/available entries. Reuse it only when every cached model
+                    # records a successful verification.
+                    cached_models = cached.get("models", [])
+                    cache_verified = bool(cached_models) and all(
+                        (model.get("availability") if isinstance(model, dict) else model.availability)
+                        == "verified"
+                        for model in cached_models
+                    )
+                    if not verify or cache_verified:
+                        return ModelCatalog(**{k: v for k, v in cached.items() if k != "generated_at"})
         except Exception:
             pass
 
@@ -203,4 +212,3 @@ def get_model_catalog(config: Any, adapter: Any, refresh: bool = False, include_
     json_dump(cache_file, data)
     
     return catalog
-

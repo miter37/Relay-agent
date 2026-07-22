@@ -69,6 +69,7 @@ relay wait <JOB_ID> --timeout 1800 --machine
 relay result <JOB_ID> --machine
 ```
 * 반환된 JSON에서 `result_path` 위치를 읽어 실제 데이터(`C:\AgentWork\result-1001.json`)를 파싱하여 사용자에게 답변을 구성합니다.
+* 자동화 환경에서는 영수증의 `ok`와 `status`를 함께 확인하세요. `failed` 또는 `cancelled` 결과는 Relay CLI도 비정상 종료 코드(2)를 반환합니다.
 
 ---
 
@@ -91,10 +92,16 @@ relay result <JOB_ID> --machine
   ],
   "missing_items": [],
   "artifacts": [
-    "artifacts-1001/chart.png"
+    {
+      "name": "chart.png",
+      "relative_path": "artifacts-1001/chart.png",
+      "description": "supporting chart"
+    }
   ]
 }
 ```
+
+Codex JSON 작업에서는 모델이 `relative_path`, `description`, `encoding`, `content`를 포함한 내부 아티팩트 payload를 반환할 수 있습니다. Relay는 경로·인코딩·개수·전체 크기를 검증한 뒤 아티팩트 디렉터리에 파일을 생성하며, 최종 결과 JSON에서는 `encoding`과 `content`를 제거합니다. `relative_path`는 아티팩트 디렉터리 기준이므로 `artifacts/` 접두사를 붙이지 않습니다.
 
 ---
 

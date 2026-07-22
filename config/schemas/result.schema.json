@@ -1,15 +1,28 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "required": ["schema_version", "status", "answer", "sources", "uncertainties", "missing_items", "artifacts"],
   "properties": {
     "schema_version": {"type": "string"},
     "status": {"type": "string", "enum": ["complete", "partial", "failed"]},
     "answer": {"type": "string"},
-    "sources": {"type": "array"},
-    "uncertainties": {"type": "array"},
-    "missing_items": {"type": "array"},
-    "artifacts": {"type": "array"}
+    "sources": {"type": "array", "items": {"type": "string"}},
+    "uncertainties": {"type": "array", "items": {"type": "string"}},
+    "missing_items": {"type": "array", "items": {"type": "string"}},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relative_path", "description", "encoding", "content"],
+        "properties": {
+          "relative_path": {"type": "string"},
+          "description": {"type": "string"},
+          "encoding": {"type": "string", "enum": ["utf-8", "base64"]},
+          "content": {"type": "string"}
+        }
+      }
+    }
   }
 }
