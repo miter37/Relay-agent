@@ -20,7 +20,7 @@
 - [📦 System Requirements](#-system-requirements)
 - [🚀 Installation & Verification](#-installation--verification)
 - [💡 Usage & Task Files](#-usage--task-files)
-- [🤖 Hermes AI & Multi-Worker Delegation](#-hermes-ai--multi-worker-delegation)
+- [🤖 OpenClaw / Hermes AI & Multi-Worker Delegation](#-openclaw--hermes-ai--multi-worker-delegation)
 - [🔍 Model Discovery & Limitations](#-model-discovery--limitations)
 - [📄 JSON Result Contract](#-json-result-contract)
 - [⚙️ Configuration & Security](#-configuration--security)
@@ -134,9 +134,9 @@ relay run `
 
 ---
 
-## 🤖 Hermes AI & Multi-Worker Delegation
+## 🤖 OpenClaw / Hermes AI & Multi-Worker Delegation
 
-By registering the skill `skills/hermes-relay/SKILL.md` (Skill name: `use_relay_agent`) in your AI environment, **Hermes AI** can use Relay-agent to delegate complex tasks and aggregate results.
+By registering the skill `skills/hermes-relay/SKILL.md` (Skill name: `use_relay_agent`) in your AI environment, **OpenClaw** or **Hermes AI** can use Relay-agent to delegate complex tasks and aggregate results.
 
 **Example:** "Ask Claude, Codex, and Antigravity to propose an architecture for a cross-platform job queue, then compare their trade-offs."
 
