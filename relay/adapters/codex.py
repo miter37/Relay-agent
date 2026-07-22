@@ -31,16 +31,15 @@ class CodexAdapter(Adapter):
         exe = self.executable()
         if not exe:
             raise RelayError("WORKER_NOT_INSTALLED", "Codex CLI executable was not found")
-        if self.worker_config.get("unsafe_yolo"):
-            args = [exe, "exec", "--yolo"]
-        else:
-            args = [
-                exe,
-                "exec",
-                "--ephemeral",
-                "--sandbox",
-                str(ctx.config.get("sandbox", "workspace-write")),
-            ]
+        args = [
+            exe,
+            "exec",
+            "--ephemeral",
+            "--sandbox",
+            str(ctx.config.get("sandbox", "workspace-write")),
+        ]
+        if ctx.config.get("dangerously_skip_permissions", True):
+            args.append("--dangerously-bypass-approvals-and-sandbox")
 
         args.extend([
             "--skip-git-repo-check",
@@ -59,7 +58,8 @@ class CodexAdapter(Adapter):
         args.append("-")
         prompt = (
             "Read request.md in the current working directory and complete it without asking questions. "
-            "Return only the requested final JSON or text. Any artifact files must be created only in ./artifacts."
+            "Return only the requested final JSON or text. "
+            "Any artifact files must be created only in ./artifacts and must contain the exact requested content."
         ).encode("utf-8")
         env = {
             "RELAY_PROVIDER_NAME": "codex",

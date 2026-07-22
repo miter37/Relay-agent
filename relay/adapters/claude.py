@@ -90,6 +90,11 @@ class ClaudeAdapter(Adapter):
             elif "result" in wrapper:
                 candidate = wrapper["result"]
         if isinstance(candidate, str):
+            candidate = candidate.strip()
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start >= 0 and end > start:
+                candidate = candidate[start:end + 1]
             try:
                 candidate = json.loads(candidate)
             except json.JSONDecodeError as exc:
