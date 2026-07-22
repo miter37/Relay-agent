@@ -23,15 +23,15 @@
 
 ---
 
-## ✨ Features & Guarantees
+## ✨ Key Features
 
-Relay runs AI CLIs securely and returns files reliably.
+Relay is a reliable task broker designed to connect your always-on AI agents with powerful coding CLIs.
 
-- 🛡️ **Checks Installation**: Makes sure the CLI is properly installed (`doctor --deep`) before running.
-- 📂 **Isolated Workspace**: AI runs in a temporary folder to avoid messing with your project files.
-- ✅ **Clean Results**: Ensures the output is actually JSON/TXT before delivering it to you.
-- 🗄️ **History**: Saves logs of all jobs, errors, and files in SQLite.
-- ⚡ **Auto-Fallback**: If one CLI breaks, it can automatically try another one.
+- 🤖 **3 Major AI CLIs Supported**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
+- 🤝 **Perfect for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay and simply retrieve the final results later.
+- 📂 **Isolated Environments**: All AI execution happens in dedicated, isolated temporary workspaces to prevent accidental modification of your critical project files.
+- 🗄️ **Persistent History & Artifacts**: Every delegated job's history, errors, and output artifacts are meticulously recorded in a local SQLite database for easy tracking and retrieval.
+- ✅ **Guaranteed Delivery**: Validates that the output is in the expected JSON/TXT format before delivering it back to the requesting agent.
 
 ---
 
