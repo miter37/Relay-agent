@@ -11,14 +11,20 @@
   </p>
 </div>
 
+> **Note on Guarantees**: Relay validates the execution and delivery contract (result-file creation, encoding, schema, artifact paths, and process completion). It **does not** verify the factual accuracy or reasoning quality of the AI-generated content.
+
+> **Note on Cross-platform**: Cross-platform code paths are implemented, but provider-specific behavior must be validated on the target machine with `relay doctor --deep`. Some Windows and macOS operational paths still require field validation.
+
 ## 📑 Table of Contents
-- [✨ Key Guarantees](#-key-guarantees)
+- [✨ Key Features](#-key-features)
 - [📦 System Requirements](#-system-requirements)
-- [🚀 Quick Start (Installation)](#-quick-start-installation)
-- [💡 Usage Examples](#-usage-examples)
-- [🤖 Hermes & Background Tasks](#-hermes--background-tasks)
-- [🔍 Model Discovery](#-model-discovery)
-- [⚙️ Configuration & Cleanup](#-configuration--cleanup)
+- [🚀 Installation & Verification](#-installation--verification)
+- [💡 Usage & Task Files](#-usage--task-files)
+- [🤖 Hermes AI & Multi-Worker Delegation](#-hermes-ai--multi-worker-delegation)
+- [🔍 Model Discovery & Limitations](#-model-discovery--limitations)
+- [📄 JSON Result Contract](#-json-result-contract)
+- [⚙️ Configuration & Security](#-configuration--security)
+- [🧹 Cleanup and Retention](#-cleanup-and-retention)
 - [📚 Documentation](#-documentation)
 
 ---
@@ -28,10 +34,10 @@
 Relay is a reliable task broker designed to connect your always-on AI agents with powerful coding CLIs.
 
 - 🤖 **3 Major AI CLIs Supported**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
-- 🤝 **Perfect for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay and simply retrieve the final results later.
-- 📂 **Isolated Environments**: All AI execution happens in dedicated, isolated temporary workspaces to prevent accidental modification of your critical project files.
-- 🗄️ **Persistent History & Artifacts**: Every delegated job's history, errors, and output artifacts are meticulously recorded in a local SQLite database for easy tracking and retrieval.
-- ✅ **Guaranteed Delivery**: Validates that the output is in the expected JSON/TXT format before delivering it back to the requesting agent.
+- 🤝 **Perfect for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay and retrieve the final results asynchronously.
+- 📂 **Dedicated Workspaces**: Each job runs from a separate Relay-managed workspace. This reduces accidental file collisions but is not a complete OS sandbox. Unattended use requires a dedicated low-privilege OS account.
+- 🗄️ **Persistent History**: Every delegated job's history, errors, and output paths are meticulously recorded in a local SQLite database.
+- ✅ **Validated Delivery Contract**: Relay checks result-file creation, encoding, JSON/TXT structure, artifact paths, and process completion before publishing outputs.
 
 ---
 
@@ -40,110 +46,155 @@ Relay is a reliable task broker designed to connect your always-on AI agents wit
 - Windows 11, Linux, or macOS
 - Python 3.11+
 - Installed and logged-in AI CLI workers (`claude`, `codex`, `agy`)
-- *For Hermes Unattended Execution:* A dedicated low-privilege OS account is required.
+- *For Hermes Unattended Execution:* A dedicated low-privilege OS account is strictly required.
 
 ---
 
-## 🚀 Quick Start (Installation)
+## 🚀 Installation & Verification
 
-### Windows (PowerShell)
+### 1. Clone & Install
+```sh
+git clone https://github.com/miter37/Relay.git
+cd Relay
+```
+
+**Windows (PowerShell):**
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\install_windows.ps1
-
-relay init
-relay doctor --worker claude --deep
-relay doctor --worker codex --deep
 ```
 
-### Linux / macOS
+**Linux / macOS:**
 ```sh
 chmod +x scripts/install_unix.sh
 ./scripts/install_unix.sh
+```
 
+### 2. Verify Workers
+```sh
 relay init
 relay doctor --worker claude --deep
 relay doctor --worker codex --deep
 ```
 
+### 3. Antigravity Setup (Optional & Advanced)
+Because Antigravity has strong permission bypass capabilities, it requires explicit opt-in after you have verified your OS-level isolation:
+```sh
+relay doctor --worker antigravity --deep
+# ONLY run these if you have configured OS-level isolation:
+relay config set workers.antigravity.security_verified true
+relay config enable-worker antigravity
+```
+
 ---
 
-## 💡 Usage Examples
+## 💡 Usage & Task Files
 
-### Basic Synchronous Run
-```powershell
+### Short Requests (Inline)
+Use direct task arguments for simple, short requests:
+```sh
 relay "Investigate today's major AI semiconductor news" --worker codex
 ```
+*Note on fallback*: `--worker codex` means "Try Codex first, but fallback if it fails." If you want *only* Codex, use `--worker codex --no-fallback`.
 
-### Specifying Output Paths
-```powershell
-relay "Research CSP CAPEX" `
+### Structured Requests (Task Files)
+For long or structured tasks (recommended for agents), use a UTF-8 Markdown task file:
+```sh
+relay run `
+  --task-file "D:\RelayInput\request.md" `
   --worker claude `
   --format json `
-  --out "D:\Research\csp-capex.json" `
-  --artifacts "D:\Research\csp-capex-artifacts"
-```
-
-### Text Format with Attachments
-```powershell
-relay "Summarize this document" --format txt --attach "D:\Input\report.pdf"
-```
-
----
-
-## 🤖 Hermes AI & Agent Delegation
-
-By registering `skills/hermes-relay/SKILL.md` in your AI environment, **Hermes AI** can use Relay to delegate complex tasks to the 3 main AI CLIs (Antigravity, Codex, Claude Code) and aggregate their results.
-
-**Example Delegation Request:**
-> "Hermes: agy, codex, claude code 에게 다음의 내용을 모두 물어보고 답변을 취합해 알려줘.
-> '다음 미국 대통령은 누가 될 것 같은가, 인물을 한명 답하고 그 근거를 200자로 적어서 답할 것'."
-
-Under the hood, Hermes will use Relay's daemon to submit long-running jobs and track them asynchronously.
-
-```powershell
-relay submit `
-  --task-file "D:\Hermes\relay-input\president-task.md" `
-  --format json `
-  --out "D:\Hermes\relay-results\result.json" `
-  --caller hermes `
   --machine
 ```
-Track and retrieve:
-```powershell
-relay wait <job_id> --machine
-relay result <job_id> --machine
-```
 
 ---
 
-## 🔍 Model Discovery
+## 🤖 Hermes AI & Multi-Worker Delegation
 
-Relay can dynamically query and cache the models available to each worker.
+By registering `skills/hermes-relay/SKILL.md` in your AI environment, **Hermes AI** can use Relay to delegate complex tasks and aggregate results.
 
-```powershell
+**Example:** "Ask agy, codex, and claude who the next US president will be, and aggregate the 200-word reasoning from each."
+
+To achieve this, the agent submits 3 separate asynchronous jobs:
+```sh
+relay submit --task-file "task.md" --worker claude --request-id "q-claude" --machine
+relay submit --task-file "task.md" --worker codex --request-id "q-codex" --machine
+relay submit --task-file "task.md" --worker antigravity --request-id "q-agy" --machine
+```
+
+**Asynchronous Flow:**
+1. Parse the `job_id` from the `submit` JSON receipt.
+2. Wait for completion: `relay wait <job_id> --machine`
+3. Get final receipt: `relay result <job_id> --machine`
+4. Read the actual output file from the `result_path` provided in the receipt.
+
+---
+
+## 🔍 Model Discovery & Limitations
+
+Relay discovers models using worker-specific methods. Codex and Antigravity can provide account-aware catalogs when supported. Claude Code does not expose a complete non-interactive model-list API, so its results may include configured or known model candidates rather than a definitive account-level list.
+
+```sh
 relay models
 relay models --worker codex --refresh
-relay models --worker claude --machine
 ```
-Check if a specific model is usable:
-```powershell
-relay model-check --worker claude --model claude-3-5-sonnet-20241022 --machine
+
+**Checking Model Availability (`model-check`):**
+Check whether a model is listed or can be minimally verified. Claude uses a small inference probe, while Codex and Antigravity currently check catalog membership.
+```sh
+relay model-check --worker claude --model sonnet --machine
 ```
 
 ---
 
-## ⚙️ Configuration & Cleanup
+## 📄 JSON Result Contract
+
+When requesting `--format json`, the file written to your `--out` path will follow this structure:
+
+```json
+{
+  "schema_version": "1.0",
+  "status": "complete",
+  "answer": "The requested analysis...",
+  "sources": ["https://example.com"],
+  "uncertainties": ["Market volatility makes this unpredictable"],
+  "missing_items": [],
+  "artifacts": ["path/to/chart.csv"]
+}
+```
+*Important*: The Relay receipt status (e.g., `completed`) indicates successful CLI execution. The internal JSON `status` (e.g., `complete` or `partial`) indicates the AI's self-reported success on the actual task logic.
+
+---
+
+## ⚙️ Configuration & Security
+
+**Security & Unattended Execution:**
+To use `--caller hermes`, the operator must configure a low-privilege account and ACL isolation. After securing the host, acknowledge it:
+```sh
+relay security --machine
+relay config set service_isolation_acknowledged true
+```
 
 **Set default workers and fallbacks:**
-```powershell
+```sh
 relay config set default_worker claude
 relay config set fallback_order codex,antigravity
 ```
 
-**Automatic Cleanup:**
-Relay automatically deletes expired staging and workspace directories based on status (7 days for completed, 30 for failed).
-```powershell
+---
+
+## 🧹 Cleanup and Retention
+
+Relay's daemon automatically deletes expired staging and workspace directories based on the job status:
+- **Completed**: 7 days
+- **Partial**: 14 days
+- **Failed**: 30 days
+- **Cancelled**: 14 days
+- **Orphan workspaces**: 7 days
+
+*Note: Automated cleanup applies to Relay's internal workspaces. Final output files and artifacts delivered to your `--out` paths are never automatically deleted.*
+
+```sh
 relay cleanup --status
 ```
 
