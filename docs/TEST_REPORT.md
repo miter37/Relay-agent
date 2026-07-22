@@ -11,7 +11,7 @@ Test date: 2026-07-23
 
 ## Automated tests
 
-All 27 tests passed:
+All 28 tests passed:
 
 1. cleanup preserves recent workspaces
 2. cleanup removes expired completed workspaces while preserving delivered results/artifacts
@@ -40,6 +40,7 @@ All 27 tests passed:
 25. model verification bypasses unverified cache
 26. daemon source import path propagation
 27. daemon HTTP error-code preservation
+28. Claude JSON schema compatibility
 
 Command:
 
@@ -50,7 +51,7 @@ PYTHONPATH=. python -m unittest tests.test_relay -v
 Result:
 
 ```text
-Ran 27 tests
+Ran 28 tests
 OK
 ```
 
@@ -58,7 +59,7 @@ OK
 
 - Antigravity (`agy 1.1.5`): deep doctor passed; synchronous artifact creation and asynchronous submit/status/wait/result flows passed.
 - Codex (`codex 0.144.1`): deep doctor passed. A live Relay-to-Codex request completed with one materialized UTF-8 artifact, zero missing items, an exact byte-content check, and matching manifest SHA-256.
-- Claude task execution: not run because the installed account was quota-limited at test time; model listing and model-check probes were still executed.
+- Claude (`2.1.217`): deep doctor passed after Claude-specific schema normalization. A live Relay-to-Claude JSON request completed with one exact UTF-8 artifact, zero missing items, and matching manifest SHA-256.
 
 Codex JSON artifact output uses a validated content payload. Relay materializes that payload inside the artifact root, rejects unsafe paths and invalid encodings, and removes payload content from the delivered result JSON.
 

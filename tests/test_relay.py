@@ -198,6 +198,37 @@ class RelayTests(unittest.TestCase):
         self.assertIn(b"Do not attempt direct filesystem writes for artifacts", prompt)
         self.assertIn(b"valid artifact payload counts as completed work", prompt)
 
+    def test_claude_command_strips_unsupported_schema_uri(self):
+        from relay.adapters.base import AdapterContext
+        from relay.adapters.claude import ClaudeAdapter
+        from relay.request_builder import STANDARD_JSON_SCHEMA
+
+        worker_config = self.config.worker("claude")
+        worker_config["command"] = str(MOCKS / "claude")
+        adapter = ClaudeAdapter(worker_config, self.config.path_value("adapter_spec_root"))
+        workspace = self.home / "workspace" / "claude-command"
+        workspace.mkdir(parents=True)
+        schema_file = workspace / "schema.json"
+        schema_file.write_text(json.dumps(STANDARD_JSON_SCHEMA), encoding="utf-8")
+        ctx = AdapterContext(
+            job_id="claude-command-test",
+            workspace=workspace,
+            request_file=workspace / "request.md",
+            result_file=workspace / "result.json.partial",
+            artifact_dir=workspace / "artifacts",
+            schema_file=schema_file,
+            result_format="json",
+            profile="analysis-only",
+            model=None,
+            config=worker_config,
+        )
+
+        command, _, _ = adapter.build_command(ctx)
+        schema = json.loads(command[command.index("--json-schema") + 1])
+        self.assertNotIn("$schema", schema)
+        self.assertEqual(schema["type"], "object")
+        self.assertEqual(schema["required"], STANDARD_JSON_SCHEMA["required"])
+
     def test_codex_output_schema_uses_supported_keywords(self):
         from relay.request_builder import STANDARD_JSON_SCHEMA
 

@@ -106,8 +106,11 @@ class ClaudeAdapter(Adapter):
         if disallowed:
             args.extend(["--disallowedTools", disallowed])
         if ctx.result_format == "json":
-            schema = ctx.schema_file.read_text(encoding="utf-8")
-            args.extend(["--json-schema", json.dumps(json.loads(schema), separators=(",", ":"))])
+            schema = json.loads(ctx.schema_file.read_text(encoding="utf-8"))
+            # Claude Code's embedded schema validator rejects the standard
+            # draft URI even though Relay uses it for its own validation.
+            schema.pop("$schema", None)
+            args.extend(["--json-schema", json.dumps(schema, separators=(",", ":"))])
         env = {
             "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
             "RELAY_PROVIDER_NAME": "claude",
