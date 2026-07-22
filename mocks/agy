@@ -1,0 +1,7 @@
+#!/bin/sh
+case " $* " in
+  *" --version "*|*" -V "*|" version ") echo "antigravity mock 9.9.9"; exit 0 ;;
+  *" --help "*|*" -h "*) echo "-p --dangerously-skip-permissions --model"; exit 0 ;;
+esac
+export RELAY_PROVIDER_NAME=antigravity
+exec python3 "$(dirname "$0")/mock_ai_cli.py" "$@"

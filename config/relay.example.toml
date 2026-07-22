@@ -1,0 +1,59 @@
+default_worker = "claude"
+fallback_order = ["codex"]
+default_format = "json"
+default_profile = "web-research"
+
+timeout_seconds = 1200
+soft_stall_seconds = 120
+hard_stall_seconds = 300
+poll_interval_seconds = 2
+max_concurrent_jobs = 2
+max_concurrent_per_worker = 1
+fallback_enabled = true
+history_mode = "metadata"
+service_isolation_acknowledged = false
+soft_dedup_window_minutes = 30
+retention_days = 30 # legacy fallback
+cleanup_enabled = true
+cleanup_interval_hours = 24
+cleanup_run_on_daemon_start = true
+cleanup_remove_empty_parents = true
+cleanup_remove_orphans = true
+cleanup_orphan_days = 7
+retention_days_completed = 7
+retention_days_partial = 14
+retention_days_failed = 30
+retention_days_cancelled = 14
+
+daemon_host = "127.0.0.1"
+daemon_port = 47831
+daemon_auto_start = true
+
+[workers.claude]
+enabled = true
+command = "claude"
+require_deep_doctor = true
+default_model = "sonnet"
+max_turns = 30
+max_budget_usd = 5.0
+tools = "WebSearch,WebFetch,Read,Write,Glob,Grep"
+disallowed_tools = "mcp__*"
+
+[workers.codex]
+enabled = true
+command = "codex"
+require_deep_doctor = true
+default_model = ""
+sandbox = "workspace-write"
+approval = "never"
+live_search = true
+unsafe_yolo = false
+
+[workers.antigravity]
+enabled = false
+command = "agy"
+require_deep_doctor = true
+default_model = ""
+dangerously_skip_permissions = true
+enable_only_if_security_verified = true
+security_verified = false
