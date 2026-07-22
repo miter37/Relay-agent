@@ -143,6 +143,26 @@ relay result <job_id> --machine
 
 Hermes 스킬 문서는 `skills/hermes-relay/SKILL.md`에 있습니다.
 
+## 모델 탐색 및 검증 (Model Discovery)
+
+각 worker가 지원하는 모델 목록을 동적으로 조회하고 검증할 수 있습니다.
+
+```powershell
+relay models
+relay models --worker codex --refresh
+relay models --worker claude --machine
+```
+
+- `--worker`: 특정 워커 지정 (`all`, `claude`, `codex`, `antigravity`)
+- `--refresh`: 캐시(기본 30분)를 무시하고 최신 목록을 다시 조회
+- `--verify`: Claude Code 등에서 모델이 실제로 동작하는지 프로브(Probe) 실행
+
+특정 모델이 해당 워커에서 사용 가능한지 확인할 때는 `model-check`를 사용합니다.
+
+```powershell
+relay model-check --worker claude --model claude-3-5-sonnet-20241022 --machine
+```
+
 ## 설정
 
 기본 홈은 Windows `%LOCALAPPDATA%\Relay`, Linux `~/.relay`, macOS `~/Library/Application Support/Relay`입니다. 다른 위치를 쓰려면 `RELAY_HOME`으로 지정합니다.
