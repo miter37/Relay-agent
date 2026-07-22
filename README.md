@@ -13,7 +13,7 @@
 
 > **Note on Guarantees**: Relay-agent validates the execution and delivery contract (result-file creation, encoding, schema, artifact paths, and process completion). It **does not** verify the factual accuracy or reasoning quality of the AI-generated content.
 
-> **Note on Cross-platform**: Cross-platform code paths are implemented, but provider-specific behavior must be validated on the target machine with `relay doctor --deep`. Some Windows and macOS operational paths still require field validation.
+> **Note on Cross-platform**: Cross-platform code paths are implemented, but provider-specific behavior must be validated on the target machine. Validate each worker you intend to use with `relay doctor --worker <worker> --deep`. You must run this command again if the underlying CLI is upgraded. Some Windows and macOS operational paths still require field validation.
 
 ## 📑 Table of Contents
 - [✨ Key Features](#-key-features)
@@ -33,11 +33,11 @@
 
 Relay-agent is a reliable task broker designed to connect your always-on AI agents with powerful coding CLIs.
 
-- 🤖 **3 Major AI CLIs Supported**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
-- 🤝 **Perfect for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay and retrieve the final results asynchronously.
-- 📂 **Dedicated Workspaces**: Each job runs from a separate Relay-managed workspace. This reduces accidental file collisions but is not a complete OS sandbox. Unattended use requires a dedicated low-privilege OS account.
-- 🗄️ **Persistent History**: Every delegated job's history, errors, and output paths are meticulously recorded in a local SQLite database.
-- ✅ **Validated Delivery Contract**: Relay checks result-file creation, encoding, JSON/TXT structure, artifact paths, and process completion before publishing outputs.
+- 🤖 **Supports Three AI CLIs**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
+- 🤝 **Designed for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay-agent and retrieve the final results asynchronously.
+- 📂 **Dedicated Workspaces**: Each job runs from a separate Relay-agent managed workspace. This reduces accidental file collisions but is not a complete OS sandbox. Unattended use requires a dedicated low-privilege OS account.
+- 🗄️ **Persistent History**: Every delegated job's metadata, errors, and output paths are recorded in a local SQLite database.
+- ✅ **Validated Delivery Contract**: Relay-agent checks result-file creation, encoding, JSON/TXT structure, artifact paths, and process completion before publishing outputs.
 
 ---
 
@@ -122,7 +122,7 @@ relay run \
 ```
 
 ### Attachments
-Relay can pass files along with the prompt (must be inside permitted input directories for Hermes):
+Relay-agent can pass files along with the prompt (must be inside permitted input directories for Hermes):
 ```powershell
 relay run `
   --task-file "D:\RelayInput\analyze.md" `
@@ -136,18 +136,20 @@ relay run `
 
 ## 🤖 Hermes AI & Multi-Worker Delegation
 
-By registering the skill `skills/hermes-relay/SKILL.md` (Skill name: `use_relay_agent`) in your AI environment, **Hermes AI** can use Relay to delegate complex tasks and aggregate results.
+By registering the skill `skills/hermes-relay/SKILL.md` (Skill name: `use_relay_agent`) in your AI environment, **Hermes AI** can use Relay-agent to delegate complex tasks and aggregate results.
 
-**Example:** "Ask agy, codex, and claude who the next US president will be, and aggregate the 200-word reasoning from each."
+**Example:** "Ask Claude, Codex, and Antigravity to propose an architecture for a cross-platform job queue, then compare their trade-offs."
 
-To achieve this without falling back to a different worker on failure, the agent submits 3 separate asynchronous jobs with `--no-fallback` and `--caller hermes`:
+To achieve this without falling back to a different worker on failure, the agent submits 3 separate asynchronous jobs with `--no-fallback` and `--caller hermes`. 
+
+> ⚠️ **Important on `--request-id`**: The request ID is an idempotency key. It must uniquely identify one logical request (e.g., `<conversation-id>-<task-id>-<worker>`). Reusing the same ID returns the existing cached job, even if the task file has changed.
 
 ```sh
 relay submit \
   --task-file "task.md" \
   --worker claude \
   --format json \
-  --request-id "q-claude" \
+  --request-id "jobqueue-arch-claude" \
   --caller hermes \
   --no-fallback \
   --machine
@@ -156,7 +158,7 @@ relay submit \
   --task-file "task.md" \
   --worker codex \
   --format json \
-  --request-id "q-codex" \
+  --request-id "jobqueue-arch-codex" \
   --caller hermes \
   --no-fallback \
   --machine
@@ -165,7 +167,7 @@ relay submit \
   --task-file "task.md" \
   --worker antigravity \
   --format json \
-  --request-id "q-agy" \
+  --request-id "jobqueue-arch-agy" \
   --caller hermes \
   --no-fallback \
   --machine
@@ -182,7 +184,7 @@ relay submit \
 
 ## 🔍 Model Discovery & Limitations
 
-Relay discovers models using worker-specific methods. Codex and Antigravity can provide account-aware catalogs when supported. Claude Code does not expose a complete non-interactive model-list API, so its results may include configured or known model candidates rather than a definitive account-level list.
+Relay-agent discovers models using worker-specific methods. Codex and Antigravity can provide account-aware catalogs when supported. Claude Code does not expose a complete non-interactive model-list API, so its results may include configured or known model candidates rather than a definitive account-level list.
 
 ```sh
 relay models
@@ -219,7 +221,7 @@ When requesting `--format json`, the file written to your `--out` path will foll
   ]
 }
 ```
-*Important*: The Relay receipt status (e.g., `completed`) indicates successful CLI execution. The internal JSON `status` (e.g., `complete` or `partial`) indicates the AI's self-reported success on the actual task logic.
+*Important*: The Relay-agent receipt status (e.g., `completed`) indicates successful CLI execution. The internal JSON `status` (e.g., `complete` or `partial`) indicates the AI's self-reported success on the actual task logic.
 
 ---
 
@@ -242,14 +244,14 @@ relay config set fallback_order codex,antigravity
 
 ## 🧹 Cleanup and Retention
 
-Relay's daemon automatically deletes expired staging and workspace directories based on the job status:
+Relay-agent automatically deletes expired internal staging and workspace directories according to job status:
 - **Completed**: 7 days
 - **Partial**: 14 days
 - **Failed**: 30 days
 - **Cancelled**: 14 days
 - **Orphan workspaces**: 7 days
 
-*Note: Automated cleanup applies to Relay's internal workspaces. Final result files and artifacts delivered to the configured `--out` and `--artifacts` destinations are not automatically deleted.*
+*Note: Automated cleanup applies to Relay-agent's internal workspaces. Final result files and artifacts delivered to the configured `--out` and `--artifacts` destinations are not automatically deleted.*
 
 ```sh
 relay cleanup --status
