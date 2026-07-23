@@ -83,10 +83,16 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
 
 
 def _add_schedule_rule_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--type", dest="rule_type", required=True, choices=["daily", "weekly", "monthly", "n_days", "once"])
+    parser.add_argument(
+        "--type", dest="rule_type", required=True, choices=["daily", "weekly", "monthly", "n_days", "once"]
+    )
     parser.add_argument("--time", dest="times", action="append", default=[], help="Local time (repeatable, HH:MM)")
-    parser.add_argument("--weekday", dest="weekdays", action="append", type=int, default=[], help="ISO weekday 1-7 (repeatable)")
-    parser.add_argument("--month-day", dest="month_days", action="append", type=int, default=[], help="Month day 1-31 (repeatable)")
+    parser.add_argument(
+        "--weekday", dest="weekdays", action="append", type=int, default=[], help="ISO weekday 1-7 (repeatable)"
+    )
+    parser.add_argument(
+        "--month-day", dest="month_days", action="append", type=int, default=[], help="Month day 1-31 (repeatable)"
+    )
     parser.add_argument("--missing-month-day", dest="missing_day_policy", choices=["skip", "last_day"], default="skip")
     parser.add_argument("--interval-days", type=int)
     parser.add_argument("--anchor-date")

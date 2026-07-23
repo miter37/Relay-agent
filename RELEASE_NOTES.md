@@ -1,3 +1,28 @@
+# Relay 0.9.0 release notes
+
+Relay 0.9.0 adds the G3 Schedule core for reliable daemon-managed recurring
+Jobs.
+
+## Added
+
+- Daily, weekly, monthly, every-N-days, and one-time schedules with IANA timezone and DST-aware occurrence calculation.
+- Schedule creation from completed replayable Jobs with immutable task and attachment snapshots.
+- Authenticated Schedule lifecycle API and `relay schedule` CLI commands for preview, control, manual runs, and history.
+- Atomic occurrence claims, overlap/missed-run policies, unique output directories, and normal Job-history linkage.
+- Schedule-specific retention for days, latest runs, and forever policies with safe ownership and symlink checks.
+
+## Compatibility
+
+- Scheduled work is represented as ordinary queued Jobs with `caller=schedule` and `submitted_via=schedule`.
+- Existing CLI, daemon, G2 GUI, Job history, and ordinary workspace cleanup remain available.
+- Schedule GUI creation and editing remain deferred to G4.
+
+## Verification
+
+The full test suite, Ruff checks, compileall, and release build pass locally.
+
+---
+
 # Relay 0.8.0 release notes
 
 Relay 0.8.0 adds the first GUI write and job-control workflow.
