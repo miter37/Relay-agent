@@ -78,6 +78,36 @@ When editing a file, **match the language already used in that file.** Do not
 translate existing documents as part of an unrelated PR — open a separate
 issue first if you believe a document should switch languages.
 
+## Releasing
+
+Releases are built by `.github/workflows/release.yml` and triggered by pushing
+a tag. Nothing is built or uploaded by hand.
+
+1. Bump the version in **`relay/__init__.py`** — this is the single source of
+   truth. `pyproject.toml` reads it.
+2. Rewrite `RELEASE_NOTES.md` for the new version. The first line must contain
+   the version number; the whole file becomes the release body.
+3. Commit, tag, and push:
+
+   ```sh
+   git add relay/__init__.py RELEASE_NOTES.md
+   git commit -m "chore: release v0.6.0"
+   git tag v0.6.0
+   git push origin master --tags
+   ```
+
+The workflow then verifies the tag matches `relay.__version__`, verifies
+`RELEASE_NOTES.md` is for that version, runs the test suite, builds
+`relay.pyz` with matching `SHA256SUMS.txt`, executes the built artifact, and
+publishes the release with both files attached.
+
+Any of those checks failing stops the run **before** the release is created,
+so a mislabelled or broken release cannot reach users.
+
+`relay.pyz` and `SHA256SUMS.txt` are never committed — GitHub Release assets
+are the only place they are published, and the only place `relay update`
+should fetch them from.
+
 ## Reporting Security Issues
 
 Do not open a public issue for a suspected vulnerability. See
