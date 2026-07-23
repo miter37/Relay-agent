@@ -3,6 +3,7 @@
   <p><strong>A reliable delegation broker for AI CLIs (Claude, Codex, Antigravity) on Windows, Linux, and macOS.</strong></p>
 
   <p>
+    <a href="https://github.com/miter37/Relay-agent/actions/workflows/ci.yml"><img src="https://github.com/miter37/Relay-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="https://github.com/miter37/Relay-agent/releases"><img src="https://img.shields.io/github/v/release/miter37/Relay-agent?style=flat-square" alt="Release"></a>
     <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg?style=flat-square" alt="Python"></a>
     <a href="https://github.com/miter37/Relay-agent/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>

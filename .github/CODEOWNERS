@@ -1,0 +1,9 @@
+# Every pull request is reviewed by the repository owner by default.
+*                               @miter37
+
+# Split these out per area once there are additional maintainers.
+# The security and process-control layers warrant especially careful review.
+# /relay/security.py            @miter37
+# /relay/process_supervisor.py  @miter37
+# /relay/adapters/              @miter37
+# /.github/workflows/           @miter37
