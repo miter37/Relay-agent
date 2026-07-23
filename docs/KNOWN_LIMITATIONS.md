@@ -2,7 +2,7 @@
 
 ## 1. 실제 벤더 CLI capability audit는 사용자 PC에서 수행해야 함
 
-제작 환경에는 로그인된 `claude`, `codex`, `agy`가 없었습니다. 따라서 어댑터 명령 템플릿은 2026-07-14 기준 공식 문서와 mock CLI 시험을 바탕으로 구현했지만, 사용자의 실제 설치 버전에 대해서는 다음 명령을 반드시 수행해야 합니다.
+어댑터 명령 템플릿은 2026-07-14 기준 공식 문서와 mock CLI 시험을 바탕으로 구현했습니다. 사용자의 실제 설치 버전에 대해서는 다음 명령을 반드시 수행해야 합니다.
 
 ```powershell
 relay doctor --worker claude --deep
@@ -12,14 +12,36 @@ relay doctor --worker antigravity --deep
 
 Relay는 버전별 deep doctor를 통과하지 않은 worker를 자동 작업에 사용하지 않습니다.
 
-## 2. Windows 실기 검증이 남아 있음
+### 실기 검증 기록 (2026-07-23, Windows 11)
 
-다음 기능은 코드와 PowerShell 스크립트가 포함되어 있으나 제작 환경이 Linux container이므로 실제 Windows 11, Linux, macOS에서 최종 검증되지 않았습니다.
+실제 벤더 CLI로 deep doctor를 수행한 결과입니다.
 
-- Windows Job Object를 이용한 전체 프로세스 트리 종료
+| Worker | 검증한 버전 | 결과 | probe 소요 |
+|---|---|---|---|
+| `claude` | 2.1.218 (Claude Code) | healthy | 18.6초 |
+| `codex` | codex-cli 0.144.3 | healthy | 61.6초 |
+| `antigravity` | 1.1.5 | healthy | 136.3초 |
+
+세 worker 모두 `unattended_ok`, `output_ok`, `artifact_ok`가 참이었습니다. 즉 사람의 개입 없이 완료되고, 스키마에 맞는 결과와 아티팩트를 생성했습니다.
+
+이 표는 **위 버전에 대한 기록**이지 보증이 아닙니다. CLI를 업그레이드하면 다시 수행해야 합니다.
+
+참고로 `codex`는 `--help`에 `--output-schema`가 노출되지 않아 `schema_hint`가 거짓이었으나 deep probe는 통과했습니다. help 출력은 참고용이고 deep probe가 최종 판단이라는 설계가 의도대로 동작한 사례입니다.
+
+## 2. 플랫폼별 검증 현황
+
+### 검증 완료
+
+- **자동 테스트 66개** — Windows, macOS, Linux × Python 3.11/3.12/3.13 총 9개 조합에서 통과 (GitHub Actions, 매 커밋마다 재검증)
+- **PowerShell 설치 스크립트 및 PATH 등록** — Windows 11에서 새 클론부터 설치·실행까지 확인
+- **세 벤더 CLI의 무인 실행·결과·아티팩트 계약** — 1절 검증 기록 참조 (Windows 11)
+
+### 아직 검증되지 않음
+
+- **Linux/macOS의 실제 벤더 CLI 동작** — CI는 mock CLI로만 수행합니다. 실기 검증은 Windows 11에서만 이루어졌습니다.
+- Windows Job Object를 이용한 **전체 프로세스 트리 종료** — 자식 프로세스를 만드는 작업으로 시험되지 않았습니다.
 - 전용 `RelayWorker` 계정 및 NTFS ACL
 - Windows Defender·회사 보안 솔루션과의 상호작용
-- PowerShell 설치 스크립트 및 PATH 등록
 - Claude/Codex/Antigravity가 생성하는 브라우저 helper 정리
 - 장시간 무출력 작업의 stall 기준
 

@@ -14,7 +14,7 @@
 
 > **Note on Guarantees**: Relay-agent validates the execution and delivery contract (result-file creation, encoding, schema, artifact paths, and process completion). It **does not** verify the factual accuracy or reasoning quality of the AI-generated content.
 
-> **Note on Cross-platform**: Cross-platform code paths are implemented, but provider-specific behavior must be validated on the target machine. Validate each worker you intend to use with `relay doctor --worker <worker> --deep`. You must run this command again if the underlying CLI is upgraded. Some Windows and macOS operational paths still require field validation.
+> **Note on Cross-platform**: The test suite runs on Windows, macOS, and Linux across Python 3.11–3.13 on every commit. All three providers have passed a deep audit against their real CLIs on Windows 11 — Claude Code 2.1.218, Codex CLI 0.144.3, and Antigravity 1.1.5 (see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md)). Real provider CLIs have **not** yet been field-validated on Linux or macOS, where CI exercises mocks only. Validate each worker you intend to use with `relay doctor --worker <worker> --deep`, and run it again whenever the underlying CLI is upgraded.
 
 ## 📑 Table of Contents
 - [✨ Key Features](#-key-features)
