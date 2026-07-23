@@ -33,6 +33,7 @@ DEFAULTS: dict[str, Any] = {
     "daemon_host": "127.0.0.1",
     "daemon_port": 47831,
     "daemon_auto_start": True,
+    "autostart_enabled": False,
     "result_max_bytes": 20 * 1024 * 1024,
     "artifact_max_total_bytes": 1024 * 1024 * 1024,
     "artifact_max_files": 200,

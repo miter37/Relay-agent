@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .api import get_agent, job_artifacts, job_detail, job_events, job_logs, job_result, list_agents, list_jobs
+from .autostart import AutoStartManager
 from .cleanup import CleanupManager
 from .compatibility import relay_home_id
 from .config import Config
@@ -222,6 +223,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/agents":
             self._json(HTTPStatus.OK, list_agents(self.daemon.engine))
             return
+        if path == "/v1/autostart":
+            self._json(HTTPStatus.OK, {"ok": True, "autostart": self.daemon.autostart_manager.status()})
+            return
         if path.startswith("/v1/agents/"):
             try:
                 self._json(HTTPStatus.OK, get_agent(self.daemon.engine, path[len("/v1/agents/") :]))
@@ -388,6 +392,17 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         path = urlsplit(self.path).path
+        if path == "/v1/autostart":
+            try:
+                payload = self._body()
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise RelayError("INVALID_REQUEST", "enabled must be a boolean")
+                value = self.daemon.autostart_manager.enable() if enabled else self.daemon.autostart_manager.disable()
+                self._json(HTTPStatus.OK, {"ok": True, "autostart": value})
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/schedules/"):
             try:
                 schedule_id = path[len("/v1/schedules/") :]
@@ -422,6 +437,7 @@ class RelayDaemon:
         self.db = Database(config.path_value("database_path"))
         self.engine = RelayEngine(config, self.db)
         self.schedule_service = ScheduleService(self.config, self.db, self.engine)
+        self.autostart_manager = AutoStartManager(self.config)
         self.schedule_runtime = ScheduleRuntime(self.config, self.db, self.engine)
         self.scheduler = Scheduler(self.engine)
         self.schedule_loop = ScheduleLoop(

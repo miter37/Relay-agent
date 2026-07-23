@@ -187,6 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"Relay {__version__}")
+    parser.add_argument("--home", help="Use this Relay Home directory")
     parser.add_argument("--gui", action="store_true", help="Open the optional read-only desktop GUI")
     sub = parser.add_subparsers(dest="command")
 
@@ -954,7 +955,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = _preprocess(list(sys.argv[1:] if argv is None else argv))
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = Config()
+    config = Config(Path(args.home) if getattr(args, "home", None) else None)
     config.init()
     if args.gui:
         try:
