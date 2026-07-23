@@ -47,6 +47,7 @@ COMMANDS = {
     "models",
     "model-check",
     "add-agent",
+    "schedule",
 }
 
 
@@ -81,6 +82,80 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("--machine", action="store_true")
 
 
+def _add_schedule_rule_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--type", dest="rule_type", required=True, choices=["daily", "weekly", "monthly", "n_days", "once"])
+    parser.add_argument("--time", dest="times", action="append", default=[], help="Local time (repeatable, HH:MM)")
+    parser.add_argument("--weekday", dest="weekdays", action="append", type=int, default=[], help="ISO weekday 1-7 (repeatable)")
+    parser.add_argument("--month-day", dest="month_days", action="append", type=int, default=[], help="Month day 1-31 (repeatable)")
+    parser.add_argument("--missing-month-day", dest="missing_day_policy", choices=["skip", "last_day"], default="skip")
+    parser.add_argument("--interval-days", type=int)
+    parser.add_argument("--anchor-date")
+    parser.add_argument("--run-at-local")
+    parser.add_argument("--timezone", default="UTC", help="IANA timezone (default: UTC)")
+
+
+def _add_schedule_machine_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--machine", action="store_true", help="Emit single-line JSON output")
+
+
+def _add_schedule_policy_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--overlap-policy", choices=["skip", "queue"], default="skip")
+    parser.add_argument("--missed-policy", choices=["skip", "catch_up"], default="skip")
+    parser.add_argument("--missed-grace-seconds", type=int, default=43200)
+    parser.add_argument("--start", "--starts-at-utc", dest="starts_at_utc")
+    parser.add_argument("--end", "--ends-at-utc", dest="ends_at_utc")
+    parser.add_argument("--output-root")
+    parser.add_argument("--retention-mode", choices=["days", "latest_runs", "forever"])
+    parser.add_argument("--retention-value", type=int)
+
+
+def _add_schedule_parsers(sub: argparse._SubParsersAction) -> None:
+    schedule = sub.add_parser(
+        "schedule",
+        help="Create and control daemon-managed schedules",
+        description=(
+            "Register a replayable completed Job as a timezone-aware Schedule, preview occurrences, "
+            "and control its lifecycle. Schedule execution is performed by the local daemon."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay schedule create --from-job JOB_ID --name report --type daily --time 09:00 --timezone Asia/Seoul\n"
+            "  relay schedule preview --type weekly --weekday 1 --time 09:00 --timezone Asia/Seoul\n"
+            "  relay schedule run-now SCHEDULE_ID"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
+
+    create = schedule_sub.add_parser("create", help="Create a Schedule from a completed replayable Job")
+    create.add_argument("--from-job", dest="source_job_id", required=True)
+    create.add_argument("--name", required=True)
+    _add_schedule_rule_args(create)
+    _add_schedule_policy_args(create)
+    _add_schedule_machine_arg(create)
+
+    preview = schedule_sub.add_parser("preview", help="Preview the next Schedule occurrences")
+    _add_schedule_rule_args(preview)
+    preview.add_argument("--limit", type=int, default=5)
+    preview.add_argument("--after-utc")
+    _add_schedule_machine_arg(preview)
+
+    list_parser = schedule_sub.add_parser("list", help="List active Schedules")
+    _add_schedule_machine_arg(list_parser)
+
+    for name, help_text in (
+        ("show", "Show one Schedule"),
+        ("runs", "List Schedule run history"),
+        ("pause", "Pause a Schedule"),
+        ("resume", "Resume a Schedule"),
+        ("run-now", "Queue a manual Schedule run"),
+        ("delete", "Soft-delete a Schedule"),
+    ):
+        action = schedule_sub.add_parser(name, help=help_text)
+        action.add_argument("schedule_id")
+        _add_schedule_machine_arg(action)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",
@@ -99,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Common commands:\n"
             "  run, submit, status, wait, result, cancel, rerun\n"
             "  doctor, config, security, cleanup, daemon\n"
+            "  schedule      Create and control daemon-managed schedules\n"
             "  add-agent      Register a new external AI CLI as a worker\n"
             "  models, model-check, history, logs, version, init"
         ),
@@ -415,6 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit single-line JSON output (default: pretty-printed).",
     )
 
+    _add_schedule_parsers(sub)
     sub.add_parser("version", help="Print the local Relay version")
     return parser
 
@@ -441,6 +518,74 @@ def _request_from_args(args, config: Config) -> JobRequest:
         force_new=args.force_new,
         model=args.model,
     )
+
+
+def _schedule_rule_from_args(args) -> dict[str, Any]:
+    rule: dict[str, Any] = {
+        "type": args.rule_type,
+        "timezone": args.timezone,
+    }
+    if args.rule_type != "once":
+        rule["times"] = list(args.times)
+    if args.rule_type == "weekly":
+        rule["weekdays"] = list(args.weekdays)
+    elif args.rule_type == "monthly":
+        rule["month_days"] = list(args.month_days)
+        rule["missing_day_policy"] = args.missing_day_policy
+    elif args.rule_type == "n_days":
+        rule["interval_days"] = args.interval_days
+        rule["anchor_date"] = args.anchor_date
+    elif args.rule_type == "once":
+        rule["run_at_local"] = args.run_at_local
+    return rule
+
+
+def _schedule_create_payload(args) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": args.name,
+        "rule": _schedule_rule_from_args(args),
+        "overlap_policy": args.overlap_policy,
+        "missed_policy": args.missed_policy,
+        "missed_grace_seconds": args.missed_grace_seconds,
+    }
+    for key in ("starts_at_utc", "ends_at_utc", "output_root"):
+        value = getattr(args, key, None)
+        if value is not None:
+            payload[key] = value
+    if args.retention_mode:
+        retention: dict[str, Any] = {"mode": args.retention_mode}
+        if args.retention_value is not None:
+            retention["value"] = args.retention_value
+        payload["retention"] = retention
+    return payload
+
+
+def _schedule_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    command = args.schedule_command
+    if command == "create":
+        return client.request("POST", f"/v1/schedules/from-job/{args.source_job_id}", _schedule_create_payload(args))
+    if command == "preview":
+        return client.request(
+            "POST",
+            "/v1/schedules/preview",
+            {
+                "rule": _schedule_rule_from_args(args),
+                "limit": args.limit,
+                "after_utc": args.after_utc,
+            },
+        )
+    if command == "list":
+        return client.request("GET", "/v1/schedules")
+    if command == "show":
+        return client.request("GET", f"/v1/schedules/{args.schedule_id}")
+    if command == "runs":
+        return client.request("GET", f"/v1/schedules/{args.schedule_id}/runs")
+    if command in {"pause", "resume", "run-now"}:
+        return client.request("POST", f"/v1/schedules/{args.schedule_id}/{command}")
+    if command == "delete":
+        return client.request("DELETE", f"/v1/schedules/{args.schedule_id}")
+    raise RelayError("INVALID_REQUEST", f"Unknown schedule command: {command}")
 
 
 _DEFAULT_AGENT_COMMAND_TEMPLATE = "{cli} exec --prompt {request_file} --output {result_file}"
@@ -913,6 +1058,8 @@ def main(argv: list[str] | None = None) -> int:
                 _emit({"ok": True, **manager.status()}, machine)
             else:
                 _emit(manager.run(override_days=args.days, dry_run=args.dry_run), machine)
+        elif args.command == "schedule":
+            _emit(_schedule_cli_request(args, config), machine)
         elif args.command == "daemon":
             if args.daemon_command == "serve":
                 RelayDaemon(config).serve()
