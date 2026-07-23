@@ -1,0 +1,338 @@
+# Relay-agent: Self-Update, Uninstall, and CLI Help Hardening
+
+**Status:** Draft (awaiting user review)
+**Date:** 2026-07-23
+**Scope:** CLI commands `relay update`, `relay uninstall`, `relay version-check`, and `--help` content overhaul (English).
+
+---
+
+## 1. Problem Statement
+
+Relay-agent currently has no way to:
+
+1. **Upgrade** an installed Relay-agent without manually re-running the install script.
+2. **Uninstall** from the CLI. The existing `scripts/uninstall_*.ps1|sh` scripts exist, but they are not exposed as a `relay` command and differ slightly between Windows and Unix.
+3. **Check for the latest release**. `relay version` only prints the locally compiled `__version__`.
+
+In addition, the CLI's `--help` output is sparse: most subcommands have only a one-line `help=`, the shared `_add_request_args` registers options with no `help=` text at all, and there are no usage examples. Operators cannot discover capabilities from `--help` alone.
+
+This spec addresses both gaps with:
+
+- Three new top-level CLI commands: `relay update`, `relay uninstall`, `relay version-check`.
+- A new `relay/installer.py` module that encapsulates detection, download, verification, replacement, rollback, and removal.
+- Installer scripts that export `RELAY_BIN_DIR` so the new commands can find the active install.
+- An overhaul of `--help` text in English (descriptions, examples, option help).
+
+---
+
+## 2. Goals and Non-Goals
+
+### Goals
+
+- A user running `relay update` upgrades the installed `relay.pyz` to the latest GitHub release, with checksum verification, atomic replacement, and automatic rollback on failure.
+- A user running `relay uninstall` removes the install (default: keep `RELAY_HOME`; `--purge` to remove `RELAY_HOME` too).
+- A user running `relay version-check` sees whether a newer release exists, without downloading anything.
+- All three commands work without GitHub authentication (public API only).
+- All three commands degrade gracefully when offline (`--offline` flag, clear error codes otherwise).
+- `relay --help` and `relay <subcommand> --help` are written in English, contain a `description` (2–4 sentences), and an `epilog` with `Examples:` (2–5 commands per subcommand).
+- All options registered by `_add_request_args` get a one-or-two-sentence `help=` string in English, with default values noted.
+- New commands and `--help` improvements ship with unit tests.
+
+### Non-Goals
+
+- GitHub Actions release workflows (separate spec).
+- Background auto-update (user must invoke `relay update`).
+- Downgrade support (semver compare blocks `>=`).
+- Multi-install tracking.
+- Native packaging (`.exe`, `.msi`, `.dmg`).
+- Localization of `--help`. Korean usage docs stay in `skills/hermes-relay/SKILL.md` and `manual.md`.
+
+---
+
+## 3. CLI Surface
+
+### 3.1 New Top-Level Commands
+
+| Command | Purpose |
+|---|---|
+| `relay update` | Check GitHub `releases/latest`, download `relay.pyz` and `SHA256SUMS.txt`, verify, back up, and replace the installed `relay.pyz`. Optional `--check` only compares without downloading. |
+| `relay uninstall` | Stop the daemon, remove the install directory contents, optionally purge `RELAY_HOME` with `--purge`. |
+| `relay version-check` | Compare local `__version__` to GitHub `releases/latest` tag; no download, no replace. |
+
+### 3.2 Common Options
+
+All three accept:
+
+- `--json` / `--machine` — machine-readable single-line JSON output (consistent with existing commands).
+- `--offline` — skip network calls entirely.
+- `--yes` — auto-confirm prompts (updates and uninstall).
+
+### 3.3 Existing `relay version`
+
+Unchanged. Still prints the local `__version__` as JSON.
+
+### 3.4 `--help` Overhaul
+
+- Top-level `argparse.ArgumentParser` uses `description=` (2–3 sentences) and `epilog=` (Quick start + Common commands examples), with `formatter_class=argparse.RawDescriptionHelpFormatter`.
+- Every existing subcommand gets `description=` and `epilog=` with English `Examples:` blocks. Subcommands: `run`, `submit`, `status`, `result`, `show`, `logs`, `cancel`, `rerun`, `wait`, `history`, `doctor`, `config`, `cleanup`, `daemon`, `init`, `security`, `models`, `model-check`, `version`.
+- New subcommands `update`, `uninstall`, `version-check` follow the same pattern.
+- `config` and `daemon` subparsers (`show`, `set`, `enable-worker`, `disable-worker`, `serve`, `start`, `stop`, `status`) each get their own `description=` and `epilog=`.
+- `_add_request_args` adds `help=` to every option:
+  - `--worker`, `--fallback` / `--no-fallback`, `--format`, `--out`, `--artifacts`, `--profile`, `--timeout`, `--caller`, `--request-id`, `--attach`, `--workspace`, `--overwrite`, `--force-new`, `--model`, `--machine`.
+
+### 3.5 Help Text Conventions
+
+- English only.
+- Sentence case, terminal punctuation included.
+- Default values shown as `"(default: ...)"`.
+- `--caller` help text mentions legacy `hermes` / `openclaw` normalization to `service`.
+- Examples use shell prompt-omitted command lines only.
+
+---
+
+## 4. Installer Module (`relay/installer.py`)
+
+New module. Single file, pure functions, no side effects on import.
+
+### 4.1 Public Functions
+
+```python
+def detect_install_location() -> Path | None
+def current_version() -> str
+def fetch_latest_release(repo: str, api_base: str, timeout: float) -> ReleaseInfo
+def download_asset(url: str, dest: Path, timeout: float) -> Path
+def verify_checksum(file: Path, sha256_sums_text: str, asset_name: str) -> None
+def replace_pyz(target: Path, new_file: Path, backup_path: Path) -> None
+# backup_path is always provided by the caller; the function overwrites any
+# existing backup file at that path before performing the atomic replace.
+def rollback_pyz(target: Path, backup_path: Path) -> None
+def remove_install(bin_dir: Path, *, purge_home: bool, home: Path | None) -> None
+```
+
+### 4.2 `ReleaseInfo` Dataclass
+
+```python
+@dataclass(frozen=True)
+class ReleaseInfo:
+    tag_name: str
+    version: str
+    pyz_url: str
+    sha256_url: str
+    published_at: str
+    prerelease: bool
+```
+
+### 4.3 `detect_install_location` Priority
+
+1. `os.environ["RELAY_BIN_DIR"]` if set and the directory exists.
+2. OS default:
+   - Windows: `Path(os.environ["LOCALAPPDATA"]) / "Relay" / "bin"`
+   - macOS / Linux: `Path.home() / ".local" / "bin"`
+3. Infer from `sys.argv[0]` if it ends with `.pyz`.
+4. Else `None` (caller raises `UPDATE_NOT_INSTALLED`).
+
+### 4.4 Network Access
+
+- Uses `urllib.request` (stdlib only). No third-party HTTP client.
+- Default timeout: 30 seconds, configurable via `update.download_timeout_seconds`.
+- No authentication headers. Public GitHub API only.
+- User-Agent header set to `Relay-agent/<version>`.
+
+### 4.5 Version Comparison
+
+- Local semver: parse `__version__` with a small in-tree function (no `packaging` dep).
+- Strict `PEP 440` not required; supports `MAJOR.MINOR.PATCH` plus optional `-rcN` / `-devN`.
+- Compare tuples; `release > prerelease`.
+
+### 4.6 Error Codes
+
+| Code | When |
+|---|---|
+| `UPDATE_NOT_INSTALLED` | `detect_install_location` returns `None`. |
+| `UPDATE_NETWORK_ERROR` | API call or download fails (timeout, DNS, non-2xx). |
+| `UPDATE_CHECKSUM_MISMATCH` | Downloaded file hash does not match `SHA256SUMS.txt`. |
+| `UPDATE_ALREADY_UP_TO_DATE` | Local version `>=` latest release. |
+| `UPDATE_IO_ERROR` | File replace or backup fails (permissions, disk). |
+| `UPDATE_POST_VERIFY_FAILED` | `relay version` after replace returns wrong version. |
+| `UPDATE_ROLLBACK_FAILED` | Backup restore itself fails. |
+| `UNINSTALL_NOT_INSTALLED` | `detect_install_location` returns `None`. |
+
+### 4.7 Atomic Replace
+
+- Use `os.replace(temp, target)` on POSIX and Windows.
+- The backup file is created by copying the existing `relay.pyz` to `relay.pyz.bak` before the replace. If `.bak` already exists, it is overwritten.
+
+### 4.8 Post-Verify
+
+After `replace_pyz`:
+
+1. Run `subprocess.run([sys.executable, str(target), "version", "--machine"], capture_output=True, text=True, timeout=10)`.
+2. Parse the JSON; expect `version == info.version`.
+3. On mismatch, call `rollback_pyz` and raise `UPDATE_POST_VERIFY_FAILED`.
+
+### 4.9 Rollback
+
+- `update --rollback` flag: if `relay.pyz.bak` exists in `bin_dir`, restore it (move `.bak` → `relay.pyz`) and exit 0. Otherwise raise `UPDATE_ROLLBACK_FAILED`.
+
+### 4.10 Uninstall Semantics
+
+| Flag | Behavior |
+|---|---|
+| (default) | Stop daemon (best-effort), prompt to confirm, remove `relay.pyz`, `relay.cmd`/`relay.ps1`/`relay` launcher inside `bin_dir`. Keep `RELAY_HOME`. |
+| `--purge` | All of the above, plus prompt again then remove `RELAY_HOME`. |
+| `--yes` | Skip both prompts. |
+
+If `bin_dir` contains other files (Unix case), only files named `relay.pyz`, `relay`, `relay.cmd`, `relay.ps1` are removed.
+
+---
+
+## 5. Configuration Additions
+
+`relay/config.py` `DEFAULTS` gains:
+
+```python
+"update": {
+    "repository": "doyoonkim/Relay-agent",
+    "api_base": "https://api.github.com",
+    "download_timeout_seconds": 30,
+}
+```
+
+Environment override: `RELAY_UPDATE_REPOSITORY` (string), applied at call time inside `cli.py` handlers, not in `Config`.
+
+---
+
+## 6. Installer Script Changes
+
+### 6.1 `scripts/install_windows.ps1`
+
+After copying `relay.pyz`:
+
+```powershell
+[Environment]::SetEnvironmentVariable("RELAY_BIN_DIR", $InstallDir, "User")
+$env:RELAY_BIN_DIR = $InstallDir
+```
+
+### 6.2 `scripts/install_unix.sh`
+
+After copying `relay.pyz`:
+
+```sh
+export RELAY_BIN_DIR="$INSTALL_DIR"
+PROFILE="$HOME/.zshrc"
+case ":$SHELL:" in
+  *bash*) PROFILE="$HOME/.bashrc" ;;
+esac
+if ! grep -q '^export RELAY_BIN_DIR=' "$PROFILE" 2>/dev/null; then
+  printf '\n# Relay-agent install location\nexport RELAY_BIN_DIR="%s"\n' "$INSTALL_DIR" >> "$PROFILE"
+fi
+```
+
+### 6.3 `scripts/uninstall_windows.ps1`
+
+Remove the user-level `RELAY_BIN_DIR` env var if it equals the install dir.
+
+### 6.4 `scripts/uninstall_unix.sh`
+
+Remove the matching `export RELAY_BIN_DIR=...` line from the profile if present.
+
+---
+
+## 7. Documentation Changes
+
+| File | Change |
+|---|---|
+| `README.md` | After the install section, add a `## Updating and Uninstalling` section (English). Document `relay update`, `relay version-check`, `relay uninstall`. Note `--offline`, `--yes`, `--purge`, `--check`. |
+| `docs/CROSS_PLATFORM.md` | Add a `## Self-update` section explaining `RELAY_BIN_DIR`, default paths, and command behavior. |
+| `docs/KNOWN_LIMITATIONS.md` | Under "Limitations", add: "Self-update applies to pyz installs only. Source-tree and `pip`-style installs must upgrade manually." |
+| `docs/TEST_REPORT.md` | Add a subsection "Installer module tests" summarizing `test_installer.py` results. |
+| `RELEASE_NOTES.md` | Next release: "Added `relay update`, `relay uninstall`, `relay version-check`; `--help` text overhauled in English." |
+| `.github/ISSUE_TEMPLATE/bug_report.md` | Add `Install method` field (script / self-update / source). |
+
+No changes to `manual.md` or `skills/hermes-relay/SKILL.md` (Korean operator docs preserved).
+
+---
+
+## 8. Testing
+
+### 8.1 New Test File
+
+`tests/test_installer.py` — `unittest.TestCase` style consistent with `tests/test_relay.py`.
+
+| Test | Purpose |
+|---|---|
+| `test_detect_install_location_from_env` | `RELAY_BIN_DIR` wins. |
+| `test_detect_install_location_fallback_to_default` | OS default used when env unset. |
+| `test_detect_install_location_returns_none_for_unknown` | None when neither env nor default available. |
+| `test_fetch_latest_release_parses_assets` | Mocked GitHub JSON → correct `pyz_url`, `sha256_url`. |
+| `test_fetch_latest_release_handles_prerelease` | `prerelease` flag preserved. |
+| `test_verify_checksum_accepts_matching` | Real SHA-256 match passes. |
+| `test_verify_checksum_rejects_mismatch` | Mismatch raises `UPDATE_CHECKSUM_MISMATCH`. |
+| `test_replace_pyz_creates_backup_and_replaces` | Backup file exists, target is new content. |
+| `test_replace_pyz_overwrites_existing_backup` | Old `.bak` overwritten. |
+| `test_rollback_restores_from_backup` | `.bak` → `relay.pyz` move works. |
+| `test_rollback_without_backup_raises` | `UPDATE_ROLLBACK_FAILED`. |
+| `test_update_already_up_to_date_short_circuits` | Local `>=` remote → no download. |
+| `test_update_offline_skips_network` | `urlopen` not called. |
+| `test_update_check_only_does_not_download` | `--check` → asset download skipped. |
+| `test_update_replaces_and_post_verifies` | End-to-end happy path with mocked network and `subprocess.run`. |
+| `test_update_rollback_on_post_verify_failure` | Mock subprocess returning wrong version → rollback. |
+| `test_uninstall_keeps_home_by_default` | Default → `RELAY_HOME` not removed. |
+| `test_uninstall_purge_removes_home` | `--purge` → both removed. |
+| `test_uninstall_removes_only_relay_files_in_mixed_dir` | Other files in `bin_dir` survive. |
+
+### 8.2 CLI Help Tests
+
+In `tests/test_installer.py`:
+
+| Test | Purpose |
+|---|---|
+| `test_top_level_help_contains_examples` | `relay --help` text contains `Examples:`. |
+| `test_run_help_contains_examples_and_caller_help` | `relay run --help` mentions `Examples:` and `--caller`. |
+| `test_all_subcommands_have_nonempty_description` | Iterate `COMMANDS` and check each. |
+| `test_request_arg_options_have_help` | Construct parser, inspect action help strings, assert non-empty. |
+| `test_update_help_describes_behavior` | `relay update --help` contains key sentences. |
+
+### 8.3 Network Mocking
+
+- Patch `urllib.request.urlopen` via `unittest.mock.patch`.
+- Provide a fake context manager that returns a `BytesIO` of a known JSON or zip payload.
+- For post-verify tests, patch `subprocess.run` to return a fake `CompletedProcess`.
+
+### 8.4 No Live Network
+
+CI / local tests never hit `api.github.com`. Verified via `assert_called` on the mock.
+
+---
+
+## 9. Risks and Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Network failure mid-download leaves temp files | `tempfile.TemporaryDirectory()` context manager auto-cleans on exit. |
+| Replace succeeds but the new binary is broken | Post-verify (`relay version`) and automatic rollback to `.bak`. |
+| `.bak` is itself corrupt | `update --rollback` falls back to "re-run installer manually" message. |
+| `RELAY_BIN_DIR` set to wrong path | `detect_install_location` validates the directory exists before returning. |
+| GitHub API rate limit (60/hr unauthenticated) | Use `If-None-Match` header for `version-check` (ETag caching); clear `UPDATE_NETWORK_ERROR` message for `update` if hit. |
+| macOS `~/.local/bin` not in PATH | Document in `relay uninstall` epilog; do not auto-fix. |
+| Windows file lock on `relay.pyz` while running | Document in help: "Close other Relay processes first if update fails with IO error." |
+
+---
+
+## 10. Rollout
+
+1. Implement `relay/installer.py`.
+2. Wire `update`, `uninstall`, `version-check` commands in `cli.py`.
+3. Overhaul `--help` descriptions and `_add_request_args` option help.
+4. Update install/uninstall scripts for `RELAY_BIN_DIR`.
+5. Update README and docs.
+6. Add tests.
+7. Run full test suite.
+8. Rebuild `relay.pyz` (handled by `build_release.py`).
+9. Tag next release; the new commands become usable on first install.
+
+---
+
+## 11. Open Questions
+
+None at draft time. Awaiting user review.
