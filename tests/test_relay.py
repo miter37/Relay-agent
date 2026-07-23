@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +29,16 @@ PACKAGE = Path(__file__).resolve().parents[1]
 MOCKS = PACKAGE / "mocks"
 
 
+def mock_cli(name: str) -> str:
+    """Path to a bundled mock CLI.
+
+    The mocks ship twice: as POSIX shell scripts (``mocks/claude``) and as
+    Windows batch wrappers (``mocks/claude.cmd``). Windows cannot execute a
+    ``#!`` script, so pick the wrapper there.
+    """
+    return str(MOCKS / (f"{name}.cmd" if os.name == "nt" else name))
+
+
 class RelayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -38,11 +49,15 @@ class RelayTests(unittest.TestCase):
         for key in list(os.environ):
             if key.startswith("RELAY_MOCK_"):
                 os.environ.pop(key)
+        # The Windows wrappers run the mock under this interpreter, so the
+        # subprocess always matches the Python running the tests. Deliberately
+        # not named RELAY_MOCK_* -- that prefix is cleared just above.
+        os.environ["RELAY_TEST_PYTHON"] = sys.executable
         self.config = Config(self.home)
         self.config.init(force=True)
-        self.config.set("workers.claude.command", str(MOCKS / "claude"))
-        self.config.set("workers.codex.command", str(MOCKS / "codex"))
-        self.config.set("workers.antigravity.command", str(MOCKS / "agy"))
+        self.config.set("workers.claude.command", mock_cli("claude"))
+        self.config.set("workers.codex.command", mock_cli("codex"))
+        self.config.set("workers.antigravity.command", mock_cli("agy"))
         self.config.set("soft_stall_seconds", 2)
         self.config.set("hard_stall_seconds", 4)
         self.config.set("timeout_seconds", 10)
@@ -175,7 +190,7 @@ class RelayTests(unittest.TestCase):
         from relay.adapters.codex import CodexAdapter
 
         worker_config = self.config.worker("codex")
-        worker_config["command"] = str(MOCKS / "codex")
+        worker_config["command"] = mock_cli("codex")
         adapter = CodexAdapter(worker_config, self.config.path_value("adapter_spec_root"))
         workspace = self.home / "workspace" / "codex-command"
         workspace.mkdir(parents=True)
@@ -204,7 +219,7 @@ class RelayTests(unittest.TestCase):
         from relay.request_builder import STANDARD_JSON_SCHEMA
 
         worker_config = self.config.worker("claude")
-        worker_config["command"] = str(MOCKS / "claude")
+        worker_config["command"] = mock_cli("claude")
         adapter = ClaudeAdapter(worker_config, self.config.path_value("adapter_spec_root"))
         workspace = self.home / "workspace" / "claude-command"
         workspace.mkdir(parents=True)
