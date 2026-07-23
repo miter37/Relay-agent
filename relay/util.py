@@ -8,16 +8,16 @@ import secrets
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
-
+from typing import Any
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def local_date() -> str:
@@ -61,10 +61,12 @@ def task_hash(task: str, attachments: Iterable[str], profile: str, worker: str, 
     }
     for item in attachments:
         p = Path(item)
-        payload["attachments"].append({
-            "name": p.name,
-            "sha256": sha256_file(p) if p.is_file() else None,
-        })
+        payload["attachments"].append(
+            {
+                "name": p.name,
+                "sha256": sha256_file(p) if p.is_file() else None,
+            }
+        )
     return sha256_bytes(canonical_json(payload).encode("utf-8"))
 
 

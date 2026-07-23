@@ -85,6 +85,21 @@ Do not open a public issue for a suspected vulnerability. See
 
 ## Code Style
 
+Formatting and linting are enforced by [ruff](https://docs.astral.sh/ruff/).
+Before submitting a PR:
+
+```sh
+pip install ruff
+ruff format .
+ruff check . --fix
+```
+
+CI rejects PRs that fail `ruff format --check` or `ruff check`.
+
+Ruff is a development tool only — Relay-agent itself has zero runtime
+dependencies, and we intend to keep it that way.
+
+Beyond what the tools enforce:
+
 - Keep code simple and explicit.
-- Follow PEP 8 guidelines where possible.
 - Avoid introducing heavy third-party dependencies; Relay-agent aims to use the Python standard library as much as possible.

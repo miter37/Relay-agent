@@ -4,12 +4,10 @@ import json
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 from .config import Config
 from .errors import RelayError
-from .util import json_load
 
 
 class RPCClient:

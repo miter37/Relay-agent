@@ -8,12 +8,9 @@ from typing import Any
 from ..errors import RelayError
 from .base import Adapter, AdapterContext
 
-
 BUILTIN_WORKERS = frozenset({"claude", "codex", "antigravity"})
 
-KNOWN_PLACEHOLDERS = frozenset(
-    {"cli", "request_file", "result_file", "artifact_dir", "model"}
-)
+KNOWN_PLACEHOLDERS = frozenset({"cli", "request_file", "result_file", "artifact_dir", "model"})
 
 _PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 _WORKER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -23,8 +20,7 @@ def validate_worker_id(worker_id: str) -> None:
     if not worker_id or not _WORKER_ID_PATTERN.match(worker_id):
         raise RelayError(
             "AGENT_INVALID_NAME",
-            "Worker ID must start with a lowercase letter and contain only lowercase "
-            "letters, digits, '_' or '-'.",
+            "Worker ID must start with a lowercase letter and contain only lowercase letters, digits, '_' or '-'.",
         )
     if worker_id in BUILTIN_WORKERS:
         raise RelayError(
@@ -109,9 +105,7 @@ class GenericCLIAdapter(Adapter):
     def sandbox_mode(self) -> str:
         return "external-workspace"
 
-    def build_command(
-        self, ctx: AdapterContext
-    ) -> tuple[list[str], bytes | None, dict[str, str]]:
+    def build_command(self, ctx: AdapterContext) -> tuple[list[str], bytes | None, dict[str, str]]:
         executable = self.executable()
         if not executable:
             raise RelayError(

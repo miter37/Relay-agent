@@ -4,7 +4,7 @@ import os
 import shutil
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +12,7 @@ from .config import Config
 from .db import Database
 from .util import json_dump, json_load, safe_resolve, utc_now
 
-_ACTIVE_STATUSES = {
-    "CREATED", "QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING", "CANCEL_REQUESTED"
-}
+_ACTIVE_STATUSES = {"CREATED", "QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING", "CANCEL_REQUESTED"}
 _FINAL_STATUS_KEYS = {
     "COMPLETED": "retention_days_completed",
     "PARTIAL": "retention_days_partial",
@@ -95,8 +93,8 @@ class CleanupManager:
         try:
             parsed = datetime.fromisoformat(value)
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
         except (TypeError, ValueError):
             return None
 
@@ -150,7 +148,7 @@ class CleanupManager:
                     if not child.is_dir() or child.name in known:
                         continue
                     try:
-                        modified = datetime.fromtimestamp(child.stat().st_mtime, timezone.utc)
+                        modified = datetime.fromtimestamp(child.stat().st_mtime, UTC)
                     except OSError:
                         continue
                     if modified > cutoff:
@@ -175,7 +173,7 @@ class CleanupManager:
                 self._release_lock()
 
     def _run_locked(self, *, override_days: int | None = None, dry_run: bool = False) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         report = CleanupReport(started_at=utc_now(), dry_run=dry_run, override_days=override_days)
         remove_empty = bool(self.config.get("cleanup_remove_empty_parents", True))
 
@@ -226,7 +224,7 @@ class CleanupManager:
         last = self._parse_time(state.get("last_run"))
         if last is None:
             return bool(self.config.get("cleanup_run_on_daemon_start", True))
-        return datetime.now(timezone.utc) >= last + timedelta(hours=interval_hours)
+        return datetime.now(UTC) >= last + timedelta(hours=interval_hours)
 
     def status(self) -> dict[str, Any]:
         state = json_load(self.state_path, {}) or {}

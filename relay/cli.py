@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .adapters import get_adapter
 from .adapters.generic import (
-    KNOWN_PLACEHOLDERS,
     validate_command_template,
     validate_worker_id,
 )
@@ -26,13 +24,29 @@ from .errors import RelayError
 from .models import JobRequest
 from .rpc import RPCClient
 from .security import security_posture
-from .util import entrypoint_command, json_load, safe_resolve, utc_now
-
+from .util import entrypoint_command, utc_now
 
 COMMANDS = {
-    "run", "submit", "status", "wait", "result", "show", "logs", "cancel", "history", "rerun",
-    "doctor", "config", "cleanup", "daemon", "version", "init", "security", "models", "model-check",
-    "add-agent"
+    "run",
+    "submit",
+    "status",
+    "wait",
+    "result",
+    "show",
+    "logs",
+    "cancel",
+    "history",
+    "rerun",
+    "doctor",
+    "config",
+    "cleanup",
+    "daemon",
+    "version",
+    "init",
+    "security",
+    "models",
+    "model-check",
+    "add-agent",
 }
 
 
@@ -78,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Quick start:\n"
             "  relay init\n"
             "  relay doctor --deep --worker claude\n"
-            "  relay run \"Summarize today's AI headlines\"\n"
+            '  relay run "Summarize today\'s AI headlines"\n'
             "\n"
             "Common commands:\n"
             "  run, submit, status, wait, result, cancel, rerun\n"
@@ -103,10 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Examples:\n"
-            "  relay run \"Summarize today's AI headlines\"\n"
-            "  relay run --worker codex --no-fallback \"Convert CSV to JSON\"\n"
-            "  relay run --profile web-research --format json \"Research X\"\n"
-            "  relay run --request-id chat-42 --force-new \"Re-run identical request\""
+            '  relay run "Summarize today\'s AI headlines"\n'
+            '  relay run --worker codex --no-fallback "Convert CSV to JSON"\n'
+            '  relay run --profile web-research --format json "Research X"\n'
+            '  relay run --request-id chat-42 --force-new "Re-run identical request"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -123,9 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "Examples:\n"
-            "  relay submit \"Research OpenAI's latest announcements\"\n"
+            '  relay submit "Research OpenAI\'s latest announcements"\n'
             "  relay submit --worker claude --request-id msg-42 --machine\n"
-            "  relay submit --attach spec.pdf --out result.json \"Summarize spec\""
+            '  relay submit --attach spec.pdf --out result.json "Summarize spec"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -177,11 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
             "List recent jobs from the local database, optionally filtered by status. "
             "Use 'relay status <job_id>' or 'relay show <job_id>' for details on a specific job."
         ),
-        epilog=(
-            "Examples:\n"
-            "  relay history --limit 20\n"
-            "  relay history --status failed --machine"
-        ),
+        epilog=("Examples:\n  relay history --limit 20\n  relay history --status failed --machine"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     history.add_argument("--status")
@@ -197,11 +207,7 @@ def build_parser() -> argparse.ArgumentParser:
             "A deep audit additionally runs a sandboxed probe that must return a valid Relay result. "
             "Top-level ok=true only when every requested worker reaches status 'healthy'."
         ),
-        epilog=(
-            "Examples:\n"
-            "  relay doctor\n"
-            "  relay doctor --worker claude --deep"
-        ),
+        epilog=("Examples:\n  relay doctor\n  relay doctor --worker claude --deep"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     doctor.add_argument("--worker", choices=["claude", "codex", "antigravity"])
@@ -251,10 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
                 "currently installed CLI version (run 'relay doctor --deep --worker <name>' first). "
                 "Disabling simply clears the 'enabled' flag."
             ),
-            epilog=(
-                "Examples:\n"
-                f"  relay config {action} claude --machine"
-            ),
+            epilog=(f"Examples:\n  relay config {action} claude --machine"),
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
         p.add_argument("worker", choices=["claude", "codex", "antigravity"])
@@ -267,11 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Run a retention cleanup pass now, or inspect the configured policy and the last run. "
             "Without --dry-run this deletes eligible workspaces and staging directories immediately."
         ),
-        epilog=(
-            "Examples:\n"
-            "  relay cleanup --status\n"
-            "  relay cleanup --dry-run --days 7"
-        ),
+        epilog=("Examples:\n  relay cleanup --status\n  relay cleanup --dry-run --days 7"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     cleanup.add_argument("--days", type=int)
@@ -384,10 +383,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  RELAY_ADD_AGENT_DESCRIPTION    (optional)\n"
             "  RELAY_ADD_AGENT_EXTRA_ARGS     (optional, space-separated)\n"
             "  RELAY_ADD_AGENT_MAX_TURNS      (optional int)\n"
-            f"  RELAY_ADD_AGENT_TIMEOUT_SECONDS (optional int)\n"
-            f"\n"
-            f"Available placeholders in command_template:\n"
-            f"  {{cli}}, {{request_file}}, {{result_file}}, {{artifact_dir}}, {{model}}"
+            "  RELAY_ADD_AGENT_TIMEOUT_SECONDS (optional int)\n"
+            "\n"
+            "Available placeholders in command_template:\n"
+            "  {cli}, {request_file}, {result_file}, {artifact_dir}, {model}"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -462,9 +461,7 @@ def _ask_yes_no(prompt: str, default: bool = True) -> bool:
     return raw in {"y", "yes"}
 
 
-def _apply_agent_registration(
-    config: Config, *, worker_id: str, fields: dict[str, Any]
-) -> None:
+def _apply_agent_registration(config: Config, *, worker_id: str, fields: dict[str, Any]) -> None:
     validate_worker_id(worker_id)
     workers = config.data.setdefault("workers", {})
     if worker_id in workers:
@@ -497,7 +494,6 @@ def _run_health_check(
     *,
     deep: bool = True,
 ) -> dict[str, Any]:
-    adapter = get_adapter(worker_id, worker_config, config.path_value("adapter_spec_root"))
     try:
         audit = Doctor(config, db).audit([worker_id], deep=deep)
     except RelayError as err:
@@ -553,7 +549,7 @@ def _run_add_agent_wizard(
     yes_no_fn=_ask_yes_no,
 ) -> dict[str, Any]:
     print("Relay will register a new external AI CLI as a worker.")
-    print(f"Known placeholders: {{cli}}, {{request_file}}, {{result_file}}, {{artifact_dir}}, {{model}}")
+    print("Known placeholders: {cli}, {request_file}, {result_file}, {artifact_dir}, {model}")
     worker_id = prompt_fn("Worker ID (lowercase, e.g. 'opencode')", default=None)
     display_name = prompt_fn("Display name", default=worker_id.capitalize())
     command = prompt_fn("Executable path or name on PATH", default=worker_id)
@@ -630,7 +626,11 @@ def _collect_agent_fields_noninteractive(args) -> dict[str, Any]:
             fields["timeout_seconds"] = int(timeout_raw)
         except ValueError:
             pass
-    return {"worker_id": worker_id, "fields": fields, "skip_health_check": bool(getattr(args, "skip_health_check", False))}
+    return {
+        "worker_id": worker_id,
+        "fields": fields,
+        "skip_health_check": bool(getattr(args, "skip_health_check", False)),
+    }
 
 
 def _parse_bool(text: str, *, default: bool = False) -> bool:
@@ -679,7 +679,6 @@ def _run_add_agent(args, config: Config, db: Database) -> dict[str, Any]:
         "skipped_health_check": skip_health,
         "config_path": str(config.path),
     }
-
 
 
 def _emit(value: Any, machine: bool = False) -> None:
@@ -783,7 +782,9 @@ def _logs(engine: RelayEngine, job_id: str) -> dict:
     attempts = engine.db.attempts_for_job(job_id)
     result = []
     for attempt in attempts:
-        item = {k: attempt.get(k) for k in ("attempt_id", "worker", "status", "failure_code", "stdout_path", "stderr_path")}
+        item = {
+            k: attempt.get(k) for k in ("attempt_id", "worker", "status", "failure_code", "stdout_path", "stderr_path")
+        }
         for key in ("stdout_path", "stderr_path"):
             path = attempt.get(key)
             if path and Path(path).exists():
@@ -823,8 +824,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command in {"status", "result", "show"}:
             try:
                 client = RPCClient(config)
-                value = client.request("GET", f"/{args.command}/{args.job_id}") if client.health() else (
-                    engine.show(args.job_id) if args.command == "show" else engine.receipt(args.job_id)
+                value = (
+                    client.request("GET", f"/{args.command}/{args.job_id}")
+                    if client.health()
+                    else (engine.show(args.job_id) if args.command == "show" else engine.receipt(args.job_id))
                 )
             except RelayError:
                 value = engine.show(args.job_id) if args.command == "show" else engine.receipt(args.job_id)
@@ -889,39 +892,54 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(_start_daemon(config), machine)
             elif args.daemon_command == "status":
                 client = RPCClient(config)
-                _emit(client.request("GET", "/health") if client.health() else {"ok": False, "status": "stopped"}, machine)
+                _emit(
+                    client.request("GET", "/health") if client.health() else {"ok": False, "status": "stopped"}, machine
+                )
             elif args.daemon_command == "stop":
                 client = RPCClient(config)
-                _emit(client.request("POST", "/shutdown") if client.health() else {"ok": True, "status": "already_stopped"}, machine)
+                _emit(
+                    client.request("POST", "/shutdown")
+                    if client.health()
+                    else {"ok": True, "status": "already_stopped"},
+                    machine,
+                )
         elif args.command == "security":
             _emit({"ok": True, **security_posture(config)}, machine)
         elif args.command == "models":
             from .model_discovery import get_model_catalog
+
             workers = ["claude", "codex", "antigravity"] if args.worker == "all" else [args.worker]
             results = []
-            
+
             for w in workers:
                 try:
                     adapter = __import__("relay.adapters", fromlist=["get_adapter"]).get_adapter(
                         w, config.worker(w), config.path_value("adapter_spec_root")
                     )
-                    catalog = get_model_catalog(config, adapter, refresh=args.refresh, include_hidden=args.include_hidden, verify=args.verify)
+                    catalog = get_model_catalog(
+                        config, adapter, refresh=args.refresh, include_hidden=args.include_hidden, verify=args.verify
+                    )
                     results.append(catalog.to_dict())
                 except RelayError as err:
-                    results.append({
-                        "worker": w,
-                        "status": "error",
-                        "error_code": err.code,
-                        "error_message": err.message,
-                    })
+                    results.append(
+                        {
+                            "worker": w,
+                            "status": "error",
+                            "error_code": err.code,
+                            "error_message": err.message,
+                        }
+                    )
                 except Exception as exc:
-                    results.append({
-                        "worker": w,
-                        "status": "error",
-                        "error_message": str(exc),
-                    })
-                    
+                    results.append(
+                        {
+                            "worker": w,
+                            "status": "error",
+                            "error_message": str(exc),
+                        }
+                    )
+
             from .util import utc_now
+
             response = {
                 "schema_version": "1.0",
                 "generated_at": utc_now(),
@@ -935,17 +953,20 @@ def main(argv: list[str] | None = None) -> int:
                         continue
                     for m in w_data.get("models", []):
                         tags = []
-                        if m.get("availability"): tags.append(m["availability"])
-                        if m.get("is_default"): tags.append("default")
+                        if m.get("availability"):
+                            tags.append(m["availability"])
+                        if m.get("is_default"):
+                            tags.append("default")
                         tag_str = ", ".join(tags)
                         print(f"  {m.get('id'):<30} {tag_str}")
                     for w in w_data.get("warnings", []):
                         print(f"  Warning: {w}")
             else:
                 _emit(response, machine=True)
-                
+
         elif args.command == "model-check":
             from .model_discovery import probe_claude_model
+
             # for codex and antigravity, we check catalog. For claude we actually probe if requested.
             adapter = __import__("relay.adapters", fromlist=["get_adapter"]).get_adapter(
                 args.worker, config.worker(args.worker), config.path_value("adapter_spec_root")
@@ -960,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 # for others, check catalog
                 from .model_discovery import get_model_catalog
+
                 cat = get_model_catalog(config, adapter, refresh=False)
                 is_ok = any(m.id == args.model or m.selectable_name == args.model for m in cat.models)
 
@@ -969,7 +991,16 @@ def main(argv: list[str] | None = None) -> int:
             _emit(result, machine)
         return 0
     except RelayError as err:
-        _emit({"ok": False, "status": "failed", "error_code": err.code, "error_message": err.message, "details": err.details}, machine)
+        _emit(
+            {
+                "ok": False,
+                "status": "failed",
+                "error_code": err.code,
+                "error_message": err.message,
+                "details": err.details,
+            },
+            machine,
+        )
         return 2
     except KeyboardInterrupt:
         _emit({"ok": False, "status": "failed", "error_code": "CANCELLED", "error_message": "Interrupted"}, machine)

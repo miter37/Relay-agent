@@ -9,7 +9,6 @@ from typing import Any
 
 from .util import ensure_dir, safe_resolve
 
-
 DEFAULTS: dict[str, Any] = {
     "default_worker": "claude",
     "fallback_order": ["codex"],
@@ -181,8 +180,14 @@ class Config:
         if not self.path.exists() or force:
             self.path.write_text(_toml_dump(self.data), encoding="utf-8")
         for key in (
-            "result_root", "artifact_root", "workspace_root", "staging_root", "log_root",
-            "request_root", "adapter_spec_root", "runtime_root",
+            "result_root",
+            "artifact_root",
+            "workspace_root",
+            "staging_root",
+            "log_root",
+            "request_root",
+            "adapter_spec_root",
+            "runtime_root",
         ):
             ensure_dir(Path(self.data[key]))
         for root in self.data.get("allowed_input_roots", []):

@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 
 from .cleanup import CleanupManager
@@ -95,7 +92,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
     server_version = "RelayDaemon/0.5"
 
     @property
-    def daemon(self) -> "RelayDaemon":
+    def daemon(self) -> RelayDaemon:
         return self.server.relay_daemon  # type: ignore[attr-defined]
 
     def log_message(self, fmt: str, *args) -> None:
@@ -121,16 +118,19 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         if self.path == "/health":
-            self._json(200, {
-                "ok": True,
-                "status": "running",
-                "started_at": self.daemon.started_at,
-                "cleanup": self.daemon.maintenance.manager.status(),
-            })
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "status": "running",
+                    "started_at": self.daemon.started_at,
+                    "cleanup": self.daemon.maintenance.manager.status(),
+                },
+            )
             return
         for prefix, action in (("/status/", "status"), ("/result/", "result"), ("/show/", "show")):
             if self.path.startswith(prefix):
-                job_id = self.path[len(prefix):]
+                job_id = self.path[len(prefix) :]
                 try:
                     if action == "show":
                         value = self.daemon.engine.show(job_id)
@@ -154,7 +154,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             if self.path.startswith("/cancel/"):
                 job_id = self.path.split("/")[-1]
                 changed = self.daemon.engine.db.request_cancel(job_id)
-                self._json(200, {"ok": changed, "job_id": job_id, "status": "cancel_requested" if changed else "unchanged"})
+                self._json(
+                    200, {"ok": changed, "job_id": job_id, "status": "cancel_requested" if changed else "unchanged"}
+                )
                 return
             if self.path == "/shutdown":
                 self._json(200, {"ok": True, "status": "stopping"})
@@ -195,13 +197,16 @@ class RelayDaemon:
     def serve(self) -> None:
         recovered = self.db.recover_interrupted()
         self.pid_path.write_text(str(os.getpid()), encoding="ascii")
-        json_dump(self.info_path, {
-            "pid": os.getpid(),
-            "host": self.config.get("daemon_host"),
-            "port": self.config.get("daemon_port"),
-            "started_at": self.started_at,
-            "recovered_jobs": recovered,
-        })
+        json_dump(
+            self.info_path,
+            {
+                "pid": os.getpid(),
+                "host": self.config.get("daemon_host"),
+                "port": self.config.get("daemon_port"),
+                "started_at": self.started_at,
+                "recovered_jobs": recovered,
+            },
+        )
         self.scheduler.start()
         self.maintenance.start()
         try:

@@ -21,9 +21,8 @@ from relay.engine import RelayEngine
 from relay.errors import RelayError
 from relay.models import JobRequest
 from relay.rpc import RPCClient
-from relay.validation import materialize_artifact_payloads, validate_json_result
 from relay.util import entrypoint_command
-
+from relay.validation import materialize_artifact_payloads, validate_json_result
 
 PACKAGE = Path(__file__).resolve().parents[1]
 MOCKS = PACKAGE / "mocks"
@@ -76,6 +75,7 @@ class RelayTests(unittest.TestCase):
             self.assertTrue(result["ok"], result)
             return
         from relay.adapters import get_adapter
+
         for worker in ("claude", "codex", "antigravity"):
             adapter = get_adapter(worker, self.config.worker(worker), self.config.path_value("adapter_spec_root"))
             spec = adapter.shallow_audit()
@@ -149,9 +149,7 @@ class RelayTests(unittest.TestCase):
             JobRequest(task="first", worker="codex", request_id="same-request"), queued=True
         )
         with self.assertRaises(RelayError) as context:
-            self.engine.create_job(
-                JobRequest(task="different", worker="codex", request_id="same-request"), queued=True
-            )
+            self.engine.create_job(JobRequest(task="different", worker="codex", request_id="same-request"), queued=True)
         self.assertEqual(getattr(context.exception, "code", None), "REQUEST_ID_CONFLICT")
         self.assertEqual(self.db.get_job(first["job_id"])["status"], "QUEUED")
 
@@ -292,12 +290,14 @@ class RelayTests(unittest.TestCase):
     def test_materializes_declared_utf8_artifact_payload(self):
         artifact_dir = self.home / "payload-artifacts"
         value = {
-            "artifacts": [{
-                "relative_path": "reports/result.txt",
-                "description": "test artifact",
-                "encoding": "utf-8",
-                "content": "CODEX_RELAY_ARTIFACT_OK",
-            }]
+            "artifacts": [
+                {
+                    "relative_path": "reports/result.txt",
+                    "description": "test artifact",
+                    "encoding": "utf-8",
+                    "content": "CODEX_RELAY_ARTIFACT_OK",
+                }
+            ]
         }
         materialized = materialize_artifact_payloads(value, artifact_dir, 10, 1024)
         self.assertEqual(materialized, ["reports/result.txt"])
@@ -309,12 +309,14 @@ class RelayTests(unittest.TestCase):
     def test_normalizes_artifacts_prefix_in_payload_path(self):
         artifact_dir = self.home / "payload-artifacts"
         value = {
-            "artifacts": [{
-                "relative_path": "artifacts/result.txt",
-                "description": "prefixed artifact",
-                "encoding": "utf-8",
-                "content": "normalized",
-            }]
+            "artifacts": [
+                {
+                    "relative_path": "artifacts/result.txt",
+                    "description": "prefixed artifact",
+                    "encoding": "utf-8",
+                    "content": "normalized",
+                }
+            ]
         }
         materialized = materialize_artifact_payloads(value, artifact_dir, 10, 1024)
         self.assertEqual(materialized, ["result.txt"])
@@ -325,12 +327,14 @@ class RelayTests(unittest.TestCase):
     def test_rejects_artifact_payload_path_escape(self):
         artifact_dir = self.home / "payload-artifacts"
         value = {
-            "artifacts": [{
-                "relative_path": "../escaped.txt",
-                "description": "escape attempt",
-                "encoding": "utf-8",
-                "content": "blocked",
-            }]
+            "artifacts": [
+                {
+                    "relative_path": "../escaped.txt",
+                    "description": "escape attempt",
+                    "encoding": "utf-8",
+                    "content": "blocked",
+                }
+            ]
         }
         with self.assertRaises(RelayError) as context:
             materialize_artifact_payloads(value, artifact_dir, 10, 1024)
@@ -368,11 +372,15 @@ class RelayTests(unittest.TestCase):
             400,
             "bad request",
             {},
-            io.BytesIO(json.dumps({
-                "ok": False,
-                "error_code": "REQUEST_ID_CONFLICT",
-                "error_message": "request id already belongs to another task",
-            }).encode("utf-8")),
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error_code": "REQUEST_ID_CONFLICT",
+                        "error_message": "request id already belongs to another task",
+                    }
+                ).encode("utf-8")
+            ),
         )
         with patch("urllib.request.urlopen", side_effect=error):
             with self.assertRaises(RelayError) as context:
@@ -382,12 +390,14 @@ class RelayTests(unittest.TestCase):
 
     def test_missing_attachment_returns_stable_error(self):
         self.audit_all(deep=False)
-        result = self.engine.run(JobRequest(
-            task="missing attachment",
-            worker="codex",
-            fallback=False,
-            attachments=[str(self.home / "missing.txt")],
-        ))
+        result = self.engine.run(
+            JobRequest(
+                task="missing attachment",
+                worker="codex",
+                fallback=False,
+                attachments=[str(self.home / "missing.txt")],
+            )
+        )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "ATTACHMENT_NOT_FOUND")
 
@@ -423,15 +433,17 @@ class RelayTests(unittest.TestCase):
     def test_json_validation_rejects_non_string_collection_items(self):
         result = self.home / "invalid-result.json"
         result.write_text(
-            json.dumps({
-                "schema_version": "1.0",
-                "status": "complete",
-                "answer": "ok",
-                "sources": [1],
-                "uncertainties": [],
-                "missing_items": [],
-                "artifacts": [],
-            }),
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "status": "complete",
+                    "answer": "ok",
+                    "sources": [1],
+                    "uncertainties": [],
+                    "missing_items": [],
+                    "artifacts": [],
+                }
+            ),
             encoding="utf-8",
         )
         with self.assertRaises(RelayError) as context:
@@ -450,7 +462,9 @@ class RelayTests(unittest.TestCase):
         thread.start()
         client = RPCClient(self.config)
         self.assertTrue(client.wait_until_healthy(3))
-        submitted = client.request("POST", "/submit", JobRequest(task="async", worker="codex", fallback=False).to_dict())
+        submitted = client.request(
+            "POST", "/submit", JobRequest(task="async", worker="codex", fallback=False).to_dict()
+        )
         job_id = submitted["job_id"]
         deadline = time.time() + 10
         result = None

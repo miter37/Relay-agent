@@ -29,7 +29,7 @@ class JobRequest:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "JobRequest":
+    def from_dict(cls, value: dict[str, Any]) -> JobRequest:
         allowed = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in value.items() if k in allowed})
 
@@ -67,7 +67,7 @@ class AdapterSpec:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "AdapterSpec":
+    def from_dict(cls, value: dict[str, Any]) -> AdapterSpec:
         return cls(**value)
 
 

@@ -1,7 +1,12 @@
 import json
+import queue
+import subprocess
+import threading
+import time
+from datetime import UTC
 from pathlib import Path
+from typing import Any
 
-from .model_catalog import ModelCatalog, DiscoveredModel
 from .util import utc_now
 
 
@@ -16,12 +21,6 @@ def parse_agy_models(text: str) -> list[str]:
             models.append(line)
     return list(dict.fromkeys(models))
 
-
-import subprocess
-import queue
-import threading
-import time
-from typing import Any
 
 def list_codex_models(
     executable: str = "codex",
@@ -44,23 +43,23 @@ def list_codex_models(
         raise RuntimeError("Failed to open Codex app-server pipes")
 
     def send(message: dict[str, Any]) -> None:
-        process.stdin.write(
-            json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n"
-        )
+        process.stdin.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n")
         process.stdin.flush()
 
     try:
-        send({
-            "method": "initialize",
-            "id": 1,
-            "params": {
-                "clientInfo": {
-                    "name": "relay",
-                    "title": "Relay",
-                    "version": "0.6.0",
-                }
-            },
-        })
+        send(
+            {
+                "method": "initialize",
+                "id": 1,
+                "params": {
+                    "clientInfo": {
+                        "name": "relay",
+                        "title": "Relay",
+                        "version": "0.6.0",
+                    }
+                },
+            }
+        )
 
         deadline = time.monotonic() + timeout_seconds
         messages: queue.Queue[str | None] = queue.Queue()
@@ -89,15 +88,17 @@ def list_codex_models(
                 break
 
         send({"method": "initialized", "params": {}})
-        send({
-            "method": "model/list",
-            "id": 2,
-            "params": {
-                "limit": 100,
-                "cursor": None,
-                "includeHidden": include_hidden,
-            },
-        })
+        send(
+            {
+                "method": "model/list",
+                "id": 2,
+                "params": {
+                    "limit": 100,
+                    "cursor": None,
+                    "includeHidden": include_hidden,
+                },
+            }
+        )
 
         while True:
             message = next_message()
@@ -131,30 +132,42 @@ def parse_claude_settings() -> list[str]:
             try:
                 with path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
-                
+
                 # Try to extract models from common settings
                 if "model" in data and isinstance(data["model"], str):
                     models.add(data["model"])
                 if "availableModels" in data and isinstance(data["availableModels"], list):
                     models.update(data["availableModels"])
-                
+
                 # Simple heuristical extraction just to get *something*
                 for k, v in data.items():
                     if "model" in k.lower() and isinstance(v, str) and v.startswith("claude-"):
                         models.add(v)
             except Exception:
                 pass
-                
+
     # Add common aliases
-    models.update(["claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-5-haiku-20241022", "sonnet", "opus", "haiku"])
+    models.update(
+        ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-5-haiku-20241022", "sonnet", "opus", "haiku"]
+    )
     return list(models)
+
 
 def probe_claude_model(executable: str, model: str) -> bool:
     try:
         process = subprocess.run(
-            [executable, "-p", "Reply exactly MODEL_OK", "--model", model, "--max-turns", "1", "--output-format", "json"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            [
+                executable,
+                "-p",
+                "Reply exactly MODEL_OK",
+                "--model",
+                model,
+                "--max-turns",
+                "1",
+                "--output-format",
+                "json",
+            ],
+            capture_output=True,
             text=True,
             timeout=30,
         )
@@ -164,29 +177,38 @@ def probe_claude_model(executable: str, model: str) -> bool:
     except Exception:
         return False
 
-def get_model_catalog(config: Any, adapter: Any, refresh: bool = False, include_hidden: bool = False, verify: bool = False) -> Any:
+
+def get_model_catalog(
+    config: Any, adapter: Any, refresh: bool = False, include_hidden: bool = False, verify: bool = False
+) -> Any:
     # We load the json from config.path_value("model_catalogs_root")
     from .util import json_dump, json_load
-    
-    catalog_dir = config.path_value("model_catalogs_root") if config.get("model_catalogs_root") else config.home / "model-catalogs"
+
+    catalog_dir = (
+        config.path_value("model_catalogs_root")
+        if config.get("model_catalogs_root")
+        else config.home / "model-catalogs"
+    )
     worker_dir = catalog_dir / adapter.name
     worker_dir.mkdir(parents=True, exist_ok=True)
-    
+
     version = adapter.version() or "unknown"
     import re
+
     safe_version = re.sub(r"[^A-Za-z0-9_.-]+", "_", version)[:120]
     cache_file = worker_dir / f"{safe_version}.json"
-    
-    import time
+
     if not refresh and cache_file.exists():
         try:
             cached = json_load(cache_file)
             # check ttl 30 minutes
             if cached and cached.get("generated_at"):
-                from datetime import datetime, timezone
+                from datetime import datetime
+
                 dt = datetime.fromisoformat(cached["generated_at"])
-                if (datetime.now(timezone.utc) - dt).total_seconds() < 1800:
-                    from .model_catalog import ModelCatalog, DiscoveredModel
+                if (datetime.now(UTC) - dt).total_seconds() < 1800:
+                    from .model_catalog import DiscoveredModel, ModelCatalog
+
                     models = [DiscoveredModel(**m) for m in cached.get("models", [])]
                     cached["models"] = models
                     # A verification request must not reuse a catalog that only contains
@@ -194,8 +216,7 @@ def get_model_catalog(config: Any, adapter: Any, refresh: bool = False, include_
                     # records a successful verification.
                     cached_models = cached.get("models", [])
                     cache_verified = bool(cached_models) and all(
-                        (model.get("availability") if isinstance(model, dict) else model.availability)
-                        == "verified"
+                        (model.get("availability") if isinstance(model, dict) else model.availability) == "verified"
                         for model in cached_models
                     )
                     if not verify or cache_verified:
@@ -204,11 +225,10 @@ def get_model_catalog(config: Any, adapter: Any, refresh: bool = False, include_
             pass
 
     catalog = adapter.discover_models(refresh=refresh, include_hidden=include_hidden, verify=verify)
-    
+
     # Save cache
     data = catalog.to_dict()
-    from .util import utc_now
     data["generated_at"] = utc_now()
     json_dump(cache_file, data)
-    
+
     return catalog
