@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget
+
+from .agent_apps import AgentAppListView
 
 
 class SettingsView(QWidget):
@@ -10,16 +12,26 @@ class SettingsView(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self)
-        root.addWidget(QLabel("<b>Settings</b>"))
-        root.addWidget(QLabel("Relay daemon"))
+        self.tabs = QTabWidget()
+        general = QWidget()
+        general_layout = QVBoxLayout(general)
+        general_layout.addWidget(QLabel("<b>Settings</b>"))
+        general_layout.addWidget(QLabel("Relay daemon"))
         self.autostart_status = QLabel("Auto-start status unavailable")
         self.autostart_status.setWordWrap(True)
-        root.addWidget(self.autostart_status)
+        general_layout.addWidget(self.autostart_status)
         self.autostart_button = QPushButton("Enable auto-start")
         self.autostart_button.clicked.connect(self._toggle_autostart)
-        root.addWidget(self.autostart_button)
-        root.addStretch(1)
+        general_layout.addWidget(self.autostart_button)
+        general_layout.addStretch(1)
+        self.tabs.addTab(general, "General")
+        self.agent_apps_view = AgentAppListView()
+        self.tabs.addTab(self.agent_apps_view, "Agent Apps")
+        root.addWidget(self.tabs)
         self._enabled = False
+
+    def set_agent_apps(self, agents: list[dict]) -> None:
+        self.agent_apps_view.set_agents(agents)
 
     def set_autostart_status(self, status: dict) -> None:
         self._enabled = bool(status.get("enabled"))

@@ -71,7 +71,13 @@ class RelayEngine:
         self._running_processes: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         per_worker = int(self.config.get("max_concurrent_per_worker", 1))
+        self._per_worker_limit = per_worker
         self._worker_slots = {name: threading.Semaphore(per_worker) for name in ("claude", "codex", "antigravity")}
+        self._worker_slots_lock = threading.Lock()
+
+    def _worker_slot(self, worker: str) -> threading.Semaphore:
+        with self._worker_slots_lock:
+            return self._worker_slots.setdefault(worker, threading.Semaphore(self._per_worker_limit))
 
     def _resolve_request_task(self, request: JobRequest) -> None:
         request.caller = request.caller.strip().lower()
@@ -379,7 +385,7 @@ class RelayEngine:
             self.db.update_attempt(attempt_id, status="ACTIVE")
             self.db.add_event(job_id, "ATTEMPT_STARTED", {"worker": worker, "attempt": index + 1})
             timeout = request.timeout_seconds or int(self.config.get("timeout_seconds", 1200))
-            slot = self._worker_slots[worker]
+            slot = self._worker_slot(worker)
             slot.acquire()
             try:
                 outcome = run_supervised(

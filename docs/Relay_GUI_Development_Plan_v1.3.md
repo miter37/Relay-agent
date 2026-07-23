@@ -3249,6 +3249,16 @@ Upgrade test from previous release
 - untested Agent cannot be enabled
 - executable version change requires retest
 
+### G5 implementation status
+
+G5 is implemented as Relay 1.1.0 on the current development branch.
+
+- Agent App manifests are stored under `Relay Home/config/agent-apps/` and legacy custom workers are imported without deleting `relay.toml`.
+- The daemon API and CLI expose registration, edit, deep test, enable/disable, and recoverable delete operations.
+- Generic CLI execution uses argv lists with validated placeholders and no shell parsing. Model discovery supports manifest-declared line or JSON output.
+- Agent Apps are available to normal Jobs and Schedule replay, while active Schedules prevent deletion of a referenced Agent App.
+- The health contract is API schema revision 5 with minimum GUI version 1.1.0.
+
 ---
 
 ### Release 1.2.0 — G6: Packaging and platform operations

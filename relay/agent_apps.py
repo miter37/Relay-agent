@@ -158,7 +158,13 @@ class AgentAppStore:
         if not isinstance(argv, list) or any(not isinstance(item, str) or not item for item in argv):
             raise RelayError("AGENT_TEMPLATE_INVALID", "Agent argv must be a non-empty string list")
         placeholders = set()
-        for token in [executable, *argv]:
+        model_list_argv = value.get("model_list_argv") or []
+        model_arg = value.get("model_arg") or []
+        if not isinstance(model_list_argv, list) or any(not isinstance(item, str) or not item for item in model_list_argv):
+            raise RelayError("AGENT_TEMPLATE_INVALID", "model_list_argv must be a string list")
+        if not isinstance(model_arg, list) or any(not isinstance(item, str) or not item for item in model_arg):
+            raise RelayError("AGENT_TEMPLATE_INVALID", "model_arg must be a string list")
+        for token in [executable, *argv, *model_list_argv, *model_arg]:
             if _SHELL_FORMS.search(token):
                 raise RelayError("AGENT_TEMPLATE_INVALID", "Shell operators and command substitution are not allowed")
             placeholders.update(_PLACEHOLDER_PATTERN.findall(token))
@@ -177,6 +183,9 @@ class AgentAppStore:
             raise RelayError("AGENT_TEMPLATE_INVALID", "task_arg input requires {task}")
         if result_mode == "result_file" and "result_file" not in placeholders:
             raise RelayError("AGENT_TEMPLATE_INVALID", "result_file output requires {result_file}")
+        model_list_parser = str(value.get("model_list_parser") or "lines")
+        if model_list_parser not in {"lines", "json"}:
+            raise RelayError("AGENT_TEMPLATE_INVALID", "model_list_parser must be lines or json")
         formats = value.get("result_formats") or ["json"]
         if not isinstance(formats, list) or not formats or any(item not in {"json", "txt"} for item in formats):
             raise RelayError("AGENT_TEMPLATE_INVALID", "result_formats must contain json or txt")
@@ -199,9 +208,9 @@ class AgentAppStore:
                 "result_formats": list(dict.fromkeys(formats)),
                 "supports_artifacts": bool(value.get("supports_artifacts", False)),
                 "default_model": str(value.get("default_model") or ""),
-                "model_list_argv": list(value.get("model_list_argv") or []),
-                "model_list_parser": str(value.get("model_list_parser") or "lines"),
-                "model_arg": list(value.get("model_arg") or []),
+                "model_list_argv": list(model_list_argv),
+                "model_list_parser": model_list_parser,
+                "model_arg": list(model_arg),
                 "safety": {
                     "network": bool(safety.get("network", False)),
                     "workspace_write": bool(safety.get("workspace_write", False)),

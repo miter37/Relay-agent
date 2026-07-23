@@ -41,6 +41,7 @@ class G5DynamicWorkerTests(unittest.TestCase):
 
             self.assertEqual(request.worker, "opencode")
             self.assertEqual(engine._worker_chain({"fallback_enabled": 0}, request), ["opencode"])
+            self.assertIs(engine._worker_slot("opencode"), engine._worker_slot("opencode"))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from pathlib import Path
 from typing import Any
 
 from ..errors import RelayError
+from ..model_catalog import DiscoveredModel, ModelCatalog
 from .base import Adapter, AdapterContext
 
 BUILTIN_WORKERS = frozenset({"claude", "codex", "antigravity"})
@@ -94,6 +96,9 @@ class GenericCLIAdapter(Adapter):
         self.argv = [str(item) for item in worker_config.get("argv", [])]
         self.input_mode = str(worker_config.get("input_mode") or "request_file")
         self.result_mode = str(worker_config.get("result_mode") or "result_file")
+        self.model_list_argv = [str(item) for item in worker_config.get("model_list_argv", [])]
+        self.model_list_parser = str(worker_config.get("model_list_parser") or "lines")
+        self.model_arg = [str(item) for item in worker_config.get("model_arg", [])]
 
     def detect_capabilities(self, help_text: str) -> dict[str, Any]:
         return {
@@ -122,23 +127,10 @@ class GenericCLIAdapter(Adapter):
             if not self.argv:
                 raise RelayError("AGENT_TEMPLATE_INVALID", f"{self.name} has no argv configured")
             model = ctx.model or ctx.config.get("default_model") or self.worker_config.get("default_model") or ""
-            values = {
-                "request_file": str(ctx.request_file),
-                "result_file": str(ctx.result_file),
-                "artifact_dir": str(ctx.artifact_dir),
-                "workspace": str(ctx.workspace),
-                "schema_file": str(ctx.schema_file),
-                "task": ctx.request_file.read_text(encoding="utf-8"),
-                "model": str(model),
-                "profile": str(ctx.profile),
-                "job_id": str(ctx.job_id),
-            }
-            args = [executable]
-            for token in self.argv:
-                rendered = token
-                for key, value in values.items():
-                    rendered = rendered.replace("{" + key + "}", value)
-                args.append(rendered)
+            values = self._manifest_values(ctx, model)
+            args = [executable, *self._render_tokens(self.argv, values)]
+            if model and self.model_arg:
+                args.extend(self._render_tokens(self.model_arg, values))
             stdin_bytes = ctx.request_file.read_bytes() if self.input_mode == "stdin" else None
             return args, stdin_bytes, self._environment(ctx)
         if not self.template:
@@ -178,6 +170,97 @@ class GenericCLIAdapter(Adapter):
             for key, value in env_extra.items():
                 env[str(key)] = str(value)
         return args, None, env
+
+    @staticmethod
+    def _render_tokens(tokens: list[str], values: dict[str, str]) -> list[str]:
+        rendered_tokens: list[str] = []
+        for token in tokens:
+            rendered = token
+            for key, value in values.items():
+                rendered = rendered.replace("{" + key + "}", value)
+            rendered_tokens.append(rendered)
+        return rendered_tokens
+
+    @staticmethod
+    def _manifest_values(ctx: AdapterContext, model: str) -> dict[str, str]:
+        return {
+            "request_file": str(ctx.request_file),
+            "result_file": str(ctx.result_file),
+            "artifact_dir": str(ctx.artifact_dir),
+            "workspace": str(ctx.workspace),
+            "schema_file": str(ctx.schema_file),
+            "task": ctx.request_file.read_text(encoding="utf-8"),
+            "model": str(model),
+            "profile": str(ctx.profile),
+            "job_id": str(ctx.job_id),
+        }
+
+    def discover_models(
+        self,
+        *,
+        refresh: bool = False,
+        include_hidden: bool = False,
+        verify: bool = False,
+    ) -> ModelCatalog:
+        del refresh, verify
+        if not self.model_list_argv:
+            raise RelayError("MODEL_DISCOVERY_UNSUPPORTED", f"{self.name} has no model list command configured")
+        if self.model_list_parser not in {"lines", "json"}:
+            raise RelayError("AGENT_TEMPLATE_INVALID", f"Unsupported model list parser: {self.model_list_parser}")
+        code, stdout, stderr = self.capture(self.model_list_argv, timeout=30)
+        if code != 0:
+            raise RelayError("MODEL_DISCOVERY_FAILED", stderr.strip() or f"{self.name} model list failed")
+        try:
+            values: list[Any]
+            if self.model_list_parser == "lines":
+                values = [line.strip() for line in stdout.splitlines() if line.strip()]
+            else:
+                parsed = json.loads(stdout)
+                if isinstance(parsed, dict):
+                    parsed = parsed.get("models", parsed.get("data", []))
+                if not isinstance(parsed, list):
+                    raise ValueError("JSON model list must be an array or contain models/data")
+                values = parsed
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise RelayError("MODEL_DISCOVERY_FAILED", f"{self.name} model list output is invalid: {exc}") from exc
+
+        models: list[DiscoveredModel] = []
+        seen: set[str] = set()
+        for item in values:
+            if isinstance(item, str):
+                model_id = item.strip()
+                display_name = model_id
+                hidden = False
+                metadata: dict[str, Any] = {}
+            elif isinstance(item, dict):
+                model_id = str(item.get("id") or item.get("slug") or item.get("name") or "").strip()
+                display_name = str(item.get("display_name") or item.get("displayName") or model_id)
+                hidden = bool(item.get("hidden", False))
+                metadata = item
+            else:
+                continue
+            if not model_id or model_id in seen or (hidden and not include_hidden):
+                continue
+            seen.add(model_id)
+            models.append(
+                DiscoveredModel(
+                    id=model_id,
+                    display_name=display_name,
+                    selectable_name=model_id,
+                    availability="available",
+                    hidden=hidden,
+                    metadata=metadata,
+                )
+            )
+        return ModelCatalog(
+            worker=self.name,
+            cli_version=self.version(),
+            status="ok",
+            source="manifest_model_list",
+            account_scoped=True,
+            authoritative=True,
+            models=models,
+        )
 
     def _environment(self, ctx: AdapterContext) -> dict[str, str]:
         env: dict[str, str] = {

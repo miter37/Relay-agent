@@ -38,6 +38,11 @@ class Scheduler:
             name: threading.Semaphore(int(self.config.get("max_concurrent_per_worker", 1)))
             for name in ("claude", "codex", "antigravity")
         }
+        self._worker_limit_size = int(self.config.get("max_concurrent_per_worker", 1))
+
+    def worker_limit(self, worker: str) -> threading.Semaphore:
+        with self.lock:
+            return self.worker_limits.setdefault(worker, threading.Semaphore(self._worker_limit_size))
 
     def start(self) -> None:
         threading.Thread(target=self.loop, name="relay-scheduler", daemon=True).start()
@@ -183,8 +188,8 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     "schedule_retention": self.daemon.maintenance.schedule_manager.status(),
                     "daemon_version": __version__,
                     "api_versions": ["v1"],
-                    "api_schema_revision": 4,
-                    "min_gui_version": "1.0.0",
+                    "api_schema_revision": 5,
+                    "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
                 },
             )

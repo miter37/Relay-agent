@@ -57,6 +57,49 @@ class G5GenericAdapterTests(unittest.TestCase):
         self.assertEqual(command, ["/usr/bin/opencode", "run", "--input", str(self.request_file), "--model", "fast"])
         self.assertIsNone(stdin_bytes)
 
+    def test_manifest_model_arg_is_appended_for_selected_model(self):
+        adapter = GenericCLIAdapter(
+            {
+                "executable": "opencode",
+                "argv": ["run", "{request_file}"],
+                "model_arg": ["--model", "{model}"],
+                "input_mode": "request_file",
+                "result_mode": "stdout",
+            },
+            self.workspace,
+            name="opencode",
+        )
+
+        with patch.object(adapter, "executable", return_value="/usr/bin/opencode"):
+            command, _stdin_bytes, _env = adapter.build_command(self.ctx)
+
+        self.assertEqual(command[-2:], ["--model", "fast"])
+
+    def test_manifest_model_list_supports_line_and_json_parsers(self):
+        adapter = GenericCLIAdapter(
+            {
+                "executable": "opencode",
+                "argv": ["run", "{request_file}"],
+                "model_list_argv": ["models"],
+                "model_list_parser": "lines",
+                "input_mode": "request_file",
+                "result_mode": "stdout",
+            },
+            self.workspace,
+            name="opencode",
+        )
+        with patch.object(adapter, "executable", return_value="/usr/bin/opencode"), patch.object(
+            adapter, "version", return_value="1.2.3"
+        ), patch.object(adapter, "capture", return_value=(0, "fast\npro\nfast\n", "")):
+            catalog = adapter.discover_models()
+        self.assertEqual([model.id for model in catalog.models], ["fast", "pro"])
+        self.assertEqual(catalog.source, "manifest_model_list")
+
+        adapter.model_list_parser = "json"
+        with patch.object(adapter, "capture", return_value=(0, '{"models":[{"id":"json-model"}]}', "")):
+            catalog = adapter.discover_models()
+        self.assertEqual([model.id for model in catalog.models], ["json-model"])
+
     def test_stdin_mode_returns_request_bytes_and_stdout_normalizes(self):
         adapter = GenericCLIAdapter(
             {

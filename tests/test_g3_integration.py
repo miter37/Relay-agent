@@ -50,7 +50,7 @@ class G3IntegrationTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_release_version(self):
-        self.assertEqual(__version__, "1.0.0")
+        self.assertEqual(__version__, "1.1.0")
 
     def test_scheduled_job_completes_and_is_linked_to_normal_history(self):
         audit = Doctor(self.config, self.db).audit(["codex"], deep=True)

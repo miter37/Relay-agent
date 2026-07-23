@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..compatibility import evaluate_compatibility
+from .agent_apps import AgentAppWizard
 from .job_detail import JobDetailView
 from .new_task import NewTaskView
 from .rpc_client import GuiRpcClient
@@ -44,6 +45,8 @@ class MainWindow(QMainWindow):
         self.client.response.connect(self._handle_response)
         self.pending: dict[int, object] = {}
         self.jobs: dict[str, dict] = {}
+        self.agent_definitions: list[dict] = []
+        self.custom_agent_apps: list[dict] = []
         self.schedules: dict[str, dict] = {}
         self.schedule_runs: dict[str, list[dict]] = {}
         self.selected_schedule_id: str | None = None
@@ -51,6 +54,9 @@ class MainWindow(QMainWindow):
         self.schedule_editor_mode = "create"
         self.schedule_editor_schedule_id: str | None = None
         self.autostart_status: dict = {}
+        self.agent_app_wizard: AgentAppWizard | None = None
+        self.agent_app_wizard_mode = "create"
+        self.agent_app_wizard_id: str | None = None
         self.current_mode = "disconnected"
         self.current_filter = ""
         self.finished_cursor: str | None = None
@@ -163,6 +169,12 @@ class MainWindow(QMainWindow):
         self.detail_stack.addWidget(self.schedule_detail_view)
         self.settings_view = SettingsView()
         self.settings_view.autostart_changed.connect(self._toggle_autostart)
+        agent_apps = self.settings_view.agent_apps_view
+        agent_apps.create_requested.connect(self._create_agent_app)
+        agent_apps.edit_requested.connect(self._edit_agent_app)
+        agent_apps.test_requested.connect(self._test_agent_app)
+        agent_apps.enabled_requested.connect(self._set_agent_app_enabled)
+        agent_apps.delete_requested.connect(self._delete_agent_app)
         self.detail_stack.addWidget(self.settings_view)
         self.splitter.addWidget(self.detail_stack)
         self.splitter.setSizes([320, 960])
@@ -201,6 +213,62 @@ class MainWindow(QMainWindow):
         self.detail_stack.setCurrentWidget(self.settings_view)
         if self.current_mode == "normal":
             self._request("autostart", "/v1/autostart")
+            self._request("agent_apps", "/v1/agent-apps")
+
+    def _create_agent_app(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self.agent_app_wizard_mode = "create"
+        self.agent_app_wizard_id = None
+        self.agent_app_wizard = AgentAppWizard(self)
+        self.agent_app_wizard.test_requested.connect(self._wizard_test_agent_app)
+        self.agent_app_wizard.save_requested.connect(self._save_agent_app)
+        self.agent_app_wizard.open()
+
+    def _edit_agent_app(self, agent_id: str) -> None:
+        if self.current_mode == "normal":
+            self.agent_app_wizard_mode = "update"
+            self.agent_app_wizard_id = agent_id
+            self._request("agent_app_detail", f"/v1/agent-apps/{agent_id}")
+
+    def _test_agent_app(self, agent_id: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(("agent_app_test", None), f"/v1/agent-apps/{agent_id}/test", {})
+
+    def _set_agent_app_enabled(self, agent_id: str, enabled: bool) -> None:
+        if self.current_mode == "normal":
+            self._request_patch("agent_app_enabled", f"/v1/agent-apps/{agent_id}/enabled", {"enabled": enabled})
+
+    def _delete_agent_app(self, agent_id: str) -> None:
+        if self.current_mode == "normal":
+            self._request_delete("agent_app_delete", f"/v1/agent-apps/{agent_id}")
+
+    def _wizard_test_agent_app(self, payload: dict) -> None:
+        if self.agent_app_wizard is None:
+            return
+        if self.agent_app_wizard_id:
+            self._request_post(
+                ("agent_app_test", self.agent_app_wizard),
+                f"/v1/agent-apps/{self.agent_app_wizard_id}/test",
+                {},
+            )
+        else:
+            self._request_post(
+                ("agent_app_create_test", self.agent_app_wizard),
+                "/v1/agent-apps",
+                payload,
+            )
+
+    def _save_agent_app(self, payload: dict) -> None:
+        if self.current_mode != "normal" or self.agent_app_wizard is None:
+            return
+        agent_id = self.agent_app_wizard_id or payload.get("agent_id")
+        if agent_id:
+            self._request_patch(
+                ("agent_app_save", self.agent_app_wizard),
+                f"/v1/agent-apps/{agent_id}",
+                payload,
+            )
 
     def _toggle_autostart(self, enabled: bool) -> None:
         if self.current_mode == "normal":
@@ -388,6 +456,8 @@ class MainWindow(QMainWindow):
                 self._set_connection("disconnected", "Relay daemon is unavailable. Retrying...")
             elif isinstance(kind, tuple) and kind[0] == "schedule_preview":
                 kind[1].set_preview_error(str(error or "Invalid schedule"))
+            elif isinstance(kind, tuple) and kind[0] == "agent_app_test" and kind[1] is not None:
+                kind[1].set_test_result({"status": "failed", "error": str(error or "Agent test failed")})
             else:
                 self.banner.setText("Relay could not complete that action. Please try again.")
                 self.banner.show()
@@ -397,23 +467,39 @@ class MainWindow(QMainWindow):
                 payload,
                 gui_version=self.gui_version,
                 expected_relay_home_id=self.expected_home_id,
-                supported_schema_revision=4,
+                supported_schema_revision=5,
             )
             self._set_connection(decision.mode, decision.reason)
             if decision.mode == "normal":
                 self._request("agents", "/v1/agents")
                 self._request("autostart", "/v1/autostart")
+                self._request("agent_apps", "/v1/agent-apps")
                 self._refresh_active()
                 self._refresh_finished()
             return
         if kind == "agents":
-            self._update_agent_choices(payload.get("agents", []))
+            self.agent_definitions = payload.get("agents", [])
+            self._update_agent_choices(self.agent_definitions)
+            self.settings_view.set_agent_apps(self.agent_definitions)
             return
         if kind in {"autostart", "autostart_prompt", "autostart_toggle"}:
             self.autostart_status = payload.get("autostart") or {}
             self.settings_view.set_autostart_status(self.autostart_status)
             if kind == "autostart_prompt":
                 self._maybe_prompt_autostart()
+            return
+        if kind == "agent_apps":
+            self.custom_agent_apps = payload.get("agent_apps", [])
+            builtins = [item for item in self.agent_definitions if item.get("builtin")]
+            self.settings_view.set_agent_apps([*builtins, *self.custom_agent_apps])
+            return
+        if kind == "agent_app_detail":
+            agent = payload.get("agent") or {}
+            self.agent_app_wizard = AgentAppWizard(self)
+            self.agent_app_wizard.set_agent(agent)
+            self.agent_app_wizard.test_requested.connect(self._wizard_test_agent_app)
+            self.agent_app_wizard.save_requested.connect(self._save_agent_app)
+            self.agent_app_wizard.open()
             return
         if kind == "detail":
             self._show_detail(payload)
@@ -454,6 +540,31 @@ class MainWindow(QMainWindow):
             return
         if isinstance(kind, tuple) and kind[0] == "schedule_preview":
             kind[1].set_preview(payload.get("occurrences", []))
+            return
+        if isinstance(kind, tuple) and kind[0] == "agent_app_create_test":
+            agent = payload.get("agent") or {}
+            self.agent_app_wizard_id = agent.get("agent_id")
+            if self.agent_app_wizard_id:
+                self._request_post(
+                    ("agent_app_test", kind[1]),
+                    f"/v1/agent-apps/{self.agent_app_wizard_id}/test",
+                    {},
+                )
+            return
+        if isinstance(kind, tuple) and kind[0] == "agent_app_test":
+            wizard = kind[1]
+            if wizard is not None:
+                wizard.set_test_result(payload.get("test") or {})
+            else:
+                self._request("agent_apps", "/v1/agent-apps")
+            return
+        if isinstance(kind, tuple) and kind[0] == "agent_app_save":
+            kind[1].accept()
+            self.agent_app_wizard = None
+            self._request("agent_apps", "/v1/agent-apps")
+            return
+        if kind in {"agent_app_enabled", "agent_app_delete"}:
+            self._request("agent_apps", "/v1/agent-apps")
             return
         if isinstance(kind, tuple) and kind[0] == "schedule_create":
             schedule = payload.get("schedule") or {}

@@ -72,8 +72,8 @@ class G0ApiTests(unittest.TestCase):
 
         self.assertTrue(health["ok"])
         self.assertEqual(health["api_versions"], ["v1"])
-        self.assertEqual(health["api_schema_revision"], 4)
-        self.assertEqual(health["min_gui_version"], "1.0.0")
+        self.assertEqual(health["api_schema_revision"], 5)
+        self.assertEqual(health["min_gui_version"], "1.1.0")
         self.assertEqual(health["relay_home_id"], relay_home_id(self.home))
 
     def test_current_gui_version_meets_daemon_minimum(self):

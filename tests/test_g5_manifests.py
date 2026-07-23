@@ -62,6 +62,11 @@ class G5ManifestStoreTests(unittest.TestCase):
                 self.store.save(manifest(argv=argv))
             self.assertEqual(context.exception.code, "AGENT_TEMPLATE_INVALID")
 
+    def test_validation_rejects_shell_forms_in_model_discovery(self):
+        with self.assertRaises(RelayError) as context:
+            self.store.save(manifest(model_list_argv=["models", "&&", "bad"]))
+        self.assertEqual(context.exception.code, "AGENT_TEMPLATE_INVALID")
+
     def test_delete_moves_manifest_to_recoverable_trash(self):
         self.store.save(manifest())
 
