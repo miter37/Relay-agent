@@ -126,6 +126,40 @@ relay submit --task-file "C:\AgentWork\analyze.md" --attach "C:\Docs\report.pdf"
 relay "현재 디렉토리의 app.py 파일의 버그를 찾아줘" --worker antigravity --format txt --out "bug_report.txt"
 ```
 
+### 4.4 새 외부 AI CLI를 워커로 등록하기 (relay add-agent)
+
+기본 제공 워커(claude, codex, antigravity) 외에 사용자가 직접 OpenCode, Grok Build 등
+다른 AI CLI를 Relay 워커로 등록할 수 있습니다. 표준 워커 계약(요청 파일 읽기 →
+`result.json`/`artifacts` 표준 스키마로 출력)을 만족하는 CLI라면 등록 가능합니다.
+
+```powershell
+relay add-agent opencode
+```
+
+마법사는 다음 항목을 순서대로 물어봅니다:
+- 워커 ID (relay.toml 키로 사용)
+- 표시 이름
+- 실행 파일 경로 또는 PATH 상의 이름
+- 호출 템플릿 (예: `{cli} exec --prompt {request_file} --output {result_file}`)
+- 기본 모델
+- 고급 옵션 (max_turns, extra_args, env_extra, timeout 등 — Enter 시 기본값)
+- 등록 후 활성화 여부
+
+모든 항목을 입력하면 자동으로 `doctor --deep` 헬스 체크를 실행합니다.
+검증에 실패하면 relay.toml에 **아무것도 저장되지 않습니다**.
+
+등록 후 확인:
+```powershell
+relay doctor --worker opencode --deep
+relay run --worker opencode "Hello"
+```
+
+비대화형 등록:
+```powershell
+relay add-agent opencode --yes
+```
+이 경우 모든 항목은 기본값 또는 `RELAY_ADD_AGENT_*` 환경변수에서 가져옵니다.
+
 ---
 
 ## 5. 에이전트 주의사항 (DO & DON'Ts)

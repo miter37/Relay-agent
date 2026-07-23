@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .adapters import get_adapter
+from .adapters.generic import (
+    KNOWN_PLACEHOLDERS,
+    validate_command_template,
+    validate_worker_id,
+)
 from .cleanup import CleanupManager
 from .config import Config
 from .daemon import RelayDaemon
@@ -20,12 +26,13 @@ from .errors import RelayError
 from .models import JobRequest
 from .rpc import RPCClient
 from .security import security_posture
-from .util import entrypoint_command, json_load, safe_resolve
+from .util import entrypoint_command, json_load, safe_resolve, utc_now
 
 
 COMMANDS = {
     "run", "submit", "status", "wait", "result", "show", "logs", "cancel", "history", "rerun",
-    "doctor", "config", "cleanup", "daemon", "version", "init", "security", "models", "model-check"
+    "doctor", "config", "cleanup", "daemon", "version", "init", "security", "models", "model-check",
+    "add-agent"
 }
 
 
@@ -59,82 +66,354 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="relay", description="Reliable delegation broker for AI CLIs")
+    parser = argparse.ArgumentParser(
+        prog="relay",
+        description=(
+            "Reliable delegation broker for AI CLIs. "
+            "Submits tasks to Claude, Codex, Antigravity, or any user-registered agent CLI, "
+            "deduplicates by request_id, runs capability audits, and isolates work under RELAY_HOME. "
+            "Use 'relay <command> --help' for command details."
+        ),
+        epilog=(
+            "Quick start:\n"
+            "  relay init\n"
+            "  relay doctor --deep --worker claude\n"
+            "  relay run \"Summarize today's AI headlines\"\n"
+            "\n"
+            "Common commands:\n"
+            "  run, submit, status, wait, result, cancel, rerun\n"
+            "  doctor, config, security, cleanup, daemon\n"
+            "  add-agent      Register a new external AI CLI as a worker\n"
+            "  models, model-check, history, logs, version, init"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--version", action="version", version=f"Relay {__version__}")
     sub = parser.add_subparsers(dest="command")
 
-    run = sub.add_parser("run", help="Run a task synchronously")
+    run = sub.add_parser(
+        "run",
+        help="Run a task synchronously",
+        description=(
+            "Run a task synchronously and return the final receipt as JSON. "
+            "Use this for one-off queries where you need the result inline. "
+            "For background jobs that should survive shell exit, use 'relay submit'. "
+            "The selected worker (claude, codex, antigravity, or any registered agent) "
+            "executes the task in a sandbox under RELAY_HOME; fallback workers run if enabled."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay run \"Summarize today's AI headlines\"\n"
+            "  relay run --worker codex --no-fallback \"Convert CSV to JSON\"\n"
+            "  relay run --profile web-research --format json \"Research X\"\n"
+            "  relay run --request-id chat-42 --force-new \"Re-run identical request\""
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_request_args(run)
 
-    submit = sub.add_parser("submit", help="Submit a background task to the daemon")
+    submit = sub.add_parser(
+        "submit",
+        help="Submit a background task to the daemon",
+        description=(
+            "Submit a task to the daemon and queue it for background execution. "
+            "The daemon is started automatically if it is not running. "
+            "Use 'relay wait <job_id>' or 'relay status <job_id>' to monitor progress, "
+            "and 'relay result <job_id>' to retrieve the final receipt."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay submit \"Research OpenAI's latest announcements\"\n"
+            "  relay submit --worker claude --request-id msg-42 --machine\n"
+            "  relay submit --attach spec.pdf --out result.json \"Summarize spec\""
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_request_args(submit)
 
     for name in ("status", "result", "show", "logs", "cancel", "rerun"):
-        p = sub.add_parser(name)
+        p = sub.add_parser(
+            name,
+            description=(
+                {
+                    "status": "Return the current status of a job. Uses the daemon when available, otherwise reads the local database.",
+                    "result": "Return the final receipt and result/artifact paths of a completed job.",
+                    "show": "Return detailed local job data including attempts, events, and artifacts.",
+                    "logs": "Return attempt metadata and the tail of stdout/stderr logs (last 8,000 characters each).",
+                    "cancel": "Request cancellation of a queued or running job. Submitted to the daemon when available.",
+                    "rerun": "Reconstruct the saved request and execute it again as a new job.",
+                }[name]
+            ),
+            epilog=f"Examples:\n  relay {name} <job_id> --machine",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
         p.add_argument("job_id")
         p.add_argument("--machine", action="store_true")
 
-    wait = sub.add_parser("wait")
+    wait = sub.add_parser(
+        "wait",
+        help="Block until a job completes",
+        description=(
+            "Poll a job until it reaches a terminal state (completed, partial, failed, or cancelled) "
+            "or until the timeout expires. Returns the final receipt. "
+            "Use this from scripts that need to chain work after the job is done."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay wait <job_id> --timeout 1800\n"
+            "  relay wait <job_id> --timeout 60 --interval 0.5 --machine"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     wait.add_argument("job_id")
     wait.add_argument("--timeout", type=int, default=0)
     wait.add_argument("--interval", type=float, default=2.0)
     wait.add_argument("--machine", action="store_true")
 
-    history = sub.add_parser("history")
+    history = sub.add_parser(
+        "history",
+        help="List recent jobs",
+        description=(
+            "List recent jobs from the local database, optionally filtered by status. "
+            "Use 'relay status <job_id>' or 'relay show <job_id>' for details on a specific job."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay history --limit 20\n"
+            "  relay history --status failed --machine"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     history.add_argument("--status")
     history.add_argument("--limit", type=int, default=50)
     history.add_argument("--machine", action="store_true")
 
-    doctor = sub.add_parser("doctor")
+    doctor = sub.add_parser(
+        "doctor",
+        help="Audit installed worker capability",
+        description=(
+            "Run shallow or deep capability audits for one or all installed workers. "
+            "A shallow audit records version and help output. "
+            "A deep audit additionally runs a sandboxed probe that must return a valid Relay result. "
+            "Top-level ok=true only when every requested worker reaches status 'healthy'."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay doctor\n"
+            "  relay doctor --worker claude --deep"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     doctor.add_argument("--worker", choices=["claude", "codex", "antigravity"])
     doctor.add_argument("--deep", action="store_true")
     doctor.add_argument("--machine", action="store_true")
 
-    config = sub.add_parser("config")
+    config = sub.add_parser(
+        "config",
+        help="View or edit relay configuration",
+        description=(
+            "Inspect and edit relay.toml under RELAY_HOME/config. "
+            "Values passed to 'config set' are parsed as bool/int/float/list/string in that order. "
+            "Worker enabling uses 'config enable-worker <name>' and requires a healthy adapter spec."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     config_sub = config.add_subparsers(dest="config_command", required=True)
-    show_p = config_sub.add_parser("show")
+    show_p = config_sub.add_parser(
+        "show",
+        help="Print the active configuration",
+        description="Print the active configuration (merged defaults and relay.toml) and its file path.",
+        epilog="Examples:\n  relay config show --machine",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     show_p.add_argument("--machine", action="store_true")
-    set_p = config_sub.add_parser("set")
+    set_p = config_sub.add_parser(
+        "set",
+        help="Set a configuration value",
+        description="Set a single dotted key in relay.toml. Values are parsed as bool, list, int, float, or string.",
+        epilog=(
+            "Examples:\n"
+            "  relay config set default_worker codex\n"
+            "  relay config set workers.claude.max_turns 50\n"
+            "  relay config set workers.antigravity.security_verified true"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     set_p.add_argument("key")
     set_p.add_argument("value")
     set_p.add_argument("--machine", action="store_true")
     for action in ("enable-worker", "disable-worker"):
-        p = config_sub.add_parser(action)
+        p = config_sub.add_parser(
+            action,
+            help=f"{action.replace('-', ' ').capitalize()}",
+            description=(
+                "Enable or disable a worker. Enabling requires a healthy adapter spec for the "
+                "currently installed CLI version (run 'relay doctor --deep --worker <name>' first). "
+                "Disabling simply clears the 'enabled' flag."
+            ),
+            epilog=(
+                "Examples:\n"
+                f"  relay config {action} claude --machine"
+            ),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
         p.add_argument("worker", choices=["claude", "codex", "antigravity"])
         p.add_argument("--machine", action="store_true")
 
-    cleanup = sub.add_parser("cleanup")
+    cleanup = sub.add_parser(
+        "cleanup",
+        help="Run or inspect automatic retention cleanup",
+        description=(
+            "Run a retention cleanup pass now, or inspect the configured policy and the last run. "
+            "Without --dry-run this deletes eligible workspaces and staging directories immediately."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay cleanup --status\n"
+            "  relay cleanup --dry-run --days 7"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     cleanup.add_argument("--days", type=int)
     cleanup.add_argument("--dry-run", action="store_true")
     cleanup.add_argument("--status", action="store_true", help="Show automatic cleanup policy and last run")
     cleanup.add_argument("--machine", action="store_true")
 
-    daemon = sub.add_parser("daemon")
+    daemon = sub.add_parser(
+        "daemon",
+        help="Run or query the local daemon",
+        description="Run the local HTTP daemon in the foreground, or manage it as a detached process.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     daemon_sub = daemon.add_subparsers(dest="daemon_command", required=True)
     for name in ("serve", "start", "stop", "status"):
-        dp = daemon_sub.add_parser(name)
+        dp = daemon_sub.add_parser(
+            name,
+            help=f"{name.capitalize()} the daemon",
+            description={
+                "serve": "Run the daemon HTTP server in the foreground (blocks until stopped).",
+                "start": "Start a detached daemon process and log it under RELAY_HOME/runtime.",
+                "stop": "Request the running daemon to shut down.",
+                "status": "Query daemon health; reports 'stopped' if not running.",
+            }[name],
+            epilog=f"Examples:\n  relay daemon {name}",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
         dp.add_argument("--machine", action="store_true")
 
-    init = sub.add_parser("init")
+    init = sub.add_parser(
+        "init",
+        help="Initialize RELAY_HOME and configuration",
+        description="Create the configuration file and the standard RELAY_HOME directory tree. Use --force to rewrite an existing relay.toml.",
+        epilog="Examples:\n  relay init --force",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     init.add_argument("--force", action="store_true")
     init.add_argument("--machine", action="store_true")
 
-    security = sub.add_parser("security")
+    security = sub.add_parser(
+        "security",
+        help="Show security posture",
+        description="Print platform, isolation acknowledgement, allowlist roots, and security-related warnings.",
+        epilog="Examples:\n  relay security --machine",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     security.add_argument("--machine", action="store_true")
-    
-    models = sub.add_parser("models", help="List models available to installed workers")
+
+    models = sub.add_parser(
+        "models",
+        help="List models available to installed workers",
+        description=(
+            "List the models available to installed workers. "
+            "Claude reads effective settings; Codex uses app-server model/list; Antigravity runs 'agy models'. "
+            "Results are cached per worker CLI version for 30 minutes."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay models\n"
+            "  relay models --worker claude --refresh\n"
+            "  relay models --worker all --include-hidden --verify"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     models.add_argument("--worker", choices=["all", "claude", "codex", "antigravity"], default="all")
     models.add_argument("--refresh", action="store_true")
     models.add_argument("--include-hidden", action="store_true")
     models.add_argument("--verify", action="store_true")
     models.add_argument("--machine", action="store_true")
 
-    model_check = sub.add_parser("model-check", help="Verify that a worker can run a specific model")
+    model_check = sub.add_parser(
+        "model-check",
+        help="Verify that a worker can run a specific model",
+        description=(
+            "Verify that the named worker can run the requested model. "
+            "Claude uses a minimal inference probe; Codex and Antigravity check the cached model catalog."
+        ),
+        epilog="Examples:\n  relay model-check --worker claude --model sonnet",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     model_check.add_argument("--worker", required=True, choices=["claude", "codex", "antigravity"])
     model_check.add_argument("--model", required=True)
     model_check.add_argument("--machine", action="store_true")
 
-    sub.add_parser("version")
+    add_agent = sub.add_parser(
+        "add-agent",
+        help="Interactively register a new external AI CLI as a Relay worker",
+        description=(
+            "Interactively register a new external AI CLI as a Relay worker. "
+            "The wizard prompts for an ID, executable path, command template, default model, "
+            "and optional advanced settings, then runs a health check (shallow + deep audit) "
+            "before persisting the registration. If the health check fails, nothing is saved. "
+            "Use --yes for non-interactive registration driven by environment variables."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  relay add-agent\n"
+            "  relay add-agent opencode\n"
+            "  relay add-agent grok-build --yes\n"
+            "  relay add-agent --skip-health-check my-agent\n"
+            "\n"
+            "Non-interactive mode (--yes) reads defaults from these environment variables:\n"
+            "  RELAY_ADD_AGENT_ID\n"
+            "  RELAY_ADD_AGENT_DISPLAY_NAME\n"
+            "  RELAY_ADD_AGENT_COMMAND\n"
+            "  RELAY_ADD_AGENT_COMMAND_TEMPLATE\n"
+            "  RELAY_ADD_AGENT_DEFAULT_MODEL\n"
+            "  RELAY_ADD_AGENT_REQUIRE_DEEP   (true/false, default: true)\n"
+            "  RELAY_ADD_AGENT_ENABLE         (true/false, default: true)\n"
+            "  RELAY_ADD_AGENT_DESCRIPTION    (optional)\n"
+            "  RELAY_ADD_AGENT_EXTRA_ARGS     (optional, space-separated)\n"
+            "  RELAY_ADD_AGENT_MAX_TURNS      (optional int)\n"
+            f"  RELAY_ADD_AGENT_TIMEOUT_SECONDS (optional int)\n"
+            f"\n"
+            f"Available placeholders in command_template:\n"
+            f"  {{cli}}, {{request_file}}, {{result_file}}, {{artifact_dir}}, {{model}}"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_agent.add_argument(
+        "worker_id",
+        nargs="?",
+        default=None,
+        help="Worker ID used as the relay.toml key (lowercase letters, digits, '_' or '-'). If omitted, the wizard asks first.",
+    )
+    add_agent.add_argument(
+        "--yes",
+        action="store_true",
+        help="Non-interactive mode. Use defaults or RELAY_ADD_AGENT_* environment variables for all prompts.",
+    )
+    add_agent.add_argument(
+        "--skip-health-check",
+        action="store_true",
+        help="Skip the health check and persist registration anyway. The worker remains unverified until 'relay doctor --deep --worker <id>' is run later.",
+    )
+    add_agent.add_argument(
+        "--machine",
+        action="store_true",
+        help="Emit single-line JSON output (default: pretty-printed).",
+    )
+
+    sub.add_parser("version", help="Print the local Relay version")
     return parser
 
 
@@ -158,6 +437,249 @@ def _request_from_args(args, config: Config) -> JobRequest:
         force_new=args.force_new,
         model=args.model,
     )
+
+
+_DEFAULT_AGENT_COMMAND_TEMPLATE = "{cli} exec --prompt {request_file} --output {result_file}"
+
+
+def _ask(prompt: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default not in (None, "") else ""
+    sys.stdout.write(f"{prompt}{suffix}: ")
+    sys.stdout.flush()
+    value = sys.stdin.readline().strip()
+    if not value and default is not None:
+        return default
+    return value
+
+
+def _ask_yes_no(prompt: str, default: bool = True) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    sys.stdout.write(f"{prompt} {suffix}: ")
+    sys.stdout.flush()
+    raw = sys.stdin.readline().strip().lower()
+    if not raw:
+        return default
+    return raw in {"y", "yes"}
+
+
+def _apply_agent_registration(
+    config: Config, *, worker_id: str, fields: dict[str, Any]
+) -> None:
+    validate_worker_id(worker_id)
+    workers = config.data.setdefault("workers", {})
+    if worker_id in workers:
+        raise RelayError(
+            "AGENT_DUPLICATE",
+            f"Worker '{worker_id}' is already registered. Use a different ID.",
+        )
+    template = fields.get("command_template") or _DEFAULT_AGENT_COMMAND_TEMPLATE
+    validate_command_template(template)
+    if not fields.get("command"):
+        raise RelayError(
+            "INVALID_REQUEST",
+            "Agent registration requires a non-empty 'command' field.",
+        )
+    block = dict(fields)
+    block["command_template"] = template
+    block["enabled"] = bool(fields.get("enabled", True))
+    block["require_deep_doctor"] = bool(fields.get("require_deep_doctor", True))
+    block["source"] = "user-registered"
+    block["registered_at"] = utc_now()
+    workers[worker_id] = block
+    config.save()
+
+
+def _run_health_check(
+    worker_id: str,
+    worker_config: dict[str, Any],
+    config: Config,
+    db: Database,
+    *,
+    deep: bool = True,
+) -> dict[str, Any]:
+    adapter = get_adapter(worker_id, worker_config, config.path_value("adapter_spec_root"))
+    try:
+        audit = Doctor(config, db).audit([worker_id], deep=deep)
+    except RelayError as err:
+        return {
+            "shallow_ok": False,
+            "deep_ok": False,
+            "status": "unhealthy",
+            "version": None,
+            "error": f"{err.code}: {err.message}",
+        }
+    workers = audit.get("workers") or []
+    spec = workers[0] if workers else {}
+    status = spec.get("status", "unhealthy")
+    error: str | None = None
+    if status != "healthy":
+        details = spec.get("details") or {}
+        error = (
+            details.get("probe_error")
+            or f"executable not found: {spec.get('executable') or worker_config.get('command')}"
+            if status == "unavailable"
+            else f"audit status is {status}"
+        )
+    return {
+        "shallow_ok": bool(spec.get("shallow_ok")),
+        "deep_ok": bool(spec.get("deep_ok")),
+        "status": status,
+        "version": spec.get("version"),
+        "error": error,
+    }
+
+
+def _resolve_agent_value(
+    args,
+    key: str,
+    *,
+    default: str = "",
+    env: str | None = None,
+    prompt_fn=_ask,
+) -> str:
+    raw = getattr(args, key, None)
+    if raw:
+        return raw
+    if env and os.environ.get(env):
+        return os.environ[env]
+    if not getattr(args, "yes", False):
+        return prompt_fn(key.replace("_", " ").capitalize() + ":", default=default or None)
+    return default
+
+
+def _run_add_agent_wizard(
+    *,
+    prompt_fn=_ask,
+    yes_no_fn=_ask_yes_no,
+) -> dict[str, Any]:
+    print("Relay will register a new external AI CLI as a worker.")
+    print(f"Known placeholders: {{cli}}, {{request_file}}, {{result_file}}, {{artifact_dir}}, {{model}}")
+    worker_id = prompt_fn("Worker ID (lowercase, e.g. 'opencode')", default=None)
+    display_name = prompt_fn("Display name", default=worker_id.capitalize())
+    command = prompt_fn("Executable path or name on PATH", default=worker_id)
+    template = prompt_fn(
+        "Command template (placeholders substituted per job)",
+        default=_DEFAULT_AGENT_COMMAND_TEMPLATE,
+    )
+    default_model = prompt_fn("Default model (blank for none)", default="")
+    require_deep = yes_no_fn("Require deep doctor before enabling?", default=True)
+    enable = yes_no_fn("Enable this worker after registration?", default=True)
+    if not yes_no_fn("Run health check now?", default=True):
+        return {
+            "worker_id": worker_id,
+            "fields": {
+                "display_name": display_name,
+                "command": command,
+                "command_template": template,
+                "default_model": default_model,
+                "require_deep_doctor": require_deep,
+                "enabled": enable,
+            },
+            "skip_health_check": True,
+        }
+    return {
+        "worker_id": worker_id,
+        "fields": {
+            "display_name": display_name,
+            "command": command,
+            "command_template": template,
+            "default_model": default_model,
+            "require_deep_doctor": require_deep,
+            "enabled": enable,
+        },
+        "skip_health_check": False,
+    }
+
+
+def _collect_agent_fields_noninteractive(args) -> dict[str, Any]:
+    worker_id = getattr(args, "worker_id", None) or os.environ.get("RELAY_ADD_AGENT_ID", "")
+    if not worker_id:
+        raise RelayError(
+            "INVALID_REQUEST",
+            "Non-interactive mode requires --worker_id or RELAY_ADD_AGENT_ID.",
+        )
+    display_name = os.environ.get("RELAY_ADD_AGENT_DISPLAY_NAME") or worker_id.capitalize()
+    command = os.environ.get("RELAY_ADD_AGENT_COMMAND") or worker_id
+    template = os.environ.get("RELAY_ADD_AGENT_COMMAND_TEMPLATE") or _DEFAULT_AGENT_COMMAND_TEMPLATE
+    default_model = os.environ.get("RELAY_ADD_AGENT_DEFAULT_MODEL", "")
+    require_deep = _parse_bool(os.environ.get("RELAY_ADD_AGENT_REQUIRE_DEEP", "true"), default=True)
+    enable = _parse_bool(os.environ.get("RELAY_ADD_AGENT_ENABLE", "true"), default=True)
+    description = os.environ.get("RELAY_ADD_AGENT_DESCRIPTION", "")
+    extra_args = os.environ.get("RELAY_ADD_AGENT_EXTRA_ARGS", "")
+    max_turns_raw = os.environ.get("RELAY_ADD_AGENT_MAX_TURNS", "")
+    timeout_raw = os.environ.get("RELAY_ADD_AGENT_TIMEOUT_SECONDS", "")
+    fields: dict[str, Any] = {
+        "display_name": display_name,
+        "command": command,
+        "command_template": template,
+        "default_model": default_model,
+        "require_deep_doctor": require_deep,
+        "enabled": enable,
+    }
+    if description:
+        fields["description"] = description
+    if extra_args.strip():
+        fields["extra_args"] = [token for token in extra_args.split() if token]
+    if max_turns_raw:
+        try:
+            fields["max_turns"] = int(max_turns_raw)
+        except ValueError:
+            pass
+    if timeout_raw:
+        try:
+            fields["timeout_seconds"] = int(timeout_raw)
+        except ValueError:
+            pass
+    return {"worker_id": worker_id, "fields": fields, "skip_health_check": bool(getattr(args, "skip_health_check", False))}
+
+
+def _parse_bool(text: str, *, default: bool = False) -> bool:
+    lowered = text.strip().lower()
+    if not lowered:
+        return default
+    return lowered in {"1", "true", "yes", "y", "on"}
+
+
+def _run_add_agent(args, config: Config, db: Database) -> dict[str, Any]:
+    if getattr(args, "yes", False):
+        collected = _collect_agent_fields_noninteractive(args)
+    else:
+        try:
+            is_tty = sys.stdin.isatty()
+        except Exception:
+            is_tty = False
+        if not is_tty:
+            raise RelayError(
+                "AGENT_NOT_TTY",
+                "Interactive 'relay add-agent' requires a TTY. Re-run with --yes or set RELAY_ADD_AGENT_* environment variables.",
+            )
+        collected = _run_add_agent_wizard()
+
+    worker_id = collected["worker_id"]
+    fields = collected["fields"]
+    skip_health = collected.get("skip_health_check", False) or bool(getattr(args, "skip_health_check", False))
+
+    if not skip_health:
+        health_worker_config = {**fields, "command": fields.get("command") or worker_id}
+        health = _run_health_check(worker_id, health_worker_config, config, db, deep=True)
+        if health["status"] != "healthy":
+            raise RelayError(
+                "AGENT_HEALTH_FAILED",
+                f"Health check failed for '{worker_id}': {health.get('error') or health.get('status')}. "
+                f"Registration aborted; no configuration was saved. Fix the worker and retry, "
+                f"or pass --skip-health-check to persist the registration anyway.",
+            )
+
+    _apply_agent_registration(config, worker_id=worker_id, fields=fields)
+    return {
+        "ok": True,
+        "status": "registered",
+        "worker_id": worker_id,
+        "enabled": bool(fields.get("enabled", True)),
+        "skipped_health_check": skip_health,
+        "config_path": str(config.path),
+    }
+
 
 
 def _emit(value: Any, machine: bool = False) -> None:
@@ -431,7 +953,7 @@ def main(argv: list[str] | None = None) -> int:
             exe = adapter.executable()
             if not exe:
                 raise RelayError("WORKER_NOT_INSTALLED", f"{args.worker} executable not found")
-                
+
             is_ok = False
             if args.worker == "claude":
                 is_ok = probe_claude_model(exe, args.model)
@@ -440,8 +962,11 @@ def main(argv: list[str] | None = None) -> int:
                 from .model_discovery import get_model_catalog
                 cat = get_model_catalog(config, adapter, refresh=False)
                 is_ok = any(m.id == args.model or m.selectable_name == args.model for m in cat.models)
-                
+
             _emit({"ok": is_ok, "worker": args.worker, "model": args.model}, machine)
+        elif args.command == "add-agent":
+            result = _run_add_agent(args, config, db)
+            _emit(result, machine)
         return 0
     except RelayError as err:
         _emit({"ok": False, "status": "failed", "error_code": err.code, "error_message": err.message, "details": err.details}, machine)

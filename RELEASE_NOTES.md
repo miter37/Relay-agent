@@ -12,6 +12,17 @@
 - macOS default Relay home at `~/Library/Application Support/Relay`.
 - Cross-platform and automatic-cleanup documentation.
 - Linux/macOS security guidance.
+- `relay add-agent <id>` interactive wizard for registering external AI CLIs
+  (OpenCode, Grok Build, etc.) as Relay workers. Uses a user-supplied command
+  template with `{cli}`, `{request_file}`, `{result_file}`, `{artifact_dir}`,
+  `{model}` placeholders and the standard `doctor --deep` health check; failed
+  health checks abort the registration without persisting anything.
+  Non-interactive mode via `--yes` and `RELAY_ADD_AGENT_*` env vars. See
+  `relay add-agent --help`.
+- `GenericCLIAdapter` used by all user-registered workers (transparent to
+  builtin `claude`/`codex`/`antigravity`).
+- `--help` text overhauled in English: every subcommand now has a multi-line
+  description and an `Examples:` block.
 
 ## Preserved
 

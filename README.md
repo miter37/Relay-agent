@@ -23,6 +23,7 @@
 - [🤖 OpenClaw / Hermes AI & Multi-Worker Delegation](#-openclaw--hermes-ai--multi-worker-delegation)
 - [🔍 Model Discovery & Limitations](#-model-discovery--limitations)
 - [📄 JSON Result Contract](#-json-result-contract)
+- [➕ Adding New Workers (`relay add-agent`)](#-adding-new-workers-relay-add-agent)
 - [⚙️ Configuration & Security](#-configuration--security)
 - [🧹 Cleanup and Retention](#-cleanup-and-retention)
 - [📚 Documentation](#-documentation)
@@ -33,7 +34,8 @@
 
 Relay-agent is a reliable task broker designed to connect your always-on AI agents with powerful coding CLIs.
 
-- 🤖 **Supports Three AI CLIs**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
+- 🤖 **Supports Three Built-in CLIs**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
+- ➕ **Extensible via `add-agent`**: Register any external AI CLI that follows the standard worker contract (`relay add-agent <id>`).
 - 🤝 **Designed for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay-agent and retrieve the final results asynchronously.
 - 📂 **Dedicated Workspaces**: Each job runs from a separate Relay-agent managed workspace. This reduces accidental file collisions but is not a complete OS sandbox. Unattended use requires a dedicated low-privilege OS account.
 - 🗄️ **Persistent History**: Every delegated job's metadata, errors, and output paths are recorded in a local SQLite database.
@@ -222,6 +224,42 @@ When requesting `--format json`, the file written to your `--out` path will foll
 }
 ```
 *Important*: The Relay-agent receipt status (e.g., `completed`) indicates successful CLI execution. The internal JSON `status` (e.g., `complete` or `partial`) indicates the AI's self-reported success on the actual task logic.
+
+---
+
+## ➕ Adding New Workers (`relay add-agent`)
+
+The three built-in workers (`claude`, `codex`, `antigravity`) cover most users, but any external AI CLI that follows the standard Relay worker contract can be registered interactively:
+
+```sh
+relay add-agent opencode
+```
+
+The wizard prompts for:
+
+- Worker ID (used as the `relay.toml` key, e.g. `opencode`, `grok-build`)
+- Display name
+- Executable path or name on `PATH`
+- Command template using placeholders such as `{cli}`, `{request_file}`, `{result_file}`, `{artifact_dir}`, `{model}`
+- Default model
+- Optional advanced settings (max turns, extra args, env vars, timeout)
+- Whether to enable the worker after registration
+
+Once all inputs are collected, Relay runs `doctor --deep` as a health check. If the check fails, **nothing is written to `relay.toml`** — fix the issue and retry, or pass `--skip-health-check` to persist the registration anyway.
+
+```sh
+# Verify after registration
+relay doctor --worker opencode --deep
+relay run --worker opencode "Hello"
+
+# Non-interactive registration (e.g. from a setup script)
+RELAY_ADD_AGENT_ID=opencode \
+RELAY_ADD_AGENT_COMMAND=opencode \
+RELAY_ADD_AGENT_COMMAND_TEMPLATE='{cli} exec --prompt {request_file} --output {result_file}' \
+relay add-agent --yes
+```
+
+See `relay add-agent --help` for all options and the full list of `RELAY_ADD_AGENT_*` environment variables.
 
 ---
 

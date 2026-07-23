@@ -100,3 +100,21 @@ All passed.
 ## Important limitation
 
 Mock tests verify Relay orchestration and delivery behavior. The live checks above apply only to the listed local CLI versions and account state; every target machine must run `doctor --deep` for each provider version.
+
+## `relay add-agent` tests
+
+`tests/test_add_agent.py` covers the new interactive registration wizard and the GenericCLIAdapter used for user-registered workers:
+
+- Worker ID validation (lowercase/digit/`_`/`-`, builtin rejection)
+- Command template validation (known placeholders only)
+- Template rendering with `shlex.quote` for spaces
+- `GenericCLIAdapter.build_command` placeholder substitution, `extra_args`, `env_extra`
+- `get_adapter` dispatch (builtin IDs map to specialised adapters; others map to `GenericCLIAdapter`)
+- `_apply_agent_registration` persists the `[workers.<id>]` block to `relay.toml`
+- `_run_add_agent` interactive / non-interactive flows
+- Health check failure aborts registration without persisting
+- `--skip-health-check` persists without an audit
+- TTY check without `--yes` raises `AGENT_NOT_TTY`
+- `relay --help` and `relay add-agent --help` content
+
+Run with: `python -m unittest tests.test_add_agent` — 32 tests, 0 failures on the development host.
