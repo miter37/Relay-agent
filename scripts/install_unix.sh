@@ -18,15 +18,23 @@ INSTALL_DIR=${INSTALL_DIR:-"$HOME/.local/bin"}
 RELAY_HOME=${RELAY_HOME:-"$DEFAULT_HOME"}
 PYTHON=${PYTHON:-python3}
 
-if [ ! -f "$PYZ" ]; then
-  echo "relay.pyz not found: $PYZ" >&2
-  exit 1
-fi
-
 "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)' || {
   echo "Python 3.11+ is required." >&2
   exit 1
 }
+
+# relay.pyz is a build artifact and is not checked into the repository, so a
+# fresh clone has to build it first. Release tarballs ship it already built.
+if [ ! -f "$PYZ" ] && [ -f "$ROOT/build_release.py" ]; then
+  echo "relay.pyz not found; building it from source..."
+  "$PYTHON" "$ROOT/build_release.py" >/dev/null
+fi
+
+if [ ! -f "$PYZ" ]; then
+  echo "relay.pyz not found: $PYZ" >&2
+  echo "Build it with: $PYTHON build_release.py" >&2
+  exit 1
+fi
 
 mkdir -p "$INSTALL_DIR" "$RELAY_HOME"
 cp "$PYZ" "$INSTALL_DIR/relay.pyz"

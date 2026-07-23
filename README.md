@@ -59,10 +59,24 @@ Relay-agent is a reliable task broker designed to connect your always-on AI agen
 ## 🚀 Installation & Verification
 
 ### 1. Clone & Install
+
 ```sh
 git clone https://github.com/miter37/Relay-agent.git
 cd Relay-agent
 ```
+
+`relay.pyz` is a build artifact and is **not** stored in the repository, so the
+installer builds it on first run. This needs no network access and takes a
+second. To build it yourself instead:
+
+```sh
+python build_release.py
+```
+
+> Prefer not to build? Download `relay.pyz` and `SHA256SUMS.txt` from the
+> [latest release](https://github.com/miter37/Relay-agent/releases/latest),
+> verify the checksum, and place `relay.pyz` in this directory before running
+> the installer.
 
 **Windows (PowerShell):**
 ```powershell
