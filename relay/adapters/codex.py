@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .base import Adapter, AdapterContext
 from ..errors import RelayError
-from ..model_catalog import ModelCatalog, DiscoveredModel
+from ..model_catalog import DiscoveredModel, ModelCatalog
 from ..model_discovery import list_codex_models
+from .base import Adapter, AdapterContext
 
 
 class CodexAdapter(Adapter):
@@ -47,23 +47,27 @@ class CodexAdapter(Adapter):
                 include_hidden=include_hidden,
             )
         except Exception as e:
-            raise RelayError("MODEL_DISCOVERY_FAILED", f"Codex app-server model list failed: {e}")
+            raise RelayError("MODEL_DISCOVERY_FAILED", f"Codex app-server model list failed: {e}") from e
 
         models = result if isinstance(result, list) else (result.get("data") or result.get("models", []))
         discovered = []
         for m in models:
-            discovered.append(DiscoveredModel(
-                id=m.get("slug") or m.get("id") or "",
-                display_name=m.get("displayName") or m.get("display_name") or "",
-                selectable_name=m.get("slug") or m.get("id") or "",
-                availability="available",
-                is_default=m.get("isDefault") or m.get("is_default") or False,
-                hidden=m.get("hidden", False),
-                reasoning_efforts=[r.get("reasoningEffort") for r in m.get("supportedReasoningEfforts", [])] if "supportedReasoningEfforts" in m else m.get("supported_reasoning_levels", []),
-                default_reasoning_effort=m.get("defaultReasoningEffort") or m.get("default_reasoning_level"),
-                metadata=m,
-            ))
-            
+            discovered.append(
+                DiscoveredModel(
+                    id=m.get("slug") or m.get("id") or "",
+                    display_name=m.get("displayName") or m.get("display_name") or "",
+                    selectable_name=m.get("slug") or m.get("id") or "",
+                    availability="available",
+                    is_default=m.get("isDefault") or m.get("is_default") or False,
+                    hidden=m.get("hidden", False),
+                    reasoning_efforts=[r.get("reasoningEffort") for r in m.get("supportedReasoningEfforts", [])]
+                    if "supportedReasoningEfforts" in m
+                    else m.get("supported_reasoning_levels", []),
+                    default_reasoning_effort=m.get("defaultReasoningEffort") or m.get("default_reasoning_level"),
+                    metadata=m,
+                )
+            )
+
         return ModelCatalog(
             worker=self.name,
             cli_version=self.version(),
@@ -71,7 +75,7 @@ class CodexAdapter(Adapter):
             source="app_server_model_list",
             account_scoped=True,
             authoritative=True,
-            models=discovered
+            models=discovered,
         )
 
     def build_command(self, ctx: AdapterContext) -> tuple[list[str], bytes | None, dict[str, str]]:
@@ -85,15 +89,17 @@ class CodexAdapter(Adapter):
             "--sandbox",
             str(ctx.config.get("sandbox", "workspace-write")),
         ]
-        args.extend([
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "-C",
-            str(ctx.workspace),
-            "--output-last-message",
-            str(ctx.result_file),
-        ])
+        args.extend(
+            [
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "-C",
+                str(ctx.workspace),
+                "--output-last-message",
+                str(ctx.result_file),
+            ]
+        )
         model = ctx.model or ctx.config.get("default_model")
         if model:
             args.extend(["--model", str(model)])
@@ -101,13 +107,13 @@ class CodexAdapter(Adapter):
             args.extend(["--output-schema", str(ctx.schema_file)])
         args.append("-")
         prompt = (
-            "Read request.md in the current working directory and complete it without asking questions. "
-            "Return only the requested final JSON or text. "
-            "For JSON work: Do not attempt direct filesystem writes for artifacts. Put every artifact's exact "
-            "content in the structured artifacts payload required by schema.json; Relay will safely materialize "
-            "the files, and the valid artifact payload counts as completed work. Artifact relative_path values "
-            "are relative to ./artifacts and must not start with artifacts/."
-        ).encode("utf-8")
+            b"Read request.md in the current working directory and complete it without asking questions. "
+            b"Return only the requested final JSON or text. "
+            b"For JSON work: Do not attempt direct filesystem writes for artifacts. Put every artifact's exact "
+            b"content in the structured artifacts payload required by schema.json; Relay will safely materialize "
+            b"the files, and the valid artifact payload counts as completed work. Artifact relative_path values "
+            b"are relative to ./artifacts and must not start with artifacts/."
+        )
         env = {
             "RELAY_PROVIDER_NAME": "codex",
             "RELAY_JOB_ID": ctx.job_id,

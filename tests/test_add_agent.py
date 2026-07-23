@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
-import re
 import shutil
-import socket
 import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,13 +14,12 @@ from relay.adapters.generic import (
     KNOWN_PLACEHOLDERS,
     GenericCLIAdapter,
     render_command_template,
-    validate_worker_id,
     validate_command_template,
+    validate_worker_id,
 )
 from relay.config import Config
 from relay.db import Database
 from relay.errors import RelayError
-
 
 PACKAGE = Path(__file__).resolve().parents[1]
 MOCKS = PACKAGE / "mocks"
@@ -97,14 +91,30 @@ class TemplateRenderingTests(unittest.TestCase):
         )
         self.assertEqual(
             rendered,
-            ["/usr/bin/opencode", "run", "--prompt", "/work/req.md", "--out",
-             "/work/result.json", "--artifacts", "/work/artifacts", "--model", "gpt-x"],
+            [
+                "/usr/bin/opencode",
+                "run",
+                "--prompt",
+                "/work/req.md",
+                "--out",
+                "/work/result.json",
+                "--artifacts",
+                "/work/artifacts",
+                "--model",
+                "gpt-x",
+            ],
         )
 
     def test_quotes_paths_with_spaces(self):
         rendered = render_command_template(
             "{cli} --prompt {request_file}",
-            {"cli": "/usr/bin/opencode", "request_file": "/work/has space/req.md", "result_file": "", "artifact_dir": "", "model": ""},
+            {
+                "cli": "/usr/bin/opencode",
+                "request_file": "/work/has space/req.md",
+                "result_file": "",
+                "artifact_dir": "",
+                "model": "",
+            },
         )
         self.assertEqual(rendered, ["/usr/bin/opencode", "--prompt", "/work/has space/req.md"])
 
@@ -231,16 +241,19 @@ class GetAdapterDispatchTests(unittest.TestCase):
 
     def test_builtin_claude_returns_claude_adapter(self):
         from relay.adapters.claude import ClaudeAdapter
+
         adapter = get_adapter("claude", self.config.worker("claude"), self.spec_root)
         self.assertIsInstance(adapter, ClaudeAdapter)
 
     def test_builtin_codex_returns_codex_adapter(self):
         from relay.adapters.codex import CodexAdapter
+
         adapter = get_adapter("codex", self.config.worker("codex"), self.spec_root)
         self.assertIsInstance(adapter, CodexAdapter)
 
     def test_builtin_antigravity_returns_antigravity_adapter(self):
         from relay.adapters.antigravity import AntigravityAdapter
+
         adapter = get_adapter("antigravity", self.config.worker("antigravity"), self.spec_root)
         self.assertIsInstance(adapter, AntigravityAdapter)
 
@@ -268,6 +281,7 @@ class AddAgentConfigPersistenceTests(unittest.TestCase):
 
     def test_apply_agent_registration_writes_block(self):
         from relay.cli import _apply_agent_registration
+
         _apply_agent_registration(
             self.config,
             worker_id="opencode",
@@ -295,12 +309,14 @@ class AddAgentConfigPersistenceTests(unittest.TestCase):
 
     def test_apply_agent_registration_refuses_builtin_id(self):
         from relay.cli import _apply_agent_registration
+
         with self.assertRaises(RelayError) as ctx:
             _apply_agent_registration(self.config, worker_id="claude", fields={"command": "x"})
         self.assertEqual(ctx.exception.code, "AGENT_BUILTIN")
 
     def test_apply_agent_registration_refuses_duplicate(self):
         from relay.cli import _apply_agent_registration
+
         fields = {
             "display_name": "X",
             "command": "x",
@@ -334,6 +350,7 @@ class AddAgentWizardFlowTests(unittest.TestCase):
 
     def _make_args(self, **overrides):
         from types import SimpleNamespace
+
         defaults = {
             "worker_id": None,
             "yes": True,
@@ -345,6 +362,7 @@ class AddAgentWizardFlowTests(unittest.TestCase):
 
     def test_non_tty_without_yes_errors(self):
         from relay.cli import _run_add_agent
+
         with patch("sys.stdin") as fake_stdin:
             fake_stdin.isatty.return_value = False
             args = self._make_args(yes=False)
@@ -354,12 +372,11 @@ class AddAgentWizardFlowTests(unittest.TestCase):
 
     def test_yes_mode_uses_env_vars_and_runs_health(self):
         from relay.cli import _run_add_agent
+
         os.environ["RELAY_ADD_AGENT_ID"] = "opencode"
         os.environ["RELAY_ADD_AGENT_DISPLAY_NAME"] = "OpenCode"
         os.environ["RELAY_ADD_AGENT_COMMAND"] = "opencode"
-        os.environ["RELAY_ADD_AGENT_COMMAND_TEMPLATE"] = (
-            "{cli} exec --prompt {request_file} --output {result_file}"
-        )
+        os.environ["RELAY_ADD_AGENT_COMMAND_TEMPLATE"] = "{cli} exec --prompt {request_file} --output {result_file}"
         os.environ["RELAY_ADD_AGENT_DEFAULT_MODEL"] = "gpt-x"
         os.environ["RELAY_ADD_AGENT_REQUIRE_DEEP"] = "true"
         os.environ["RELAY_ADD_AGENT_ENABLE"] = "true"
@@ -388,12 +405,11 @@ class AddAgentWizardFlowTests(unittest.TestCase):
 
     def test_health_failure_aborts_no_persistence(self):
         from relay.cli import _run_add_agent
+
         os.environ["RELAY_ADD_AGENT_ID"] = "opencode"
         os.environ["RELAY_ADD_AGENT_DISPLAY_NAME"] = "OpenCode"
         os.environ["RELAY_ADD_AGENT_COMMAND"] = "opencode"
-        os.environ["RELAY_ADD_AGENT_COMMAND_TEMPLATE"] = (
-            "{cli} exec --prompt {request_file} --output {result_file}"
-        )
+        os.environ["RELAY_ADD_AGENT_COMMAND_TEMPLATE"] = "{cli} exec --prompt {request_file} --output {result_file}"
 
         try:
             with patch("relay.cli._run_health_check") as mock_health:
@@ -419,12 +435,11 @@ class AddAgentWizardFlowTests(unittest.TestCase):
 
     def test_skip_health_check_persists_without_audit(self):
         from relay.cli import _run_add_agent
+
         os.environ["RELAY_ADD_AGENT_ID"] = "opencode"
         os.environ["RELAY_ADD_AGENT_DISPLAY_NAME"] = "OpenCode"
         os.environ["RELAY_ADD_AGENT_COMMAND"] = "opencode"
-        os.environ["RELAY_ADD_AGENT_COMMAND_TEMPLATE"] = (
-            "{cli} exec --prompt {request_file} --output {result_file}"
-        )
+        os.environ["RELAY_ADD_AGENT_COMMAND_TEMPLATE"] = "{cli} exec --prompt {request_file} --output {result_file}"
         os.environ["RELAY_ADD_AGENT_ENABLE"] = "true"
 
         try:
@@ -442,16 +457,19 @@ class AddAgentWizardFlowTests(unittest.TestCase):
 
     def test_interactive_wizard_collects_inputs(self):
         from relay.cli import _run_add_agent_wizard
-        inputs = iter([
-            "opencode",          # worker_id
-            "OpenCode",          # display name
-            "opencode",          # command
-            "{cli} exec --prompt {request_file} --output {result_file}",  # template
-            "gpt-x",             # default model
-            "",                  # require_deep default Y
-            "",                  # enable default Y
-            "n",                 # decline health check
-        ])
+
+        inputs = iter(
+            [
+                "opencode",  # worker_id
+                "OpenCode",  # display name
+                "opencode",  # command
+                "{cli} exec --prompt {request_file} --output {result_file}",  # template
+                "gpt-x",  # default model
+                "",  # require_deep default Y
+                "",  # enable default Y
+                "n",  # decline health check
+            ]
+        )
         outputs: list[str] = []
 
         def fake_prompt(text, default=None):
@@ -464,13 +482,15 @@ class AddAgentWizardFlowTests(unittest.TestCase):
 
         # The above closure got messy; use a simpler approach:
         outputs2: list[str] = []
-        prompt_iter = iter([
-            "opencode",
-            "OpenCode",
-            "opencode",
-            "{cli} exec --prompt {request_file} --output {result_file}",
-            "gpt-x",
-        ])
+        prompt_iter = iter(
+            [
+                "opencode",
+                "OpenCode",
+                "opencode",
+                "{cli} exec --prompt {request_file} --output {result_file}",
+                "gpt-x",
+            ]
+        )
         yes_no_iter = iter(["", "", "n"])
 
         def prompt2(text, default=None):
@@ -506,6 +526,7 @@ class AddAgentCliHelpTests(unittest.TestCase):
 
     def test_top_level_help_lists_add_agent(self):
         from relay.cli import build_parser
+
         parser = build_parser()
         help_text = parser.format_help()
         self.assertIn("add-agent", help_text)
@@ -515,6 +536,7 @@ class AddAgentCliHelpTests(unittest.TestCase):
 
     def test_add_agent_help_has_examples(self):
         from relay.cli import build_parser
+
         parser = build_parser()
         sub = parser._subparsers._group_actions[0].choices.get("add-agent")
         self.assertIsNotNone(sub)
@@ -539,8 +561,9 @@ class AgentDoctorHealthCheckTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_run_health_check_uses_doctor(self):
-        from relay.cli import _run_health_check
         from relay.adapters.base import Adapter
+        from relay.cli import _run_health_check
+
         # Patch executable() on the GenericCLIAdapter returned by get_adapter
         # so the adapter believes it is installed but the real subprocess.run
         # in shallow_audit() fails.
@@ -555,9 +578,7 @@ class AgentDoctorHealthCheckTests(unittest.TestCase):
                     "command": "opencode",
                     "command_template": "{cli} exec --prompt {request_file} --output {result_file}",
                 }
-                result = _run_health_check(
-                    "opencode", fake_worker_config, self.config, self.db, deep=True
-                )
+                result = _run_health_check("opencode", fake_worker_config, self.config, self.db, deep=True)
         finally:
             Adapter.executable = original_executable
         self.assertFalse(result["shallow_ok"])

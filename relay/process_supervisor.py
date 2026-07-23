@@ -6,12 +6,11 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .models import ProcessOutcome
 from .util import ensure_dir, redact_env, utc_now
-
 
 _PROMPT_MARKERS = (
     "do you want to proceed",
@@ -52,10 +51,17 @@ class WindowsJobObject:
             ]
 
         class IO_COUNTERS(ctypes.Structure):
-            _fields_ = [(name, ctypes.c_ulonglong) for name in (
-                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-            )]
+            _fields_ = [
+                (name, ctypes.c_ulonglong)
+                for name in (
+                    "ReadOperationCount",
+                    "WriteOperationCount",
+                    "OtherOperationCount",
+                    "ReadTransferCount",
+                    "WriteTransferCount",
+                    "OtherTransferCount",
+                )
+            ]
 
         class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
             _fields_ = [
@@ -69,9 +75,7 @@ class WindowsJobObject:
 
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = 0x00002000
-        ok = kernel32.SetInformationJobObject(
-            self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)
-        )
+        ok = kernel32.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info))
         if not ok:
             kernel32.CloseHandle(self.handle)
             self.handle = None

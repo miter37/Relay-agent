@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import shutil
-from pathlib import Path
 from typing import Any
 
 from .adapters import get_adapter
@@ -10,10 +8,10 @@ from .adapters.base import AdapterContext
 from .config import Config
 from .db import Database
 from .errors import RelayError
-from .models import AdapterSpec, JobRequest
+from .models import AdapterSpec
 from .process_supervisor import run_supervised
-from .request_builder import STANDARD_JSON_SCHEMA, write_schema
-from .util import ensure_dir, json_dump, new_job_id, utc_now
+from .request_builder import write_schema
+from .util import ensure_dir, new_job_id, utc_now
 from .validation import materialize_artifact_payloads, scan_artifacts, validate_json_result
 
 
@@ -29,7 +27,9 @@ class Doctor:
             cfg = self.config.worker(worker)
             adapter = get_adapter(worker, cfg, self.spec_root)
             spec = adapter.shallow_audit()
-            self.db.add_audit(worker, spec.version, "shallow", "passed" if spec.shallow_ok else "failed", spec.to_dict())
+            self.db.add_audit(
+                worker, spec.version, "shallow", "passed" if spec.shallow_ok else "failed", spec.to_dict()
+            )
             if deep and spec.shallow_ok:
                 spec = self._deep_probe(adapter, spec)
             results.append(spec.to_dict())
@@ -111,12 +111,14 @@ Do not ask questions. Do not wait for user input.
             output_ok = value.get("answer") == "RELAY_UNATTENDED_OK"
             unattended_ok = not outcome.interactive_prompt_detected and not outcome.stalled
             deep_ok = output_ok and artifact_ok and unattended_ok
-            details.update({
-                "probe_exit_code": outcome.exit_code,
-                "probe_duration_seconds": round(outcome.duration_seconds, 2),
-                "probe_result": value,
-                "probe_artifacts": artifacts,
-            })
+            details.update(
+                {
+                    "probe_exit_code": outcome.exit_code,
+                    "probe_duration_seconds": round(outcome.duration_seconds, 2),
+                    "probe_result": value,
+                    "probe_artifacts": artifacts,
+                }
+            )
             spec.deep_ok = deep_ok
             spec.unattended_ok = unattended_ok
             spec.output_ok = output_ok

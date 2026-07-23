@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .base import Adapter, AdapterContext
 from ..errors import RelayError
-from ..model_catalog import ModelCatalog, DiscoveredModel
+from ..model_catalog import DiscoveredModel, ModelCatalog
 from ..model_discovery import parse_claude_settings, probe_claude_model
+from .base import Adapter, AdapterContext
 
 
 class ClaudeAdapter(Adapter):
@@ -50,15 +50,17 @@ class ClaudeAdapter(Adapter):
                     method = "minimal_inference"
                 else:
                     avail = "unavailable"
-            
-            discovered.append(DiscoveredModel(
-                id=m,
-                display_name=m,
-                selectable_name=m,
-                availability=avail,
-                verification_method=method,
-            ))
-            
+
+            discovered.append(
+                DiscoveredModel(
+                    id=m,
+                    display_name=m,
+                    selectable_name=m,
+                    availability=avail,
+                    verification_method=method,
+                )
+            )
+
         return ModelCatalog(
             worker=self.name,
             cli_version=self.version(),
@@ -67,7 +69,7 @@ class ClaudeAdapter(Adapter):
             account_scoped=False,
             authoritative=False,
             models=discovered,
-            warnings=["Claude Code does not expose a supported non-interactive full model-list command."]
+            warnings=["Claude Code does not expose a supported non-interactive full model-list command."],
         )
 
     def permission_mode(self) -> str:
@@ -145,7 +147,7 @@ class ClaudeAdapter(Adapter):
             start = candidate.find("{")
             end = candidate.rfind("}")
             if start >= 0 and end > start:
-                candidate = candidate[start:end + 1]
+                candidate = candidate[start : end + 1]
             try:
                 candidate = json.loads(candidate)
             except json.JSONDecodeError as exc:

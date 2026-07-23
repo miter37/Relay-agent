@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
 import shutil
+import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +20,7 @@ from .request_builder import build_request_markdown, copy_attachments, write_sch
 from .security import validate_attachment_paths, validate_requested_paths
 from .util import (
     ensure_dir,
+    is_within,
     json_dump,
     local_date,
     new_job_id,
@@ -28,7 +28,6 @@ from .util import (
     sha256_file,
     task_hash,
     utc_now,
-    is_within,
 )
 from .validation import (
     materialize_artifact_payloads,
@@ -38,12 +37,24 @@ from .validation import (
     validate_text_result,
 )
 
-
 TECHNICAL_FALLBACK_CODES = {
-    "WORKER_NOT_INSTALLED", "WORKER_DISABLED", "WORKER_UNVERIFIED", "WORKER_UNHEALTHY",
-    "AUTH_REQUIRED", "RATE_LIMITED", "QUOTA_EXCEEDED", "TIMEOUT", "STALL_TIMEOUT",
-    "INTERACTIVE_PROMPT_DETECTED", "PROCESS_CRASHED", "EMPTY_OUTPUT", "OUTPUT_NOT_CREATED",
-    "INVALID_JSON", "SCHEMA_MISMATCH", "ARTIFACT_PATH_VIOLATION", "CAPABILITY_AUDIT_FAILED",
+    "WORKER_NOT_INSTALLED",
+    "WORKER_DISABLED",
+    "WORKER_UNVERIFIED",
+    "WORKER_UNHEALTHY",
+    "AUTH_REQUIRED",
+    "RATE_LIMITED",
+    "QUOTA_EXCEEDED",
+    "TIMEOUT",
+    "STALL_TIMEOUT",
+    "INTERACTIVE_PROMPT_DETECTED",
+    "PROCESS_CRASHED",
+    "EMPTY_OUTPUT",
+    "OUTPUT_NOT_CREATED",
+    "INVALID_JSON",
+    "SCHEMA_MISMATCH",
+    "ARTIFACT_PATH_VIOLATION",
+    "CAPABILITY_AUDIT_FAILED",
 }
 
 
@@ -89,7 +100,9 @@ class RelayEngine:
     def create_job(self, request: JobRequest, queued: bool = False) -> tuple[dict[str, Any], bool]:
         self._resolve_request_task(request)
         self.config.reload()
-        if request.caller.lower() in {"hermes", "service", "daemon"} and not self.config.get("service_isolation_acknowledged", False):
+        if request.caller.lower() in {"hermes", "service", "daemon"} and not self.config.get(
+            "service_isolation_acknowledged", False
+        ):
             raise RelayError(
                 "PERMISSION_BLOCKED",
                 "Hermes/service execution requires a dedicated low-privilege OS account. "
@@ -103,7 +116,9 @@ class RelayEngine:
                     "WORKSPACE_PATH_NOT_ALLOWED",
                     f"Service workspace is outside the configured workspace root: {workspace_root}",
                 )
-        computed_hash = task_hash(request.task, request.attachments, request.profile, request.worker, request.result_format)
+        computed_hash = task_hash(
+            request.task, request.attachments, request.profile, request.worker, request.result_format
+        )
         if request.request_id:
             existing = self.db.get_by_request_id(request.request_id)
             if existing:
@@ -115,7 +130,7 @@ class RelayEngine:
                 return existing, True
         if not request.force_new:
             minutes = int(self.config.get("soft_dedup_window_minutes", 30))
-            since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+            since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
             existing = self.db.find_recent_task(computed_hash, since)
             action = self.config.get(
                 "soft_dedup_hermes_action" if request.caller.lower() == "hermes" else "soft_dedup_human_action",
@@ -145,7 +160,7 @@ class RelayEngine:
         }
         try:
             self.db.create_job(row)
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as exc:
             if not request.request_id:
                 raise
             existing = self.db.get_by_request_id(request.request_id)
@@ -155,7 +170,7 @@ class RelayEngine:
                 raise RelayError(
                     "REQUEST_ID_CONFLICT",
                     f"request_id is already associated with a different task: {request.request_id}",
-                )
+                ) from exc
             return existing, True
         self.db.add_event(job_id, "JOB_CREATED", {"queued": queued, "request_id": request.request_id})
         return self.db.get_job(job_id) or row, False
@@ -174,7 +189,9 @@ class RelayEngine:
         return [x for x in chain if x in {"claude", "codex", "antigravity"} and not (x in seen or seen.add(x))]
 
     def _prepare_workspace(self, job_id: str, worker: str, request: JobRequest) -> dict[str, Path]:
-        workspace_root = safe_resolve(Path(request.workspace)) if request.workspace else self.config.path_value("workspace_root")
+        workspace_root = (
+            safe_resolve(Path(request.workspace)) if request.workspace else self.config.path_value("workspace_root")
+        )
         workspace = workspace_root / worker / job_id
         if workspace.exists():
             shutil.rmtree(workspace, ignore_errors=True)
@@ -189,14 +206,17 @@ class RelayEngine:
         request_md = build_request_markdown(request, result_file, artifact_dir, attachments)
         request_file = workspace / "request.md"
         request_file.write_text(request_md, encoding="utf-8", newline="\n")
-        json_dump(workspace / "relay-context.json", {
-            "job_id": job_id,
-            "result_format": request.result_format,
-            "result_file": str(result_file),
-            "artifact_dir": str(artifact_dir),
-            "profile": request.profile,
-            "attachments": attachments,
-        })
+        json_dump(
+            workspace / "relay-context.json",
+            {
+                "job_id": job_id,
+                "result_format": request.result_format,
+                "result_file": str(result_file),
+                "artifact_dir": str(artifact_dir),
+                "profile": request.profile,
+                "attachments": attachments,
+            },
+        )
         return {
             "workspace": workspace,
             "runtime": runtime_dir,
@@ -305,7 +325,9 @@ class RelayEngine:
                     failure_message=message,
                 )
                 if code == "CANCELLED":
-                    self.db.update_job(job_id, status="CANCELLED", error_code=code, error_message=message, completed_at=utc_now())
+                    self.db.update_job(
+                        job_id, status="CANCELLED", error_code=code, error_message=message, completed_at=utc_now()
+                    )
                     return self.receipt(job_id)
                 errors.append({"worker": worker, "code": code, "message": message})
                 if job["fallback_enabled"] and code in TECHNICAL_FALLBACK_CODES:
@@ -410,7 +432,9 @@ class RelayEngine:
             except RelayError as err:
                 self.db.update_attempt(
                     attempt_id,
-                    status="OUTPUT_INVALID" if err.code in {"INVALID_JSON", "SCHEMA_MISMATCH", "EMPTY_OUTPUT", "OUTPUT_NOT_CREATED"} else "FAILED",
+                    status="OUTPUT_INVALID"
+                    if err.code in {"INVALID_JSON", "SCHEMA_MISMATCH", "EMPTY_OUTPUT", "OUTPUT_NOT_CREATED"}
+                    else "FAILED",
                     completed_at=utc_now(),
                     exit_code=outcome.exit_code,
                     failure_code=err.code,

@@ -8,7 +8,6 @@ from .errors import RelayError
 from .models import JobRequest
 from .util import ensure_dir, sha256_file
 
-
 STANDARD_JSON_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

@@ -11,7 +11,6 @@ from typing import Any
 from .errors import RelayError
 from .util import is_within, sha256_file
 
-
 REQUIRED_JSON_FIELDS = {
     "schema_version": str,
     "status": str,
@@ -158,13 +157,15 @@ def scan_artifacts(artifact_dir: Path, max_files: int, max_total_bytes: int) -> 
                 raise RelayError("ARTIFACT_PATH_VIOLATION", "Artifact count or total size exceeds configured limits")
             rel = path.relative_to(artifact_dir).as_posix()
             mime, _ = mimetypes.guess_type(path.name)
-            files.append({
-                "name": path.name,
-                "relative_path": rel,
-                "mime_type": mime or "application/octet-stream",
-                "size": size,
-                "sha256": sha256_file(path),
-            })
+            files.append(
+                {
+                    "name": path.name,
+                    "relative_path": rel,
+                    "mime_type": mime or "application/octet-stream",
+                    "size": size,
+                    "sha256": sha256_file(path),
+                }
+            )
     return sorted(files, key=lambda x: x["relative_path"])
 
 

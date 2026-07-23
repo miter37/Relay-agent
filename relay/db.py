@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .util import utc_now
-
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -215,7 +215,12 @@ class Database:
         with self.connect() as conn:
             conn.execute(
                 "INSERT INTO events(job_id,timestamp,event_type,payload_json) VALUES(?,?,?,?)",
-                (job_id, utc_now(), event_type, json.dumps(payload, ensure_ascii=False) if payload is not None else None),
+                (
+                    job_id,
+                    utc_now(),
+                    event_type,
+                    json.dumps(payload, ensure_ascii=False) if payload is not None else None,
+                ),
             )
 
     def events_for_job(self, job_id: str) -> list[dict[str, Any]]:
@@ -237,14 +242,28 @@ class Database:
             rows = conn.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY artifact_id", (job_id,)).fetchall()
             return [dict(r) for r in rows]
 
-    def add_audit(self, worker: str, version: str | None, test_name: str, result: str,
-                  details: Any = None, spec_hash: str | None = None) -> None:
+    def add_audit(
+        self,
+        worker: str,
+        version: str | None,
+        test_name: str,
+        result: str,
+        details: Any = None,
+        spec_hash: str | None = None,
+    ) -> None:
         with self.connect() as conn:
             conn.execute(
                 "INSERT INTO capability_audits(worker,version,audit_time,test_name,result,details_json,spec_hash) "
                 "VALUES(?,?,?,?,?,?,?)",
-                (worker, version, utc_now(), test_name, result,
-                 json.dumps(details, ensure_ascii=False) if details is not None else None, spec_hash),
+                (
+                    worker,
+                    version,
+                    utc_now(),
+                    test_name,
+                    result,
+                    json.dumps(details, ensure_ascii=False) if details is not None else None,
+                    spec_hash,
+                ),
             )
 
     def recover_interrupted(self) -> int:

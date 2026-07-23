@@ -51,8 +51,7 @@ class Adapter(ABC):
         try:
             cp = subprocess.run(
                 [executable, *args],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -131,7 +130,11 @@ class Adapter(ABC):
                 f"{self.name} has no capability audit for its installed version. Run relay doctor --worker {self.name} --deep.",
             )
         current_executable = self.executable()
-        if current_executable and spec.executable and Path(current_executable).resolve() != Path(spec.executable).resolve():
+        if (
+            current_executable
+            and spec.executable
+            and Path(current_executable).resolve() != Path(spec.executable).resolve()
+        ):
             raise RelayError(
                 "WORKER_UNVERIFIED",
                 f"{self.name} executable path changed since audit. Run relay doctor --worker {self.name} --deep.",

@@ -17,3 +17,26 @@ version = { attr = "relay.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["relay*"]
+
+# ruff is a development tool only. Relay-agent itself has zero runtime
+# dependencies and we intend to keep it that way.
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["relay.pyz", "mocks"]
+
+[tool.ruff.lint]
+# Deliberately conservative to start with. Widen once this is settled.
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes: unused names, undefined names, real bugs
+    "I",  # import ordering
+    "UP", # outdated syntax
+    "B",  # flake8-bugbear: common traps
+]
+ignore = [
+    "E501", # line length is the formatter's job, not the linter's
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["relay"]

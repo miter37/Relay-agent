@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .base import Adapter, AdapterContext
 from ..errors import RelayError
-from ..model_catalog import ModelCatalog, DiscoveredModel
+from ..model_catalog import DiscoveredModel, ModelCatalog
 from ..model_discovery import parse_agy_models
+from .base import Adapter, AdapterContext
 
 
 class AntigravityAdapter(Adapter):
@@ -40,12 +40,7 @@ class AntigravityAdapter(Adapter):
             )
         model_names = parse_agy_models(stdout)
         discovered = [
-            DiscoveredModel(
-                id=m,
-                display_name=m,
-                selectable_name=m,
-                availability="available"
-            ) for m in model_names
+            DiscoveredModel(id=m, display_name=m, selectable_name=m, availability="available") for m in model_names
         ]
         return ModelCatalog(
             worker=self.name,
@@ -54,7 +49,7 @@ class AntigravityAdapter(Adapter):
             source="agy_models",
             account_scoped=True,
             authoritative=True,
-            models=discovered
+            models=discovered,
         )
 
     def build_command(self, ctx: AdapterContext) -> tuple[list[str], bytes | None, dict[str, str]]:
@@ -95,7 +90,7 @@ class AntigravityAdapter(Adapter):
         start = raw.find("{")
         end = raw.rfind("}")
         if start >= 0 and end > start:
-            raw = raw[start:end + 1]
+            raw = raw[start : end + 1]
         try:
             value = json.loads(raw)
         except json.JSONDecodeError as exc:
