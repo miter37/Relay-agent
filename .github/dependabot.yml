@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Relay has zero third-party Python dependencies, so there is no pip
+  # ecosystem to watch. The GitHub Actions in .github/workflows/ are third-party
+  # code, though, and do need to stay current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    labels:
+      - "ci/build"

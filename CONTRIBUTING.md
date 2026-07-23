@@ -31,6 +31,58 @@ First off, thank you for considering contributing to Relay-agent! We welcome PRs
 4. Ensure all tests pass.
 5. Submit a PR and fill out the provided template.
 
+CI runs the full suite on Windows, macOS, and Linux across Python 3.11–3.13
+for every PR. All nine combinations must pass before a PR is merged.
+
+## Commit Messages
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>: <short summary in imperative mood>
+```
+
+| Type       | Use for                                                 |
+|------------|---------------------------------------------------------|
+| `feat`     | A new user-facing capability                             |
+| `fix`      | A bug fix                                                |
+| `docs`     | Documentation only                                       |
+| `spec`     | Design documents under `docs/superpowers/specs/`         |
+| `test`     | Adding or fixing tests                                   |
+| `refactor` | Code change with no behavior change                      |
+| `style`    | Formatting only (no logic change)                        |
+| `chore`    | Build, CI, release, tooling                              |
+| `security` | Security-relevant change (also open a `security` issue)  |
+
+Examples:
+
+```
+feat: add relay update command with checksum verification
+fix: terminate orphaned browser helpers on Windows job object teardown
+docs: correct clone URL in CONTRIBUTING
+chore: release v0.6.0
+```
+
+Keep the summary under 72 characters. Put details in the body if needed.
+
+## Documentation Language
+
+This project maintains documentation in two languages by design:
+
+| Audience                  | Language | Files |
+|---------------------------|----------|-------|
+| Public / contributors     | English  | `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/superpowers/**`, all CLI `--help` output |
+| Operators / agent authors | Korean   | `manual.md`, `skills/hermes-relay/SKILL.md`, `docs/KNOWN_LIMITATIONS.md` |
+
+When editing a file, **match the language already used in that file.** Do not
+translate existing documents as part of an unrelated PR — open a separate
+issue first if you believe a document should switch languages.
+
+## Reporting Security Issues
+
+Do not open a public issue for a suspected vulnerability. See
+[`SECURITY.md`](SECURITY.md) for the private reporting process.
+
 ## Code Style
 
 - Keep code simple and explicit.
