@@ -18,6 +18,7 @@ from .db import Database
 from .engine import RelayEngine
 from .errors import RelayError
 from .models import JobRequest
+from .schedules.retention import ScheduleRetentionManager
 from .schedules.runtime import ScheduleRuntime
 from .schedules.service import ScheduleService
 from .util import ensure_dir, json_dump, random_token, utc_now
@@ -93,11 +94,14 @@ class MaintenanceLoop:
     def __init__(self, config: Config, db: Database):
         self.config = config
         self.manager = CleanupManager(config, db)
+        self.schedule_manager = ScheduleRetentionManager(config, db)
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:
-        if not bool(self.config.get("cleanup_enabled", True)):
+        if not bool(self.config.get("cleanup_enabled", True)) and not bool(
+            self.config.get("schedule_retention_enabled", True)
+        ):
             return
         self.thread = threading.Thread(target=self.loop, name="relay-maintenance", daemon=True)
         self.thread.start()
@@ -108,6 +112,8 @@ class MaintenanceLoop:
             try:
                 if self.manager.due():
                     self.manager.run()
+                if self.schedule_manager.due():
+                    self.schedule_manager.run()
             except Exception:
                 # Maintenance must never terminate the job daemon. The report will be retried next cycle.
                 pass
@@ -172,6 +178,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     "status": "running",
                     "started_at": self.daemon.started_at,
                     "cleanup": self.daemon.maintenance.manager.status(),
+                    "schedule_retention": self.daemon.maintenance.schedule_manager.status(),
                     "daemon_version": __version__,
                     "api_versions": ["v1"],
                     "api_schema_revision": 3,

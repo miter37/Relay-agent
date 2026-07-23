@@ -11,7 +11,7 @@ from ..config import Config
 from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
-from ..util import new_job_id
+from ..util import ensure_dir, json_dump, new_job_id
 from .rules import next_occurrences
 from .snapshots import build_scheduled_request, load_snapshot, schedule_output_paths, validate_source_job
 
@@ -161,6 +161,12 @@ class ScheduleRuntime:
                 request.result_format,
                 output_root=Path(schedule["output_root"]),
             )
+            run_root = output_path.parent
+            ensure_dir(run_root)
+            json_dump(
+                run_root / ".relay-schedule-run.json",
+                {"schedule_id": schedule_id, "run_id": run["run_id"]},
+            )
             request = build_scheduled_request(request, snapshot, output_path, artifact_path)
             queued = self.engine.queue_scheduled(
                 request,
@@ -168,6 +174,7 @@ class ScheduleRuntime:
                 scheduled_for=run["scheduled_for_utc"],
                 output_path=output_path,
                 artifact_path=artifact_path,
+                schedule_output_root=Path(schedule["output_root"]),
             )
             self.db.link_schedule_run_job(run["run_id"], queued["job_id"], status="QUEUED")
             result["queued"] += 1

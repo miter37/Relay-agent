@@ -143,6 +143,7 @@ class RelayEngine:
         *,
         schedule_id: str | None = None,
         scheduled_for: str | None = None,
+        schedule_output_root: Path | None = None,
     ) -> tuple[dict[str, Any], bool]:
         self._resolve_request_task(request)
         self.config.reload()
@@ -188,7 +189,13 @@ class RelayEngine:
                 return existing, True
         job_id = new_job_id()
         output, artifacts = self._default_paths(job_id, request)
-        validate_requested_paths(self.config, request.caller, output, artifacts)
+        validate_requested_paths(
+            self.config,
+            request.caller,
+            output,
+            artifacts,
+            extra_output_roots=[str(schedule_output_root)] if schedule_output_root else (),
+        )
         fallback = self.config.get("fallback_enabled", True) if request.fallback is None else request.fallback
         title, task_preview = self._job_title_and_preview(request, job_id)
         replayable = bool(self.config.get("store_replayable_requests", True))
@@ -576,6 +583,7 @@ class RelayEngine:
         scheduled_for: str,
         output_path: Path,
         artifact_path: Path,
+        schedule_output_root: Path | None = None,
     ) -> dict[str, Any]:
         request.caller = "schedule"
         request.force_new = True
@@ -587,6 +595,7 @@ class RelayEngine:
             submitted_via="schedule",
             schedule_id=schedule_id,
             scheduled_for=scheduled_for,
+            schedule_output_root=schedule_output_root,
         )
         return {
             "ok": True,

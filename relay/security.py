@@ -13,11 +13,26 @@ def _allowed(path: Path, roots: Iterable[str]) -> bool:
     return any(is_within(path, Path(root)) for root in roots)
 
 
-def validate_requested_paths(config: Config, caller: str, output_path: Path, artifact_path: Path) -> None:
+def validate_requested_paths(
+    config: Config,
+    caller: str,
+    output_path: Path,
+    artifact_path: Path,
+    *,
+    extra_output_roots: Iterable[str] = (),
+) -> None:
     service_mode = caller.lower() in {"hermes", "service", "daemon", "schedule"}
     if service_mode or not config.get("allow_manual_outside_roots", True):
-        output_roots = [*config.get("allowed_output_roots", []), str(config.home / "schedule-outputs")]
-        artifact_roots = [*config.get("allowed_artifact_roots", []), str(config.home / "schedule-outputs")]
+        output_roots = [
+            *config.get("allowed_output_roots", []),
+            str(config.home / "schedule-outputs"),
+            *extra_output_roots,
+        ]
+        artifact_roots = [
+            *config.get("allowed_artifact_roots", []),
+            str(config.home / "schedule-outputs"),
+            *extra_output_roots,
+        ]
         if not _allowed(output_path, output_roots):
             raise RelayError("OUTPUT_PATH_NOT_ALLOWED", f"Output path is outside allowed roots: {output_path}")
         if not _allowed(artifact_path, artifact_roots):

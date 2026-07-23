@@ -204,7 +204,10 @@ def schedule_output_paths(
 ) -> tuple[Path, Path]:
     if scheduled_local.tzinfo is None:
         raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Scheduled output time must include a timezone.")
-    root = safe_resolve(output_root or config.home / "schedule-outputs" / schedule_id)
+    raw_root = Path(output_root or config.home / "schedule-outputs" / schedule_id).expanduser()
+    if _has_symlink_component(raw_root):
+        raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Schedule output root cannot contain symlinks.")
+    root = safe_resolve(raw_root)
     folder = f"{scheduled_local.strftime('%Y-%m-%d_%H%M%z')}_{run_id[:12]}"
     run_root = safe_resolve(root / folder)
     if not is_within(run_root, root):
