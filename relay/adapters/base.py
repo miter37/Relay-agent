@@ -144,6 +144,12 @@ class Adapter(ABC):
                 "WORKER_UNVERIFIED",
                 f"{self.name} deep doctor has not passed for version {spec.version}",
             )
+        expected_definition_hash = self.worker_config.get("_definition_hash")
+        if expected_definition_hash and spec.details.get("definition_hash") != expected_definition_hash:
+            raise RelayError(
+                "WORKER_UNVERIFIED",
+                f"{self.name} configuration changed since the last deep doctor audit",
+            )
         if spec.status != "healthy":
             raise RelayError("WORKER_UNHEALTHY", f"{self.name} audit status is {spec.status}")
         return spec

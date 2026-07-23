@@ -86,8 +86,14 @@ class GenericCLIAdapter(Adapter):
             pass
         else:
             self.name = str(worker_config.get("worker_id") or worker_config.get("name") or "agent")
-        self.command_name = str(worker_config.get("command") or self.command_name or self.name)
+        self.manifest_mode = "argv" in worker_config or "executable" in worker_config
+        self.command_name = str(
+            worker_config.get("executable") or worker_config.get("command") or self.command_name or self.name
+        )
         self.template = str(worker_config.get("command_template", ""))
+        self.argv = [str(item) for item in worker_config.get("argv", [])]
+        self.input_mode = str(worker_config.get("input_mode") or "request_file")
+        self.result_mode = str(worker_config.get("result_mode") or "result_file")
 
     def detect_capabilities(self, help_text: str) -> dict[str, Any]:
         return {
@@ -112,6 +118,29 @@ class GenericCLIAdapter(Adapter):
                 "WORKER_NOT_INSTALLED",
                 f"{self.name} executable not found: {self.command_name}",
             )
+        if self.manifest_mode:
+            if not self.argv:
+                raise RelayError("AGENT_TEMPLATE_INVALID", f"{self.name} has no argv configured")
+            model = ctx.model or ctx.config.get("default_model") or self.worker_config.get("default_model") or ""
+            values = {
+                "request_file": str(ctx.request_file),
+                "result_file": str(ctx.result_file),
+                "artifact_dir": str(ctx.artifact_dir),
+                "workspace": str(ctx.workspace),
+                "schema_file": str(ctx.schema_file),
+                "task": ctx.request_file.read_text(encoding="utf-8"),
+                "model": str(model),
+                "profile": str(ctx.profile),
+                "job_id": str(ctx.job_id),
+            }
+            args = [executable]
+            for token in self.argv:
+                rendered = token
+                for key, value in values.items():
+                    rendered = rendered.replace("{" + key + "}", value)
+                args.append(rendered)
+            stdin_bytes = ctx.request_file.read_bytes() if self.input_mode == "stdin" else None
+            return args, stdin_bytes, self._environment(ctx)
         if not self.template:
             raise RelayError(
                 "AGENT_TEMPLATE_INVALID",
@@ -149,6 +178,20 @@ class GenericCLIAdapter(Adapter):
             for key, value in env_extra.items():
                 env[str(key)] = str(value)
         return args, None, env
+
+    def _environment(self, ctx: AdapterContext) -> dict[str, str]:
+        env: dict[str, str] = {
+            "RELAY_PROVIDER_NAME": self.name,
+            "RELAY_JOB_ID": ctx.job_id,
+            "RELAY_STAGING_RESULT": str(ctx.result_file),
+            "RELAY_ARTIFACT_DIR": str(ctx.artifact_dir),
+            "RELAY_RESULT_FORMAT": ctx.result_format,
+        }
+        env_extra = self.worker_config.get("env_extra") or {}
+        if isinstance(env_extra, dict):
+            for key, value in env_extra.items():
+                env[str(key)] = str(value)
+        return env
 
     def normalize_output(self, ctx: AdapterContext, stdout_path: Path, stderr_path: Path) -> None:
         if ctx.result_file.exists() and ctx.result_file.stat().st_size:
