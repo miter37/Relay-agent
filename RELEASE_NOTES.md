@@ -1,6 +1,34 @@
-# Relay 0.5.1 release notes
+# Relay 0.6.0 release notes
 
-**This is the first published release.** No GitHub release existed before, so
+Relay 0.6.0 is the G0 foundation release for the desktop GUI roadmap.
+
+## Added
+
+- Versioned SQLite migration with pre-migration backups.
+- Committed Relay 0.5.0 empty and populated database fixtures.
+- Job history metadata for titles, previews, source labels, replayability, and future Schedule links.
+- `/health` compatibility fields for daemon version, API versions, schema revision, minimum GUI version, and Relay Home identity.
+- Read-only `/v1/jobs` and `/v1/jobs/{job_id}` APIs with filtering, search, and cursor pagination.
+- Compatibility decision helper and built-in Agent registry interface.
+
+## Compatibility
+
+- Existing CLI and daemon endpoints remain available.
+- Existing Relay 0.5.x databases are upgraded without deleting Job history.
+- Schedule tables and the desktop GUI remain planned for later releases.
+
+## Verification
+
+The full test suite and Ruff checks pass locally. GitHub Actions must verify
+the same result on Windows, Ubuntu, and macOS across Python 3.11–3.13 before
+the v0.6.0 tag is published.
+
+---
+
+## Historical v0.5.1 notes
+
+The following notes are retained from the v0.5.1 release for historical
+reference. No GitHub release existed before v0.5.1, so
 everything documented for 0.5.0 — automatic cleanup, Linux/macOS installers,
 `relay add-agent`, the English `--help` overhaul — ships here as well.
 

@@ -8,6 +8,7 @@ from typing import Any
 @dataclass(slots=True)
 class JobRequest:
     task: str
+    title: str | None = None
     task_file: str | None = None
     worker: str = "auto"
     fallback: bool | None = None

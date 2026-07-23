@@ -22,6 +22,7 @@ DEFAULTS: dict[str, Any] = {
     "max_concurrent_per_worker": 1,
     "fallback_enabled": True,
     "history_mode": "metadata",
+    "store_replayable_requests": True,
     "soft_dedup_window_minutes": 30,
     "soft_dedup_hermes_action": "reuse",
     "soft_dedup_human_action": "warn",
