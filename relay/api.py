@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from pathlib import Path
 from typing import Any
 
 from .db import Database
@@ -95,3 +96,179 @@ def list_jobs(
         "next_cursor": next_cursor,
         "has_more": has_more,
     }
+
+
+def _load_request(job: dict[str, Any]) -> dict[str, Any]:
+    value = job.get("request_json")
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def job_detail(engine, job_id: str) -> dict[str, Any]:
+    raw = engine.db.get_job(job_id)
+    if not raw:
+        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+    detail = engine.show(job_id)
+    request = _load_request(raw)
+    safe_request = {
+        key: request[key]
+        for key in (
+            "worker",
+            "fallback",
+            "fallback_agents",
+            "result_format",
+            "profile",
+            "timeout_seconds",
+            "workspace",
+            "overwrite",
+            "force_new",
+            "model",
+            "request_id",
+        )
+        if key in request
+    }
+    if engine._history_display_mode() == "full":
+        for key in ("task", "task_file", "attachments"):
+            if key in request:
+                safe_request[key] = request[key]
+    detail["request"] = safe_request
+    status = raw.get("status")
+    detail["actions"] = {
+        "can_cancel": status in {"QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING"},
+        "can_rerun": (
+            status in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}
+            and bool(raw.get("replayable", 1))
+            and raw.get("request_json") not in (None, "", "{}")
+        ),
+        "can_copy": bool(raw.get("replayable", 1)) or bool(detail.get("task_text") or detail.get("task_preview")),
+        "can_open_result": bool(detail.get("output_path") and Path(detail["output_path"]).is_file()),
+        "can_open_folder": bool(detail.get("artifact_path") and Path(detail["artifact_path"]).is_dir()),
+    }
+    return detail
+
+
+def job_result(db: Database, job_id: str, *, max_bytes: int = 1024 * 1024) -> dict[str, Any]:
+    job = db.get_job(job_id)
+    if not job:
+        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+    path = Path(job["output_path"])
+    if not path.is_file():
+        return {"ok": True, "job_id": job_id, "available": False, "path": str(path)}
+    raw = path.read_bytes()
+    truncated = len(raw) > max_bytes
+    text = raw[:max_bytes].decode("utf-8", errors="replace")
+    payload: dict[str, Any] = {
+        "ok": True,
+        "job_id": job_id,
+        "available": True,
+        "path": str(path),
+        "format": job.get("format"),
+        "size": len(raw),
+        "truncated": truncated,
+        "text": text,
+    }
+    if job.get("format") == "json" and not truncated:
+        try:
+            payload["data"] = json.loads(text)
+        except json.JSONDecodeError:
+            payload["data"] = None
+    return payload
+
+
+def job_artifacts(db: Database, job_id: str) -> dict[str, Any]:
+    if not db.get_job(job_id):
+        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+    return {"ok": True, "job_id": job_id, "artifacts": db.artifacts_for_job(job_id)}
+
+
+def job_events(db: Database, job_id: str) -> dict[str, Any]:
+    if not db.get_job(job_id):
+        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+    return {"ok": True, "job_id": job_id, "events": db.events_for_job(job_id)}
+
+
+def job_logs(
+    db: Database,
+    job_id: str,
+    *,
+    attempt_id: int,
+    stream: str,
+    offset: int | None = None,
+    limit: int = 16000,
+    errors_only: bool = False,
+) -> dict[str, Any]:
+    if not db.get_job(job_id):
+        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+    attempts = {int(row["attempt_id"]): row for row in db.attempts_for_job(job_id)}
+    attempt = attempts.get(attempt_id)
+    if not attempt:
+        raise RelayError("INVALID_REQUEST", "The attempt does not belong to this job.")
+    if stream not in {"stdout", "stderr"}:
+        raise RelayError("INVALID_REQUEST", "The log stream must be stdout or stderr.")
+    if limit < 1 or limit > 65536:
+        raise RelayError("INVALID_REQUEST", "The log limit must be between 1 and 65536 bytes.")
+    path_value = attempt.get(f"{stream}_path")
+    if not path_value:
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "stream": stream,
+            "text": "",
+            "next_offset": 0,
+            "eof": True,
+            "reset": False,
+        }
+    path = Path(path_value)
+    if not path.is_file():
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "stream": stream,
+            "text": "",
+            "next_offset": 0,
+            "eof": True,
+            "reset": False,
+        }
+    size = path.stat().st_size
+    reset = offset is not None and offset > size
+    start = max(size - limit, 0) if offset is None or reset else max(offset, 0)
+    with path.open("rb") as handle:
+        handle.seek(start)
+        chunk = handle.read(limit)
+    next_offset = start + len(chunk)
+    text = chunk.decode("utf-8", errors="replace")
+    if errors_only:
+        error_markers = ("error", "fail", "exception", "traceback")
+        text = "\n".join(
+            line for line in text.splitlines() if any(marker in line.casefold() for marker in error_markers)
+        )
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "stream": stream,
+        "text": text,
+        "path": str(path),
+        "start_offset": start,
+        "next_offset": next_offset,
+        "eof": next_offset >= size,
+        "reset": reset,
+    }
+
+
+def list_agents(engine) -> dict[str, Any]:
+    return {"ok": True, "agents": engine.agent_registry.list_agents()}
+
+
+def get_agent(engine, agent_id: str) -> dict[str, Any]:
+    try:
+        return {"ok": True, "agent": engine.agent_registry.get_definition(agent_id)}
+    except KeyError:
+        raise RelayError("INVALID_REQUEST", f"Unknown agent: {agent_id}") from None

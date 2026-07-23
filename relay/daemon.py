@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
-from .api import list_jobs
+from .api import get_agent, job_artifacts, job_detail, job_events, job_logs, job_result, list_agents, list_jobs
 from .cleanup import CleanupManager
 from .compatibility import relay_home_id
 from .config import Config
@@ -147,8 +147,8 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     "cleanup": self.daemon.maintenance.manager.status(),
                     "daemon_version": __version__,
                     "api_versions": ["v1"],
-                    "api_schema_revision": 1,
-                    "min_gui_version": "0.7.0",
+                    "api_schema_revision": 3,
+                    "min_gui_version": "0.8.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
                 },
             )
@@ -185,12 +185,53 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._api_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", str(exc))
             return
-        if path.startswith("/v1/jobs/"):
-            job_id = path[len("/v1/jobs/") :]
+        if path == "/v1/agents":
+            self._json(HTTPStatus.OK, list_agents(self.daemon.engine))
+            return
+        if path.startswith("/v1/agents/"):
             try:
-                self._json(HTTPStatus.OK, self.daemon.engine.show(job_id))
+                self._json(HTTPStatus.OK, get_agent(self.daemon.engine, path[len("/v1/agents/") :]))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path.startswith("/v1/jobs/"):
+            suffix = path[len("/v1/jobs/") :]
+            try:
+                if suffix.endswith("/result"):
+                    self._json(HTTPStatus.OK, job_result(self.daemon.db, suffix[: -len("/result")]))
+                elif suffix.endswith("/artifacts"):
+                    self._json(HTTPStatus.OK, job_artifacts(self.daemon.db, suffix[: -len("/artifacts")]))
+                elif suffix.endswith("/events"):
+                    self._json(HTTPStatus.OK, job_events(self.daemon.db, suffix[: -len("/events")]))
+                elif suffix.endswith("/logs"):
+                    values = parse_qs(parsed.query, keep_blank_values=True)
+                    attempt_values = values.get("attempt_id", [])
+                    stream_values = values.get("stream", [])
+                    offset_values = values.get("offset", [])
+                    limit_values = values.get("limit", [])
+                    errors_only_values = values.get("errors_only", [])
+                    if not attempt_values or not stream_values:
+                        raise RelayError("INVALID_REQUEST", "attempt_id and stream are required.")
+                    self._json(
+                        HTTPStatus.OK,
+                        job_logs(
+                            self.daemon.db,
+                            suffix[: -len("/logs")],
+                            attempt_id=int(attempt_values[0]),
+                            stream=stream_values[0],
+                            offset=int(offset_values[0]) if offset_values and offset_values[0] else None,
+                            limit=int(limit_values[0]) if limit_values and limit_values[0] else 16000,
+                            errors_only=bool(
+                                errors_only_values and errors_only_values[0].lower() in {"1", "true", "yes"}
+                            ),
+                        ),
+                    )
+                else:
+                    self._json(HTTPStatus.OK, job_detail(self.daemon.engine, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            except (TypeError, ValueError) as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(err))
             return
         for prefix, action in (("/status/", "status"), ("/result/", "result"), ("/show/", "show")):
             if path.startswith(prefix):
@@ -211,18 +252,29 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         try:
-            if self.path == "/submit":
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            if path == "/v1/jobs":
+                request = JobRequest.from_dict(self._body())
+                request.caller = "human"
+                self._json(HTTPStatus.OK, self.daemon.engine.queue(request, submitted_via="gui"))
+                return
+            if path.startswith("/v1/jobs/"):
+                suffix = path[len("/v1/jobs/") :]
+                if suffix.endswith("/cancel"):
+                    self._json(HTTPStatus.OK, self.daemon.engine.cancel(suffix[: -len("/cancel")]))
+                    return
+                if suffix.endswith("/rerun"):
+                    self._json(HTTPStatus.OK, self.daemon.engine.queue_rerun(suffix[: -len("/rerun")]))
+                    return
+            if path == "/submit":
                 request = JobRequest.from_dict(self._body())
                 caller = request.caller.strip().lower()
                 submitted_via = "hermes" if caller == "hermes" else "schedule" if caller == "schedule" else "cli"
                 self._json(200, self.daemon.engine.queue(request, submitted_via=submitted_via))
                 return
-            if self.path.startswith("/cancel/"):
-                job_id = self.path.split("/")[-1]
-                changed = self.daemon.engine.db.request_cancel(job_id)
-                self._json(
-                    200, {"ok": changed, "job_id": job_id, "status": "cancel_requested" if changed else "unchanged"}
-                )
+            if path.startswith("/cancel/"):
+                self._json(HTTPStatus.OK, self.daemon.engine.cancel(path[len("/cancel/") :]))
                 return
             if self.path == "/shutdown":
                 self._json(200, {"ok": True, "status": "stopping"})

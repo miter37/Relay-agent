@@ -12,6 +12,7 @@ class JobRequest:
     task_file: str | None = None
     worker: str = "auto"
     fallback: bool | None = None
+    fallback_agents: list[str] | None = None
     result_format: str = "json"
     output_path: str | None = None
     artifact_path: str | None = None

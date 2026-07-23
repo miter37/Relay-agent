@@ -1,6 +1,33 @@
-# Relay 0.6.0 release notes
+# Relay 0.8.0 release notes
 
-Relay 0.6.0 is the G0 foundation release for the desktop GUI roadmap.
+Relay 0.8.0 adds the first GUI write and job-control workflow.
+
+## Added
+
+- New Task screen with task text/file input, attachments, Agent, model, profile, timeout, output, and overwrite options.
+- GUI Job creation through the authenticated daemon API.
+- Stop task and Run again actions with replay/privacy gating.
+- Job detail tabs for overview, task, progress, result, files, logs, and events.
+- Incremental log tailing and bounded result previews.
+- GUI Agent registry endpoint and GUI/daemon API schema revision 3.
+
+## Compatibility
+
+- GUI-created Jobs remain visible to CLI history and status commands.
+- GUI write actions are disabled when daemon compatibility checks fail.
+- Non-replayable Jobs cannot be rerun.
+- Existing CLI and daemon endpoints remain available.
+
+## Verification
+
+The full test suite and Ruff checks pass locally. GitHub Actions verifies
+the same result on Windows, Ubuntu, and macOS across supported Python versions.
+
+---
+
+## Historical G0: Relay 0.6.0
+
+Relay 0.6.0 was the G0 foundation release for the desktop GUI roadmap.
 
 ## Added
 

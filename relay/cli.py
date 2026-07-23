@@ -65,6 +65,7 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("--worker", choices=["auto", "claude", "codex", "antigravity"], default="auto")
     parser.add_argument("--fallback", action="store_true", default=None)
     parser.add_argument("--no-fallback", action="store_false", dest="fallback")
+    parser.add_argument("--fallback-agent", action="append", default=None, dest="fallback_agents")
     parser.add_argument("--format", dest="result_format", choices=["json", "txt"])
     parser.add_argument("--out", dest="output_path")
     parser.add_argument("--artifacts", dest="artifact_path")
@@ -425,6 +426,7 @@ def _request_from_args(args, config: Config) -> JobRequest:
         task_file=args.task_file,
         worker=args.worker,
         fallback=args.fallback,
+        fallback_agents=args.fallback_agents,
         result_format=args.result_format or str(config.get("default_format", "json")),
         output_path=args.output_path,
         artifact_path=args.artifact_path,

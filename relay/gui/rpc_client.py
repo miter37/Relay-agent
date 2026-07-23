@@ -19,6 +19,12 @@ class GuiRpcClient(QObject):
         self._sequence = 0
 
     def get(self, path: str, *, timeout_ms: int = 5000) -> int:
+        return self._request("GET", path, None, timeout_ms=timeout_ms)
+
+    def post(self, path: str, payload: dict, *, timeout_ms: int = 15000) -> int:
+        return self._request("POST", path, payload, timeout_ms=timeout_ms)
+
+    def _request(self, method: str, path: str, payload, *, timeout_ms: int) -> int:
         self._sequence += 1
         request_id = self._sequence
         request = QNetworkRequest(
@@ -27,7 +33,8 @@ class GuiRpcClient(QObject):
         token_path = self.config.path_value("runtime_root") / "daemon.token"
         if token_path.exists():
             request.setRawHeader(b"X-Relay-Token", token_path.read_text(encoding="utf-8").strip().encode("utf-8"))
-        reply = self.manager.get(request)
+        data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        reply = self.manager.get(request) if method == "GET" else self.manager.post(request, data)
         reply.setProperty("relay_request_id", request_id)
         reply.setProperty("relay_timeout_ms", timeout_ms)
         reply.finished.connect(lambda: self._finished(reply))

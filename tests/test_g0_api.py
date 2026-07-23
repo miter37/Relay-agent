@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 
+from relay import __version__
 from relay.agent_registry import AgentRegistry
 from relay.compatibility import evaluate_compatibility, relay_home_id
 from relay.config import Config
@@ -71,9 +72,12 @@ class G0ApiTests(unittest.TestCase):
 
         self.assertTrue(health["ok"])
         self.assertEqual(health["api_versions"], ["v1"])
-        self.assertEqual(health["api_schema_revision"], 1)
-        self.assertEqual(health["min_gui_version"], "0.7.0")
+        self.assertEqual(health["api_schema_revision"], 3)
+        self.assertEqual(health["min_gui_version"], "0.8.0")
         self.assertEqual(health["relay_home_id"], relay_home_id(self.home))
+
+    def test_current_gui_version_meets_daemon_minimum(self):
+        self.assertGreaterEqual(tuple(int(part) for part in __version__.split(".")), (0, 8, 0))
 
     def test_jobs_api_filters_and_cursor_pagination(self):
         _, client, _ = self._start_daemon()
@@ -132,27 +136,27 @@ class CompatibilityTests(unittest.TestCase):
         health = {
             "ok": True,
             "api_versions": ["v1"],
-            "min_gui_version": "0.7.0",
+            "min_gui_version": "0.8.0",
             "relay_home_id": "home-1",
         }
         self.assertEqual(
-            evaluate_compatibility(health, gui_version="0.7.0", expected_relay_home_id="home-1").mode,
+            evaluate_compatibility(health, gui_version="0.8.0", expected_relay_home_id="home-1").mode,
             "normal",
         )
 
     def test_incompatible_health_is_read_only(self):
-        health = {"ok": True, "api_versions": [], "min_gui_version": "0.7.0"}
-        decision = evaluate_compatibility(health, gui_version="0.7.0")
+        health = {"ok": True, "api_versions": [], "min_gui_version": "0.8.0"}
+        decision = evaluate_compatibility(health, gui_version="0.8.0")
         self.assertEqual(decision.mode, "read-only")
 
     def test_wrong_relay_home_is_disconnected(self):
         health = {
             "ok": True,
             "api_versions": ["v1"],
-            "min_gui_version": "0.7.0",
+            "min_gui_version": "0.8.0",
             "relay_home_id": "other-home",
         }
-        decision = evaluate_compatibility(health, gui_version="0.7.0", expected_relay_home_id="home-1")
+        decision = evaluate_compatibility(health, gui_version="0.8.0", expected_relay_home_id="home-1")
         self.assertEqual(decision.mode, "disconnected")
 
     def test_agent_registry_keeps_builtin_definitions(self):

@@ -7,8 +7,12 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+try:
+    from PySide6.QtWidgets import QApplication
+except ModuleNotFoundError as exc:  # GUI extra is installed by the GUI smoke job.
+    raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
+from relay import __version__
 from relay.compatibility import evaluate_compatibility
 from relay.config import Config
 from relay.gui.main_window import MainWindow
@@ -23,7 +27,7 @@ class G1GuiTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.config = Config(Path(self.temp.name) / "relay-home")
         self.config.init()
-        self.window = MainWindow(self.config, gui_version="0.7.0", expected_home_id="home")
+        self.window = MainWindow(self.config, gui_version="0.8.0", expected_home_id="home")
 
     def tearDown(self):
         self.window.close()
@@ -48,8 +52,8 @@ class G1GuiTests(unittest.TestCase):
         self.assertIn("× Failed", self.window.job_list.item(2).text())
 
     def test_unsupported_schema_is_read_only(self):
-        health = {"ok": True, "api_versions": ["v1"], "api_schema_revision": 99, "min_gui_version": "0.7.0"}
-        self.assertEqual(evaluate_compatibility(health, gui_version="0.7.0").mode, "read-only")
+        health = {"ok": True, "api_versions": ["v1"], "api_schema_revision": 99, "min_gui_version": "0.8.0"}
+        self.assertEqual(evaluate_compatibility(health, gui_version=__version__).mode, "read-only")
 
 
 if __name__ == "__main__":

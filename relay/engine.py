@@ -223,16 +223,34 @@ class RelayEngine:
 
     def _worker_chain(self, job: dict[str, Any], request: JobRequest) -> list[str]:
         requested = request.worker
+        fallback_order = request.fallback_agents
+        if fallback_order is None:
+            fallback_order = [str(x) for x in self.config.get("fallback_order", [])]
         if requested == "auto":
             chain = [str(self.config.get("default_worker", "claude"))]
             if job["fallback_enabled"]:
-                chain.extend(str(x) for x in self.config.get("fallback_order", []))
+                chain.extend(fallback_order)
         else:
             chain = [requested]
             if job["fallback_enabled"]:
-                chain.extend(str(x) for x in self.config.get("fallback_order", []) if x != requested)
+                chain.extend(x for x in fallback_order if x != requested)
         seen: set[str] = set()
         return [x for x in chain if x in {"claude", "codex", "antigravity"} and not (x in seen or seen.add(x))]
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        job = self.db.get_job(job_id)
+        if not job:
+            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        if job["status"] in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
+            raise RelayError("JOB_NOT_CANCELLABLE", f"Job is already finished: {job_id}")
+        if not self.db.request_cancel(job_id):
+            if job["status"] == "CANCEL_REQUESTED":
+                return {"ok": True, "job_id": job_id, "status": "CANCEL_REQUESTED", "changed": False}
+            raise RelayError("JOB_NOT_CANCELLABLE", f"Job cannot be cancelled in state {job['status']}")
+        updated = self.db.get_job(job_id) or job
+        event = "JOB_CANCELLED" if updated["status"] == "CANCELLED" else "JOB_CANCEL_REQUESTED"
+        self.db.add_event(job_id, event)
+        return {"ok": True, "job_id": job_id, "status": updated["status"], "changed": True}
 
     def _prepare_workspace(self, job_id: str, worker: str, request: JobRequest) -> dict[str, Path]:
         workspace_root = (
@@ -584,3 +602,19 @@ class RelayEngine:
         request.output_path = None
         request.artifact_path = None
         return self.run(request)
+
+    def queue_rerun(self, job_id: str, submitted_via: str = "gui") -> dict[str, Any]:
+        job = self.db.get_job(job_id)
+        if not job:
+            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        if not bool(job.get("replayable", 1)) or job.get("request_json") in (None, "", "{}"):
+            raise RelayError("JOB_NOT_REPLAYABLE", "This job did not save a replayable request.")
+        request = JobRequest.from_dict(json.loads(job["request_json"]))
+        request.request_id = None
+        request.force_new = True
+        request.output_path = None
+        request.artifact_path = None
+        request.caller = "human"
+        result = self.queue(request, submitted_via=submitted_via)
+        result["source_job_id"] = job_id
+        return result

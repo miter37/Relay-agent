@@ -525,7 +525,7 @@ class Database:
                 "request_json=CASE WHEN status='QUEUED' AND replayable=0 THEN '{}' ELSE request_json END,"
                 "task_text=CASE WHEN status='QUEUED' AND replayable=0 THEN NULL ELSE task_text END,"
                 "task_preview=CASE WHEN status='QUEUED' AND replayable=0 THEN NULL ELSE task_preview END "
-                "WHERE job_id=? AND status IN ('QUEUED','PREPARING','RUNNING')",
+                "WHERE job_id=? AND status IN ('QUEUED','PREPARING','RUNNING','VALIDATING','DELIVERING')",
                 (utc_now(), utc_now(), job_id),
             )
             return cursor.rowcount > 0
