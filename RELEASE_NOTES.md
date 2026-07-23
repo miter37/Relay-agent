@@ -1,3 +1,29 @@
+# Relay 1.0.0 release notes
+
+Relay 1.0.0 adds the G4 Schedule GUI and daemon auto-start controls.
+
+## Added
+
+- Schedule editor with Daily, Weekly, Monthly, Every-N-days, and one-time rules.
+- Required next-run preview before a Schedule can be saved.
+- Schedule sidebar, detail tabs, run history, pause/resume, Run now, edit, copy, delete, and output-folder actions.
+- Schedule eligibility action from replayable completed Jobs.
+- Settings auto-start status and authenticated enable/disable controls for Windows, Linux systemd-user, and macOS LaunchAgent adapters.
+- One-time auto-start prompt after creating the first Schedule.
+- API schema revision 4 with GUI minimum version 1.0.0.
+
+## Compatibility
+
+- Schedule definitions remain separate from ordinary Job history; every scheduled occurrence is still an ordinary Job.
+- Schedule deletion is a soft delete and preserves existing Jobs and outputs.
+- Existing G3 CLI and daemon Schedule APIs remain available.
+
+## Verification
+
+The full 160-test suite, Ruff checks, and GUI offscreen tests pass locally.
+
+---
+
 # Relay 0.9.0 release notes
 
 Relay 0.9.0 adds the G3 Schedule core for reliable daemon-managed recurring

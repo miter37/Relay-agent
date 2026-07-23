@@ -3680,3 +3680,13 @@ Custom Agent Apps
 10. migration은 실제 0.5.0 fixture DB를 기준으로 검증한다.
 11. Schedule output은 일반 workspace cleanup과 분리한다.
 12. 각 G phase는 실제 release로 출하한다.
+
+## 42. G4 implementation status
+
+G4 is implemented as Relay 1.0.0 on the current development branch.
+
+- Schedule creation starts from an eligible completed replayable Job.
+- The GUI requires a successful next-occurrence preview before save.
+- Schedule definitions are listed separately from Job history and expose detail, run history, lifecycle actions, output access, and safe copy/delete behavior.
+- Auto-start is exposed through the authenticated daemon API and Settings UI. Windows reports field validation; Linux and macOS adapters report their platform setup separately.
+- The health contract is API schema revision 4 with minimum GUI version 1.0.0.

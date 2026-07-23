@@ -24,6 +24,12 @@ class GuiRpcClient(QObject):
     def post(self, path: str, payload: dict, *, timeout_ms: int = 15000) -> int:
         return self._request("POST", path, payload, timeout_ms=timeout_ms)
 
+    def patch(self, path: str, payload: dict, *, timeout_ms: int = 15000) -> int:
+        return self._request("PATCH", path, payload, timeout_ms=timeout_ms)
+
+    def delete(self, path: str, *, timeout_ms: int = 15000) -> int:
+        return self._request("DELETE", path, None, timeout_ms=timeout_ms)
+
     def _request(self, method: str, path: str, payload, *, timeout_ms: int) -> int:
         self._sequence += 1
         request_id = self._sequence
@@ -33,8 +39,17 @@ class GuiRpcClient(QObject):
         token_path = self.config.path_value("runtime_root") / "daemon.token"
         if token_path.exists():
             request.setRawHeader(b"X-Relay-Token", token_path.read_text(encoding="utf-8").strip().encode("utf-8"))
+        if payload is not None:
+            request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
         data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        reply = self.manager.get(request) if method == "GET" else self.manager.post(request, data)
+        if method == "GET":
+            reply = self.manager.get(request)
+        elif method == "POST":
+            reply = self.manager.post(request, data)
+        elif method == "DELETE":
+            reply = self.manager.deleteResource(request)
+        else:
+            reply = self.manager.sendCustomRequest(request, method.encode("ascii"), data)
         reply.setProperty("relay_request_id", request_id)
         reply.setProperty("relay_timeout_ms", timeout_ms)
         reply.finished.connect(lambda: self._finished(reply))

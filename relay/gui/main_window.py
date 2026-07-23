@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -26,6 +27,9 @@ from ..compatibility import evaluate_compatibility
 from .job_detail import JobDetailView
 from .new_task import NewTaskView
 from .rpc_client import GuiRpcClient
+from .schedule_detail import ScheduleDetailView
+from .schedule_editor import ScheduleEditorDialog
+from .settings import SettingsView
 from .state import GuiState
 
 
@@ -38,8 +42,15 @@ class MainWindow(QMainWindow):
         self.state = GuiState(config)
         self.client = GuiRpcClient(config)
         self.client.response.connect(self._handle_response)
-        self.pending: dict[int, str] = {}
+        self.pending: dict[int, object] = {}
         self.jobs: dict[str, dict] = {}
+        self.schedules: dict[str, dict] = {}
+        self.schedule_runs: dict[str, list[dict]] = {}
+        self.selected_schedule_id: str | None = None
+        self.schedule_editor: ScheduleEditorDialog | None = None
+        self.schedule_editor_mode = "create"
+        self.schedule_editor_schedule_id: str | None = None
+        self.autostart_status: dict = {}
         self.current_mode = "disconnected"
         self.current_filter = ""
         self.finished_cursor: str | None = None
@@ -107,6 +118,14 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.date_filter)
         for combo in (self.result_filter, self.agent_filter, self.source_filter, self.date_filter):
             combo.currentIndexChanged.connect(self._on_filter_changed)
+        sidebar_layout.addWidget(QLabel("<b>Schedules</b>"))
+        self.schedule_list = QListWidget()
+        self.schedule_list.setMaximumHeight(150)
+        self.schedule_list.itemClicked.connect(self._select_schedule)
+        sidebar_layout.addWidget(self.schedule_list)
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.clicked.connect(self._show_settings)
+        sidebar_layout.addWidget(self.settings_button)
         self.job_list = QListWidget()
         self.job_list.itemClicked.connect(self._select_item)
         sidebar_layout.addWidget(self.job_list, 1)
@@ -126,12 +145,25 @@ class MainWindow(QMainWindow):
         self.job_detail_view = JobDetailView()
         self.job_detail_view.cancel_requested.connect(self._cancel_job)
         self.job_detail_view.rerun_requested.connect(self._rerun_job)
+        self.job_detail_view.schedule_requested.connect(self._schedule_job)
         self.job_detail_view.tab_requested.connect(self._detail_tab_requested)
         self.job_detail_view.open_result_requested.connect(self._open_result)
         self.job_detail_view.open_folder_requested.connect(self._open_folder)
         self.job_detail_view.open_log_requested.connect(self._open_log)
         self.job_detail_view.log_options_changed.connect(self._log_options_changed)
         self.detail_stack.addWidget(self.job_detail_view)
+        self.schedule_detail_view = ScheduleDetailView()
+        self.schedule_detail_view.run_now_requested.connect(self._run_schedule_now)
+        self.schedule_detail_view.pause_requested.connect(self._pause_schedule)
+        self.schedule_detail_view.resume_requested.connect(self._resume_schedule)
+        self.schedule_detail_view.edit_requested.connect(self._edit_schedule)
+        self.schedule_detail_view.copy_requested.connect(self._copy_schedule)
+        self.schedule_detail_view.delete_requested.connect(self._delete_schedule)
+        self.schedule_detail_view.open_output_requested.connect(self._open_schedule_output)
+        self.detail_stack.addWidget(self.schedule_detail_view)
+        self.settings_view = SettingsView()
+        self.settings_view.autostart_changed.connect(self._toggle_autostart)
+        self.detail_stack.addWidget(self.settings_view)
         self.splitter.addWidget(self.detail_stack)
         self.splitter.setSizes([320, 960])
         outer.addWidget(self.splitter, 1)
@@ -162,10 +194,39 @@ class MainWindow(QMainWindow):
         self.state.set_value("filters/search", self.search.text())
         super().closeEvent(event)
 
-    def _request(self, kind: str, path: str) -> None:
+    def _request(self, kind, path: str) -> None:
         self.pending[self.client.get(path)] = kind
 
-    def _request_post(self, kind: str, path: str, payload: dict) -> None:
+    def _show_settings(self) -> None:
+        self.detail_stack.setCurrentWidget(self.settings_view)
+        if self.current_mode == "normal":
+            self._request("autostart", "/v1/autostart")
+
+    def _toggle_autostart(self, enabled: bool) -> None:
+        if self.current_mode == "normal":
+            self._request_patch("autostart_toggle", "/v1/autostart", {"enabled": enabled})
+
+    def _maybe_prompt_autostart(self) -> None:
+        if self.autostart_status.get("enabled") or self._state_truthy("gui/autostart_prompted"):
+            return
+        choice = QMessageBox.question(
+            self,
+            "Start Relay automatically",
+            "Would you like Relay to start the daemon when you sign in?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        self.state.set_value("gui/autostart_prompted", True)
+        if choice == QMessageBox.Yes:
+            self._request_patch("autostart_toggle", "/v1/autostart", {"enabled": True})
+
+    def _state_truthy(self, key: str) -> bool:
+        value = self.state.value(key, False)
+        if isinstance(value, str):
+            return value.casefold() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _request_post(self, kind, path: str, payload: dict) -> None:
         self.pending[self.client.post(path, payload)] = kind
 
     def _show_new_task(self) -> None:
@@ -184,6 +245,94 @@ class MainWindow(QMainWindow):
         if self.current_mode == "normal":
             self._request_post("rerun", f"/v1/jobs/{job_id}/rerun", {})
 
+    def _schedule_job(self, job_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.schedule_editor_mode = "create"
+        self.schedule_editor_schedule_id = None
+        self.schedule_editor = ScheduleEditorDialog(source_job_id=job_id, parent=self)
+        self.schedule_editor.preview_requested.connect(self._schedule_preview)
+        self.schedule_editor.save_requested.connect(self._schedule_create)
+        self.schedule_editor.open()
+
+    def _edit_schedule(self, schedule_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        schedule = self.schedules.get(schedule_id)
+        if not schedule:
+            return
+        self.schedule_editor_mode = "update"
+        self.schedule_editor_schedule_id = schedule_id
+        self.schedule_editor = ScheduleEditorDialog(source_job_id=str(schedule.get("source_job_id") or ""), parent=self)
+        self.schedule_editor.setWindowTitle("Edit schedule")
+        self.schedule_editor.save_button.setText("Save changes")
+        self.schedule_editor.set_schedule(schedule)
+        self.schedule_editor.preview_requested.connect(self._schedule_preview)
+        self.schedule_editor.save_requested.connect(self._schedule_save)
+        self.schedule_editor.open()
+
+    def _schedule_preview(self, payload: dict) -> None:
+        if self.schedule_editor is not None:
+            self._request_post(("schedule_preview", self.schedule_editor), "/v1/schedules/preview", payload)
+
+    def _schedule_create(self, payload: dict) -> None:
+        if self.schedule_editor is None:
+            return
+        self._schedule_save(payload)
+
+    def _schedule_save(self, payload: dict) -> None:
+        if self.schedule_editor is None:
+            return
+        if self.schedule_editor_mode == "update" and self.schedule_editor_schedule_id:
+            self._request_patch(
+                ("schedule_update", self.schedule_editor),
+                f"/v1/schedules/{self.schedule_editor_schedule_id}",
+                payload,
+            )
+            return
+        source_job_id = self.schedule_editor.source_job_id
+        self._request_post(
+            ("schedule_create", self.schedule_editor),
+            f"/v1/schedules/from-job/{source_job_id}",
+            payload,
+        )
+
+    def _request_patch(self, kind, path: str, payload: dict) -> None:
+        self.pending[self.client.patch(path, payload)] = kind
+
+    def _request_delete(self, kind, path: str) -> None:
+        self.pending[self.client.delete(path)] = kind
+
+    def _schedule_action(self, kind: str, schedule_id: str, path: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post((kind, schedule_id), f"/v1/schedules/{schedule_id}/{path}", {})
+
+    def _run_schedule_now(self, schedule_id: str) -> None:
+        self._schedule_action("schedule_run_now", schedule_id, "run-now")
+
+    def _pause_schedule(self, schedule_id: str) -> None:
+        self._schedule_action("schedule_pause", schedule_id, "pause")
+
+    def _resume_schedule(self, schedule_id: str) -> None:
+        self._schedule_action("schedule_resume", schedule_id, "resume")
+
+    def _copy_schedule(self, schedule_id: str) -> None:
+        if self.current_mode == "normal":
+            schedule = self.schedules.get(schedule_id, {})
+            self._request_post(
+                ("schedule_copy", schedule_id),
+                f"/v1/schedules/{schedule_id}/copy",
+                {"name": f"{schedule.get('name') or 'Schedule'} copy"},
+            )
+
+    def _delete_schedule(self, schedule_id: str) -> None:
+        if self.current_mode == "normal":
+            self._request_delete(("schedule_delete", schedule_id), f"/v1/schedules/{schedule_id}")
+
+    def _open_schedule_output(self, schedule_id: str) -> None:
+        schedule = self.schedules.get(schedule_id, {})
+        self._open_path(schedule.get("output_root"), directory_only=True)
+
     def _refresh_health(self) -> None:
         self._request("health", "/health")
 
@@ -196,6 +345,7 @@ class MainWindow(QMainWindow):
         if self.current_mode == "normal":
             self.finished_cursor = None
             self._request("finished", self._finished_path())
+            self._request("schedules", "/v1/schedules")
 
     def _load_more_finished(self) -> None:
         if self.current_mode == "normal" and self.finished_cursor:
@@ -236,6 +386,8 @@ class MainWindow(QMainWindow):
         if error or not isinstance(payload, dict):
             if kind == "health":
                 self._set_connection("disconnected", "Relay daemon is unavailable. Retrying...")
+            elif isinstance(kind, tuple) and kind[0] == "schedule_preview":
+                kind[1].set_preview_error(str(error or "Invalid schedule"))
             else:
                 self.banner.setText("Relay could not complete that action. Please try again.")
                 self.banner.show()
@@ -245,15 +397,23 @@ class MainWindow(QMainWindow):
                 payload,
                 gui_version=self.gui_version,
                 expected_relay_home_id=self.expected_home_id,
+                supported_schema_revision=4,
             )
             self._set_connection(decision.mode, decision.reason)
             if decision.mode == "normal":
                 self._request("agents", "/v1/agents")
+                self._request("autostart", "/v1/autostart")
                 self._refresh_active()
                 self._refresh_finished()
             return
         if kind == "agents":
             self._update_agent_choices(payload.get("agents", []))
+            return
+        if kind in {"autostart", "autostart_prompt", "autostart_toggle"}:
+            self.autostart_status = payload.get("autostart") or {}
+            self.settings_view.set_autostart_status(self.autostart_status)
+            if kind == "autostart_prompt":
+                self._maybe_prompt_autostart()
             return
         if kind == "detail":
             self._show_detail(payload)
@@ -270,6 +430,70 @@ class MainWindow(QMainWindow):
         if kind == "logs":
             self.log_offset = payload.get("next_offset")
             self.job_detail_view.set_content("Logs", f"<pre>{escape(str(payload.get('text') or ''))}</pre>")
+            return
+        if kind == "schedules":
+            self.schedules = {
+                str(schedule.get("schedule_id")): schedule
+                for schedule in payload.get("schedules", [])
+                if schedule.get("schedule_id")
+            }
+            self._render_schedules()
+            return
+        if kind == "schedule_detail":
+            schedule = payload.get("schedule") or {}
+            schedule_id = schedule.get("schedule_id")
+            if schedule_id:
+                self.schedules[schedule_id] = schedule
+                self._show_schedule_detail(schedule_id)
+            return
+        if kind == "schedule_runs":
+            schedule_id = payload.get("schedule_id")
+            if schedule_id:
+                self.schedule_runs[schedule_id] = payload.get("runs", [])
+                self._show_schedule_detail(schedule_id)
+            return
+        if isinstance(kind, tuple) and kind[0] == "schedule_preview":
+            kind[1].set_preview(payload.get("occurrences", []))
+            return
+        if isinstance(kind, tuple) and kind[0] == "schedule_create":
+            schedule = payload.get("schedule") or {}
+            if schedule.get("schedule_id"):
+                self.schedules[schedule["schedule_id"]] = schedule
+            kind[1].accept()
+            self.schedule_editor = None
+            self._render_schedules()
+            self._refresh_finished()
+            self._request("autostart_prompt", "/v1/autostart")
+            return
+        if isinstance(kind, tuple) and kind[0] == "schedule_update":
+            schedule = payload.get("schedule") or {}
+            if schedule.get("schedule_id"):
+                self.schedules[schedule["schedule_id"]] = schedule
+            kind[1].accept()
+            self.schedule_editor = None
+            self._render_schedules()
+            self._refresh_schedule(self.schedule_editor_schedule_id)
+            return
+        if isinstance(kind, tuple) and kind[0] in {
+            "schedule_pause",
+            "schedule_resume",
+            "schedule_copy",
+            "schedule_delete",
+            "schedule_run_now",
+        }:
+            action, schedule_id = kind
+            if action == "schedule_delete":
+                self.schedules.pop(schedule_id, None)
+                self.schedule_runs.pop(schedule_id, None)
+                self.detail_stack.setCurrentWidget(self.empty_detail)
+            elif action == "schedule_copy":
+                schedule = payload.get("schedule") or {}
+                if schedule.get("schedule_id"):
+                    self.schedules[schedule["schedule_id"]] = schedule
+            elif payload.get("schedule", {}).get("schedule_id"):
+                self.schedules[schedule_id] = payload["schedule"]
+            self._render_schedules()
+            self._refresh_schedule(schedule_id if action != "schedule_copy" else None)
             return
         if kind in {"create", "cancel", "rerun"}:
             job_id = payload.get("job_id")
@@ -316,6 +540,8 @@ class MainWindow(QMainWindow):
         self.daemon_label.setText("Daemon: Running" if mode == "normal" else "Daemon: Disconnected")
         self.new_task_button.setEnabled(mode == "normal")
         self.new_task_view.create_button.setEnabled(mode == "normal")
+        self.schedule_list.setEnabled(mode == "normal")
+        self.settings_button.setEnabled(mode == "normal")
         if mode == "normal":
             self.banner.hide()
         else:
@@ -368,6 +594,46 @@ class MainWindow(QMainWindow):
                     self.job_list.addItem(item)
                     if job.get("job_id") == selected:
                         self.job_list.setCurrentItem(item)
+
+    def _render_schedules(self) -> None:
+        selected = self.schedule_list.currentItem().data(Qt.UserRole) if self.schedule_list.currentItem() else None
+        self.schedule_list.clear()
+        rows = sorted(self.schedules.values(), key=lambda schedule: str(schedule.get("name") or "").casefold())
+        for schedule in rows:
+            if schedule.get("needs_attention"):
+                icon = "×"
+            elif schedule.get("enabled"):
+                icon = "●"
+            else:
+                icon = "○"
+            name = schedule.get("name") or schedule.get("schedule_id", "Schedule")[:8]
+            state = "paused" if not schedule.get("enabled") else schedule.get("next_run_at_utc") or "active"
+            item = QListWidgetItem(f"{icon} {name} · {state}")
+            item.setData(Qt.UserRole, schedule.get("schedule_id"))
+            item.setToolTip(str(schedule.get("attention_code") or schedule.get("schedule_id") or ""))
+            self.schedule_list.addItem(item)
+            if schedule.get("schedule_id") == selected:
+                self.schedule_list.setCurrentItem(item)
+
+    def _select_schedule(self, item: QListWidgetItem) -> None:
+        schedule_id = item.data(Qt.UserRole)
+        if schedule_id:
+            self.selected_schedule_id = str(schedule_id)
+            self._refresh_schedule(self.selected_schedule_id)
+
+    def _refresh_schedule(self, schedule_id: str | None) -> None:
+        if self.current_mode != "normal" or not schedule_id:
+            return
+        self._request("schedule_detail", f"/v1/schedules/{schedule_id}")
+        self._request("schedule_runs", f"/v1/schedules/{schedule_id}/runs")
+
+    def _show_schedule_detail(self, schedule_id: str) -> None:
+        schedule = self.schedules.get(schedule_id)
+        if not schedule:
+            return
+        self.selected_schedule_id = schedule_id
+        self.schedule_detail_view.set_schedule(schedule, self.schedule_runs.get(schedule_id, []))
+        self.detail_stack.setCurrentWidget(self.schedule_detail_view)
 
     @staticmethod
     def _local_date(value: str | None) -> str:

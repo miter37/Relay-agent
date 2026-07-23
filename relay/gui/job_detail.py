@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 class JobDetailView(QWidget):
     cancel_requested = Signal(str)
     rerun_requested = Signal(str)
+    schedule_requested = Signal(str)
     tab_requested = Signal(str)
     open_result_requested = Signal(str)
     open_folder_requested = Signal(str)
@@ -45,6 +46,9 @@ class JobDetailView(QWidget):
         self.rerun_button = QPushButton("Run again")
         self.rerun_button.clicked.connect(self._rerun)
         header.addWidget(self.rerun_button)
+        self.schedule_button = QPushButton("Schedule")
+        self.schedule_button.clicked.connect(self._schedule)
+        header.addWidget(self.schedule_button)
         self.open_result_button = QPushButton("Open result")
         self.open_result_button.clicked.connect(self._open_result)
         header.addWidget(self.open_result_button)
@@ -92,6 +96,7 @@ class JobDetailView(QWidget):
         actions = job.get("actions") or {}
         self.cancel_button.setEnabled(bool(actions.get("can_cancel")))
         self.rerun_button.setEnabled(bool(actions.get("can_rerun")))
+        self.schedule_button.setEnabled(bool(actions.get("can_schedule")))
         self.open_result_button.setEnabled(bool(actions.get("can_open_result")))
         self.open_folder_button.setEnabled(bool(actions.get("can_open_folder")))
         self.attempt_combo.clear()
@@ -148,6 +153,10 @@ class JobDetailView(QWidget):
     def _rerun(self) -> None:
         if self.job_id:
             self.rerun_requested.emit(self.job_id)
+
+    def _schedule(self) -> None:
+        if self.job_id:
+            self.schedule_requested.emit(self.job_id)
 
     def _open_result(self) -> None:
         if self.job_id:

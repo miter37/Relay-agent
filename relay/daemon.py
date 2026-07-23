@@ -182,8 +182,8 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     "schedule_retention": self.daemon.maintenance.schedule_manager.status(),
                     "daemon_version": __version__,
                     "api_versions": ["v1"],
-                    "api_schema_revision": 3,
-                    "min_gui_version": "0.8.0",
+                    "api_schema_revision": 4,
+                    "min_gui_version": "1.0.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
                 },
             )
