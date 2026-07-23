@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # required to create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Nothing below this point runs if the tag disagrees with the code, so a
+      # mislabelled release cannot reach the public.
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CODE=$(python -c "import relay; print(relay.__version__)")
+          echo "tag=$TAG  relay.__version__=$CODE"
+          if [ "$TAG" != "$CODE" ]; then
+            echo "::error::Tag v$TAG does not match relay.__version__ ($CODE). Update relay/__init__.py or retag."
+            exit 1
+          fi
+
+      - name: Verify release notes are for this version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if ! head -n 1 RELEASE_NOTES.md | grep -qF "$TAG"; then
+            echo "::error::RELEASE_NOTES.md does not mention $TAG on its first line: $(head -n 1 RELEASE_NOTES.md)"
+            exit 1
+          fi
+
+      - name: Run test suite
+        run: |
+          chmod +x mocks/claude mocks/codex mocks/agy
+          python -m unittest discover -s tests -v
+
+      - name: Build artifact and checksums
+        run: python build_release.py
+
+      - name: Verify the built artifact runs
+        run: python relay.pyz version
+
+      - name: Show checksums
+        run: cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            relay.pyz
+            SHA256SUMS.txt
+          body_path: RELEASE_NOTES.md
+          draft: false
+          generate_release_notes: true # appends the commit list
