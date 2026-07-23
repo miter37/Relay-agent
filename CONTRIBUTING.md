@@ -6,15 +6,22 @@ First off, thank you for considering contributing to Relay-agent! We welcome PRs
 
 1. **Clone the repository:**
    ```sh
-   git clone https://github.com/miter37/Relay.git
-   cd Relay
+   git clone https://github.com/miter37/Relay-agent.git
+   cd Relay-agent
    ```
 2. **Ensure Python 3.11+ is installed.**
 3. **Run local tests:**
-   Relay-agent includes mock tests that do not call real APIs.
+   Tests use bundled mock CLIs and never call real provider APIs, so no
+   credentials or network access are required.
    ```sh
-   PATH="$PWD/mocks:$PATH" PYTHONPATH=. python -m unittest tests.test_relay.RelayTests -v
+   python -m unittest discover -s tests -v
    ```
+4. **Build the release artifact (optional):**
+   ```sh
+   python build_release.py
+   ```
+   This produces `relay.pyz` and `SHA256SUMS.txt` locally. Both are
+   gitignored — they are published only as GitHub Release assets.
 
 ## Pull Request Process
 
