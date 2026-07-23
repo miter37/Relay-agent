@@ -7,8 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
+from . import __version__
+from .api import list_jobs
 from .cleanup import CleanupManager
+from .compatibility import relay_home_id
 from .config import Config
 from .db import Database
 from .engine import RelayEngine
@@ -109,6 +113,19 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         return self.headers.get("X-Relay-Token", "") == self.daemon.token
 
+    def _api_error(self, status: int, code: str, message: str, *, details: dict | None = None) -> None:
+        self._json(
+            status,
+            {
+                "ok": False,
+                "error_code": code,
+                "message": message,
+                "action": None,
+                "details": details or {},
+                "retryable": status >= 500,
+            },
+        )
+
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
@@ -117,7 +134,10 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
-        if self.path == "/health":
+        parsed = urlsplit(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        if path == "/health":
             self._json(
                 200,
                 {
@@ -125,12 +145,56 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     "status": "running",
                     "started_at": self.daemon.started_at,
                     "cleanup": self.daemon.maintenance.manager.status(),
+                    "daemon_version": __version__,
+                    "api_versions": ["v1"],
+                    "api_schema_revision": 1,
+                    "min_gui_version": "0.7.0",
+                    "relay_home_id": relay_home_id(self.daemon.config.home),
                 },
             )
             return
+        if path == "/v1/jobs":
+            try:
+
+                def value(name: str) -> str | None:
+                    values = params.get(name, [])
+                    return values[0] if values else None
+
+                limit_value = value("limit") or "50"
+                limit = int(limit_value)
+                payload = list_jobs(
+                    self.daemon.db,
+                    bucket=value("bucket") or "all",
+                    status=value("status") or value("result"),
+                    agent=value("agent"),
+                    submitted_via=value("source"),
+                    query=value("q"),
+                    date_from=value("from"),
+                    date_to=value("to"),
+                    limit=limit,
+                    cursor=value("cursor"),
+                    hide_task=self.daemon.engine._history_display_mode() != "full",
+                )
+                self._json(HTTPStatus.OK, payload)
+            except (ValueError, RelayError) as err:
+                if isinstance(err, RelayError):
+                    code, message = err.code, err.message
+                else:
+                    code, message = "INVALID_REQUEST", str(err)
+                self._api_error(HTTPStatus.BAD_REQUEST, code, message)
+            except Exception as exc:
+                self._api_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", str(exc))
+            return
+        if path.startswith("/v1/jobs/"):
+            job_id = path[len("/v1/jobs/") :]
+            try:
+                self._json(HTTPStatus.OK, self.daemon.engine.show(job_id))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
         for prefix, action in (("/status/", "status"), ("/result/", "result"), ("/show/", "show")):
-            if self.path.startswith(prefix):
-                job_id = self.path[len(prefix) :]
+            if path.startswith(prefix):
+                job_id = path[len(prefix) :]
                 try:
                     if action == "show":
                         value = self.daemon.engine.show(job_id)
@@ -149,7 +213,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         try:
             if self.path == "/submit":
                 request = JobRequest.from_dict(self._body())
-                self._json(200, self.daemon.engine.queue(request))
+                caller = request.caller.strip().lower()
+                submitted_via = "hermes" if caller == "hermes" else "schedule" if caller == "schedule" else "cli"
+                self._json(200, self.daemon.engine.queue(request, submitted_via=submitted_via))
                 return
             if self.path.startswith("/cancel/"):
                 job_id = self.path.split("/")[-1]

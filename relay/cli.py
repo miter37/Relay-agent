@@ -60,6 +60,7 @@ def _preprocess(argv: list[str]) -> list[str]:
 
 def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = False) -> None:
     parser.add_argument("task", nargs=None if task_required else "?", default="")
+    parser.add_argument("--title", help="Optional short title shown in job history")
     parser.add_argument("--task-file")
     parser.add_argument("--worker", choices=["auto", "claude", "codex", "antigravity"], default="auto")
     parser.add_argument("--fallback", action="store_true", default=None)
@@ -103,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"Relay {__version__}")
+    parser.add_argument("--gui", action="store_true", help="Open the optional read-only desktop GUI")
     sub = parser.add_subparsers(dest="command")
 
     run = sub.add_parser(
@@ -419,6 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _request_from_args(args, config: Config) -> JobRequest:
     return JobRequest(
         task=args.task or "",
+        title=args.title,
         task_file=args.task_file,
         worker=args.worker,
         fallback=args.fallback,
@@ -800,9 +803,33 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = Config()
     config.init()
-    db = Database(config.path_value("database_path"))
-    engine = RelayEngine(config, db)
+    if args.gui:
+        try:
+            from .gui.app import run_gui
+
+            return run_gui(config)
+        except ImportError:
+            print(
+                'GUI support is not installed. Run: pip install "relay-ai-cli-broker[gui]"',
+                file=sys.stderr,
+            )
+            return 2
     machine = bool(getattr(args, "machine", False))
+    try:
+        db = Database(config.path_value("database_path"))
+        engine = RelayEngine(config, db)
+    except RelayError as err:
+        _emit(
+            {
+                "ok": False,
+                "status": "failed",
+                "error_code": err.code,
+                "error_message": err.message,
+                "details": err.details,
+            },
+            machine,
+        )
+        return 2
     try:
         # Sync-only users still receive automatic retention cleanup when new work arrives.
         if args.command in {"run", "submit"}:
@@ -814,7 +841,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "init":
             _emit({"ok": True, "config": str(config.init(force=args.force)), "home": str(config.home)}, machine)
         elif args.command == "run":
-            result = engine.run(_request_from_args(args, config))
+            result = engine.run(_request_from_args(args, config), submitted_via="cli")
             _emit(result, machine)
             return _receipt_exit_code(result)
         elif args.command == "submit":

@@ -38,7 +38,11 @@ class RPCClient:
             if isinstance(payload, dict) and payload.get("error_code"):
                 raise RelayError(
                     str(payload["error_code"]),
-                    str(payload.get("error_message") or f"Relay daemon returned HTTP {exc.code}"),
+                    str(
+                        payload.get("error_message")
+                        or payload.get("message")
+                        or f"Relay daemon returned HTTP {exc.code}"
+                    ),
                     bool(payload.get("retryable", False)),
                     payload.get("details"),
                 ) from exc
