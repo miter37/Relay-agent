@@ -487,11 +487,20 @@ class Database:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def link_schedule_run_job(self, run_id: str, job_id: str, *, status: str = "QUEUED") -> None:
+    def link_schedule_run_job(
+        self,
+        run_id: str,
+        job_id: str,
+        *,
+        status: str = "QUEUED",
+        output_path: str | None = None,
+        artifact_path: str | None = None,
+    ) -> None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE schedule_runs SET job_id=?,status=?,updated_at=? WHERE run_id=?",
-                (job_id, status, utc_now(), run_id),
+                "UPDATE schedule_runs SET job_id=?,status=?,output_path=COALESCE(?,output_path),"
+                "artifact_path=COALESCE(?,artifact_path),updated_at=? WHERE run_id=?",
+                (job_id, status, output_path, artifact_path, utc_now(), run_id),
             )
 
     def update_schedule_run(self, run_id: str, **changes: Any) -> None:

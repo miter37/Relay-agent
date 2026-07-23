@@ -175,6 +175,30 @@ def load_snapshot(schedule_id: str, root: Path) -> ScheduleSnapshot:
     return ScheduleSnapshot(schedule_id, root, task_file, tuple(attachments), manifest_path)
 
 
+def clone_snapshot(config: Config, source_root: Path, schedule_id: str) -> ScheduleSnapshot:
+    input_root = _snapshot_root(config)
+    source = safe_resolve(source_root)
+    if _has_symlink_component(source) or not is_within(source, input_root):
+        raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Schedule input snapshot escapes Relay roots.")
+    load_snapshot("source", source)
+    final_root = input_root / schedule_id
+    if final_root.exists():
+        raise RelayError("SCHEDULE_INPUT_INVALID", f"Schedule input snapshot already exists: {schedule_id}")
+    temporary = input_root / f".{schedule_id}.copy-{uuid.uuid4().hex}"
+    try:
+        ensure_dir(input_root)
+        shutil.copytree(source, temporary, symlinks=False)
+        manifest_path = temporary / "attachments.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["schedule_id"] = schedule_id
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, final_root)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise RelayError("SCHEDULE_INPUT_INVALID", f"Could not clone Schedule inputs: {exc}") from exc
+    return load_snapshot(schedule_id, final_root)
+
+
 def build_scheduled_request(
     source: JobRequest,
     snapshot: ScheduleSnapshot,

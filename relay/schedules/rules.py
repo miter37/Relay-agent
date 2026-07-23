@@ -147,13 +147,35 @@ def _candidate_dates(normalized: dict[str, Any], start: date):
                 yield current
 
 
-def next_occurrences(rule: dict[str, Any], after_utc: datetime, limit: int = 5) -> list[Occurrence]:
+def _bound(value: datetime | None, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise _invalid(field, "bound must include a timezone")
+    return value.astimezone(UTC)
+
+
+def next_occurrences(
+    rule: dict[str, Any],
+    after_utc: datetime,
+    limit: int = 5,
+    *,
+    starts_at_utc: datetime | None = None,
+    ends_at_utc: datetime | None = None,
+) -> list[Occurrence]:
     normalized = validate_rule(rule)
     if limit < 1 or limit > 100:
         raise _invalid("limit", "must be between 1 and 100")
     if after_utc.tzinfo is None:
         after_utc = after_utc.replace(tzinfo=UTC)
     after_utc = after_utc.astimezone(UTC)
+    starts_at_utc = _bound(starts_at_utc, "starts_at_utc")
+    ends_at_utc = _bound(ends_at_utc, "ends_at_utc")
+    if starts_at_utc and ends_at_utc and starts_at_utc > ends_at_utc:
+        raise _invalid("ends_at_utc", "must not be before starts_at_utc")
+    calculation_after = after_utc
+    if starts_at_utc and calculation_after < starts_at_utc:
+        calculation_after = starts_at_utc - timedelta(microseconds=1)
     zone = ZoneInfo(normalized["timezone"])
     found: list[Occurrence] = []
     seen: set[datetime] = set()
@@ -161,16 +183,27 @@ def next_occurrences(rule: dict[str, Any], after_utc: datetime, limit: int = 5) 
     if normalized["type"] == "once":
         local = _local_datetime(normalized["run_at_local"])
         occurrence = _occurrence(local, zone, "once")
-        if occurrence and occurrence.instant_utc > after_utc:
+        if (
+            occurrence
+            and occurrence.instant_utc > calculation_after
+            and (not starts_at_utc or occurrence.instant_utc >= starts_at_utc)
+            and (not ends_at_utc or occurrence.instant_utc <= ends_at_utc)
+        ):
             return [occurrence]
         return []
 
-    local_after = after_utc.astimezone(zone)
+    local_after = calculation_after.astimezone(zone)
     for current in _candidate_dates(normalized, local_after.date()):
         for value in normalized["times"]:
             local_naive = datetime.combine(current, time.fromisoformat(value))
             occurrence = _occurrence(local_naive, zone, normalized["type"])
-            if not occurrence or occurrence.instant_utc <= after_utc or occurrence.instant_utc in seen:
+            if (
+                not occurrence
+                or occurrence.instant_utc <= calculation_after
+                or occurrence.instant_utc in seen
+                or (starts_at_utc and occurrence.instant_utc < starts_at_utc)
+                or (ends_at_utc and occurrence.instant_utc > ends_at_utc)
+            ):
                 continue
             seen.add(occurrence.instant_utc)
             found.append(occurrence)

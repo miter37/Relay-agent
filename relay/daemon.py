@@ -324,6 +324,15 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/v1/schedules/"):
                 suffix = path[len("/v1/schedules/") :]
+                if suffix.endswith("/copy"):
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "schedule": self.daemon.schedule_service.copy(suffix[: -len("/copy")], self._body()),
+                        },
+                    )
+                    return
                 if suffix.endswith("/pause"):
                     self._json(
                         HTTPStatus.OK,

@@ -48,11 +48,9 @@ class ScheduleRuntime:
     def _due_occurrence(self, schedule: dict[str, Any]) -> Any | None:
         try:
             next_run = datetime.fromisoformat(schedule["next_run_at_utc"]).astimezone(UTC)
-            rule = json.loads(schedule["rule_json"])
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise RelayError("SCHEDULE_RULE_INVALID", "Stored Schedule timing data is invalid.") from exc
-        candidates = next_occurrences(rule, next_run - timedelta(microseconds=1), limit=1)
-        return candidates[0] if candidates else None
+        return self._next_after(schedule, next_run - timedelta(microseconds=1))
 
     def _process_due(self, schedule: dict[str, Any], now: datetime, result: dict[str, int]) -> None:
         occurrence = self._due_occurrence(schedule)
@@ -86,8 +84,13 @@ class ScheduleRuntime:
             overdue = now - occurrence.instant_utc
 
     def _next_after(self, schedule: dict[str, Any], instant: datetime) -> Any | None:
-        rule = json.loads(schedule["rule_json"])
-        values = next_occurrences(rule, instant, limit=1)
+        try:
+            rule = json.loads(schedule["rule_json"])
+            starts = datetime.fromisoformat(schedule["starts_at_utc"]) if schedule.get("starts_at_utc") else None
+            ends = datetime.fromisoformat(schedule["ends_at_utc"]) if schedule.get("ends_at_utc") else None
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RelayError("SCHEDULE_RULE_INVALID", "Stored Schedule timing data is invalid.") from exc
+        values = next_occurrences(rule, instant, limit=1, starts_at_utc=starts, ends_at_utc=ends)
         return values[0] if values else None
 
     def _claim_and_skip(self, schedule: dict[str, Any], occurrence: Any, result: dict[str, int]) -> bool:
@@ -176,7 +179,13 @@ class ScheduleRuntime:
                 artifact_path=artifact_path,
                 schedule_output_root=Path(schedule["output_root"]),
             )
-            self.db.link_schedule_run_job(run["run_id"], queued["job_id"], status="QUEUED")
+            self.db.link_schedule_run_job(
+                run["run_id"],
+                queued["job_id"],
+                status="QUEUED",
+                output_path=str(output_path),
+                artifact_path=str(artifact_path),
+            )
             result["queued"] += 1
             if advance:
                 self._advance(schedule, self._run_occurrence(run))

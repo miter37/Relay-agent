@@ -8,6 +8,7 @@ from typing import Any
 
 from .db import Database
 from .errors import RelayError
+from .schedules.snapshots import validate_source_job
 
 RESULT_STATUS = {
     "completed": "COMPLETED",
@@ -138,6 +139,19 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
                 safe_request[key] = request[key]
     detail["request"] = safe_request
     status = raw.get("status")
+    can_schedule = False
+    schedule_reason: str | None = None
+    if status == "COMPLETED" and raw.get("result_status") == "complete":
+        if not engine.config.get("service_isolation_acknowledged", False):
+            schedule_reason = "PERMISSION_BLOCKED"
+        else:
+            try:
+                validate_source_job(raw, engine.agent_registry)
+                can_schedule = True
+            except RelayError as exc:
+                schedule_reason = exc.code
+    else:
+        schedule_reason = "SCHEDULE_NOT_ELIGIBLE"
     detail["actions"] = {
         "can_cancel": status in {"QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING"},
         "can_rerun": (
@@ -146,6 +160,8 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             and raw.get("request_json") not in (None, "", "{}")
         ),
         "can_copy": bool(raw.get("replayable", 1)) or bool(detail.get("task_text") or detail.get("task_preview")),
+        "can_schedule": can_schedule,
+        "schedule_reason": schedule_reason,
         "can_open_result": bool(detail.get("output_path") and Path(detail["output_path"]).is_file()),
         "can_open_folder": bool(detail.get("artifact_path") and Path(detail["artifact_path"]).is_dir()),
     }
