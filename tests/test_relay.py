@@ -501,6 +501,80 @@ class RelayTests(unittest.TestCase):
         status = manager.status()
         self.assertIsNotNone(status["last_run"])
 
+    def test_unattended_callers_blocked_until_isolation_acknowledged(self):
+        self.assertFalse(self.config.get("service_isolation_acknowledged", False))
+        for caller in ("hermes", "service", "daemon", "HERMES"):
+            with self.subTest(caller=caller):
+                with self.assertRaises(RelayError) as context:
+                    self.engine.create_job(
+                        JobRequest(task="unattended work", worker="codex", caller=caller), queued=True
+                    )
+                self.assertEqual(getattr(context.exception, "code", None), "PERMISSION_BLOCKED")
+
+    def test_human_caller_is_not_blocked_by_isolation_gate(self):
+        self.assertFalse(self.config.get("service_isolation_acknowledged", False))
+        job, _ = self.engine.create_job(
+            JobRequest(task="interactive work", worker="codex", caller="human"), queued=True
+        )
+        self.assertEqual(self.db.get_job(job["job_id"])["status"], "QUEUED")
+
+    def test_acknowledging_isolation_unblocks_unattended_callers(self):
+        self.config.set("service_isolation_acknowledged", True)
+        job, _ = self.engine.create_job(
+            JobRequest(task="unattended work", worker="codex", caller="hermes"), queued=True
+        )
+        self.assertEqual(self.db.get_job(job["job_id"])["status"], "QUEUED")
+
+    def test_claude_permission_mode_is_configurable(self):
+        from relay.adapters.claude import ClaudeAdapter
+
+        spec_root = self.config.path_value("adapter_spec_root")
+        default_config = self.config.worker("claude")
+        self.assertEqual(ClaudeAdapter(default_config, spec_root).permission_mode(), "bypassPermissions")
+
+        self.config.set("workers.claude.permission_mode", "acceptEdits")
+        self.assertEqual(ClaudeAdapter(self.config.worker("claude"), spec_root).permission_mode(), "acceptEdits")
+
+    def test_claude_command_uses_configured_permission_mode(self):
+        from relay.adapters.base import AdapterContext
+        from relay.adapters.claude import ClaudeAdapter
+
+        self.config.set("workers.claude.permission_mode", "acceptEdits")
+        worker_config = self.config.worker("claude")
+        # setUp puts mocks/ on PATH, so this resolves to the right wrapper per OS.
+        worker_config["command"] = "claude"
+        adapter = ClaudeAdapter(worker_config, self.config.path_value("adapter_spec_root"))
+        workspace = self.home / "workspace" / "claude-permission-mode"
+        workspace.mkdir(parents=True)
+        schema_file = workspace / "schema.json"
+        schema_file.write_text("{}", encoding="utf-8")
+        ctx = AdapterContext(
+            job_id="claude-permission-mode-test",
+            workspace=workspace,
+            request_file=workspace / "request.md",
+            result_file=workspace / "result.json.partial",
+            artifact_dir=workspace / "artifacts",
+            schema_file=schema_file,
+            result_format="json",
+            profile="analysis-only",
+            model=None,
+            config=worker_config,
+        )
+        command, _, _ = adapter.build_command(ctx)
+        # The receipt records permission_mode(); the CLI receives the same value.
+        self.assertEqual(command[command.index("--permission-mode") + 1], "acceptEdits")
+        self.assertNotIn("bypassPermissions", command)
+
+    def test_doctor_warns_when_bypassing_without_isolation(self):
+        self.audit_all(deep=False)
+        report = Doctor(self.config, self.db).audit(["claude"], deep=False)
+        self.assertIn("warnings", report)
+        self.assertIn("bypassPermissions", report["warnings"][0])
+
+        self.config.set("service_isolation_acknowledged", True)
+        acknowledged = Doctor(self.config, self.db).audit(["claude"], deep=False)
+        self.assertNotIn("warnings", acknowledged)
+
 
 if __name__ == "__main__":
     unittest.main()

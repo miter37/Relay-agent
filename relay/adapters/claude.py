@@ -71,7 +71,10 @@ class ClaudeAdapter(Adapter):
         )
 
     def permission_mode(self) -> str:
-        return "bypassPermissions"
+        # Operators can tighten this; the default stays as-is for compatibility.
+        # build_command() passes this same value, so the receipt always records
+        # the mode the CLI actually ran under.
+        return str(self.worker_config.get("permission_mode") or "bypassPermissions")
 
     def build_command(self, ctx: AdapterContext) -> tuple[list[str], bytes | None, dict[str, str]]:
         exe = self.executable()
@@ -87,7 +90,7 @@ class ClaudeAdapter(Adapter):
             "-p",
             prompt,
             "--permission-mode",
-            "bypassPermissions",
+            self.permission_mode(),
             "--output-format",
             "json" if ctx.result_format == "json" else "text",
             "--no-session-persistence",
