@@ -8,16 +8,24 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Pyz = Join-Path $Root "relay.pyz"
 
-if (-not (Test-Path $Pyz)) {
-    throw "relay.pyz not found. Run build_release.py first or use the packaged release."
-}
-
 $Python = Get-Command py -ErrorAction SilentlyContinue
 if (-not $Python) {
     $Python = Get-Command python -ErrorAction SilentlyContinue
 }
 if (-not $Python) {
     throw "Python 3.11+ is required. Install Python and ensure py.exe or python.exe is on PATH."
+}
+
+# relay.pyz is a build artifact and is not checked into the repository, so a
+# fresh clone has to build it first. Release assets ship it already built.
+$Builder = Join-Path $Root "build_release.py"
+if ((-not (Test-Path $Pyz)) -and (Test-Path $Builder)) {
+    Write-Host "relay.pyz not found; building it from source..."
+    & $Python.Source $Builder | Out-Null
+}
+
+if (-not (Test-Path $Pyz)) {
+    throw "relay.pyz not found. Build it with: $($Python.Name) build_release.py"
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
