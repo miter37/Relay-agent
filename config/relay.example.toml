@@ -38,6 +38,11 @@ max_turns = 30
 max_budget_usd = 5.0
 tools = "WebSearch,WebFetch,Read,Write,Glob,Grep"
 disallowed_tools = "mcp__*"
+# Passed to `claude --permission-mode`. The default bypasses permission
+# prompts, which is what makes unattended delegation work -- and what makes a
+# dedicated low-privilege OS account mandatory. Set a stricter mode supported
+# by your Claude Code version to tighten this.
+permission_mode = "bypassPermissions"
 
 [workers.codex]
 enabled = true

@@ -34,7 +34,36 @@ class Doctor:
                 spec = self._deep_probe(adapter, spec)
             results.append(spec.to_dict())
         healthy = sum(1 for item in results if item["status"] == "healthy")
-        return {"ok": healthy == len(results), "deep": deep, "workers": results}
+        report = {"ok": healthy == len(results), "deep": deep, "workers": results}
+        warnings = self._isolation_warnings(workers)
+        if warnings:
+            report["warnings"] = warnings
+        return report
+
+    def _isolation_warnings(self, workers: list[str]) -> list[str]:
+        """Flag permission-bypassing workers on a host with no isolation on record.
+
+        Unattended callers are refused outright in RelayEngine.create_job. This
+        is the softer counterpart for interactive use, where the operator is
+        allowed to proceed but should at least be told once.
+        """
+        if self.config.get("service_isolation_acknowledged", False):
+            return []
+        bypassing = []
+        for worker in workers:
+            adapter = get_adapter(worker, self.config.worker(worker), self.spec_root)
+            mode = adapter.permission_mode()
+            if mode in {"bypassPermissions", "dangerously-skip-permissions"}:
+                bypassing.append(f"{worker} ({mode})")
+        if not bypassing:
+            return []
+        return [
+            "These workers run with permission checks bypassed: "
+            + ", ".join(bypassing)
+            + ". Relay has no record that this host is isolated, so any tool the CLI runs has the "
+            "full rights of the current OS account. Run Relay under a dedicated low-privilege "
+            "account, then record it with: relay config set service_isolation_acknowledged true"
+        ]
 
     def _deep_probe(self, adapter, spec: AdapterSpec) -> AdapterSpec:
         worker = adapter.name
