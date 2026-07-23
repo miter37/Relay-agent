@@ -11,7 +11,7 @@ from typing import Any
 from .errors import RelayError
 from .util import utc_now
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -53,6 +53,50 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_completed_at ON jobs(completed_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_submitted_via ON jobs(submitted_via);
 CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    schedule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    rule_json TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    deleted_at TEXT,
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_grace_seconds INTEGER NOT NULL DEFAULT 43200,
+    starts_at_utc TEXT,
+    ends_at_utc TEXT,
+    input_root TEXT NOT NULL,
+    output_root TEXT NOT NULL,
+    retention_json TEXT NOT NULL,
+    next_run_at_utc TEXT,
+    last_occurrence_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(enabled, next_run_at_utc);
+CREATE INDEX IF NOT EXISTS idx_schedules_source_job ON schedules(source_job_id);
+
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    run_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES schedules(schedule_id) ON DELETE CASCADE,
+    occurrence_key TEXT NOT NULL,
+    scheduled_for_utc TEXT NOT NULL,
+    scheduled_for_local TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    job_id TEXT REFERENCES jobs(job_id),
+    output_path TEXT,
+    artifact_path TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(schedule_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs(schedule_id, scheduled_for_utc);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_job ON schedule_runs(job_id);
 
 CREATE TABLE IF NOT EXISTS attempts (
     attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -119,6 +163,51 @@ ALTER TABLE jobs ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_jobs_completed_at ON jobs(completed_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_submitted_via ON jobs(submitted_via);
 CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at);
+"""
+
+MIGRATION_1_TO_2 = """
+CREATE TABLE IF NOT EXISTS schedules (
+    schedule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    rule_json TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    deleted_at TEXT,
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_grace_seconds INTEGER NOT NULL DEFAULT 43200,
+    starts_at_utc TEXT,
+    ends_at_utc TEXT,
+    input_root TEXT NOT NULL,
+    output_root TEXT NOT NULL,
+    retention_json TEXT NOT NULL,
+    next_run_at_utc TEXT,
+    last_occurrence_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(enabled, next_run_at_utc);
+CREATE INDEX IF NOT EXISTS idx_schedules_source_job ON schedules(source_job_id);
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    run_id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES schedules(schedule_id) ON DELETE CASCADE,
+    occurrence_key TEXT NOT NULL,
+    scheduled_for_utc TEXT NOT NULL,
+    scheduled_for_local TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    job_id TEXT REFERENCES jobs(job_id),
+    output_path TEXT,
+    artifact_path TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(schedule_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs(schedule_id, scheduled_for_utc);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_job ON schedule_runs(job_id);
 """
 
 LEGACY_JOB_COLUMNS = {
@@ -191,8 +280,24 @@ class Database:
                     for statement in MIGRATION_0_TO_1.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for statement in MIGRATION_1_TO_2.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     self._backfill_job_metadata(conn)
+                    conn.execute("COMMIT")
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+            elif version == 1:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_1_TO_2.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
                 except Exception as exc:
                     conn.rollback()
@@ -313,6 +418,81 @@ class Database:
                 "SELECT * FROM jobs WHERE status='QUEUED' ORDER BY created_at LIMIT ?", (limit,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def create_schedule(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"enabled": 1, **row, "created_at": row.get("created_at", now), "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO schedules ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_schedule(self, schedule_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM schedules WHERE schedule_id=?", (schedule_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_schedules(self, *, include_deleted: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM schedules"
+        if not include_deleted:
+            query += " WHERE deleted_at IS NULL"
+        query += " ORDER BY created_at DESC"
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query).fetchall()]
+
+    def update_schedule(self, schedule_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE schedules SET {','.join(f'{key}=?' for key in keys)} WHERE schedule_id=?",
+                [changes[key] for key in keys] + [schedule_id],
+            )
+
+    def insert_schedule_run(self, schedule_id: str, row: dict[str, Any]) -> bool:
+        now = utc_now()
+        values = {"schedule_id": schedule_id, **row, "created_at": row.get("created_at", now), "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO schedule_runs ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+        return True
+
+    def get_schedule_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM schedule_runs WHERE run_id=?", (run_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_schedule_runs(self, schedule_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM schedule_runs WHERE schedule_id=? ORDER BY scheduled_for_utc DESC LIMIT ?",
+                (schedule_id, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def active_jobs_for_schedule(self, schedule_id: str) -> list[dict[str, Any]]:
+        statuses = ("QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING", "CANCEL_REQUESTED")
+        placeholders = ",".join("?" for _ in statuses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE schedule_id=? AND status IN ({placeholders})",
+                (schedule_id, *statuses),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def link_schedule_run_job(self, run_id: str, job_id: str, *, status: str = "QUEUED") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE schedule_runs SET job_id=?,status=?,updated_at=? WHERE run_id=?",
+                (job_id, status, utc_now(), run_id),
+            )
 
     def list_jobs(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:

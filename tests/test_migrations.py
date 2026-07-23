@@ -34,6 +34,8 @@ class MigrationTests(unittest.TestCase):
             self.assertTrue(
                 {"title", "submitted_via", "task_preview", "schedule_id", "scheduled_for", "replayable"} <= columns
             )
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertTrue({"schedules", "schedule_runs"} <= tables)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
         self.assertIsNotNone(db.last_backup_path)
         self.assertTrue(db.last_backup_path and db.last_backup_path.exists())
