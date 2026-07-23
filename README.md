@@ -3,10 +3,10 @@
   <p><strong>A reliable delegation broker for AI CLIs (Claude, Codex, Antigravity) on Windows, Linux, and macOS.</strong></p>
 
   <p>
-    <a href="https://github.com/miter37/Relay/releases"><img src="https://img.shields.io/github/v/release/miter37/Relay?style=flat-square" alt="Release"></a>
+    <a href="https://github.com/miter37/Relay-agent/releases"><img src="https://img.shields.io/github/v/release/miter37/Relay-agent?style=flat-square" alt="Release"></a>
     <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg?style=flat-square" alt="Python"></a>
-    <a href="https://github.com/miter37/Relay/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
-    <a href="https://github.com/miter37/Relay/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome"></a>
+    <a href="https://github.com/miter37/Relay-agent/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
+    <a href="https://github.com/miter37/Relay-agent/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome"></a>
     <img src="https://img.shields.io/badge/OS-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square" alt="OS">
   </p>
 </div>
@@ -57,8 +57,8 @@ Relay-agent is a reliable task broker designed to connect your always-on AI agen
 
 ### 1. Clone & Install
 ```sh
-git clone https://github.com/miter37/Relay.git
-cd Relay
+git clone https://github.com/miter37/Relay-agent.git
+cd Relay-agent
 ```
 
 **Windows (PowerShell):**
