@@ -18,6 +18,7 @@ from .db import Database
 from .engine import RelayEngine
 from .errors import RelayError
 from .models import JobRequest
+from .schedules.service import ScheduleService
 from .util import ensure_dir, json_dump, random_token, utc_now
 
 
@@ -194,6 +195,27 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
+        if path == "/v1/schedules":
+            self._json(HTTPStatus.OK, {"ok": True, "schedules": self.daemon.schedule_service.list()})
+            return
+        if path.startswith("/v1/schedules/"):
+            suffix = path[len("/v1/schedules/") :]
+            try:
+                if suffix.endswith("/runs"):
+                    schedule_id = suffix[: -len("/runs")]
+                    self._json(
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "schedule_id": schedule_id,
+                            "runs": self.daemon.schedule_service.runs(schedule_id),
+                        },
+                    )
+                else:
+                    self._json(HTTPStatus.OK, {"ok": True, "schedule": self.daemon.schedule_service.show(suffix)})
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/jobs/"):
             suffix = path[len("/v1/jobs/") :]
             try:
@@ -254,6 +276,39 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlsplit(self.path)
             path = parsed.path
+            if path == "/v1/schedules/preview":
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "occurrences": self.daemon.schedule_service.preview(self._body())},
+                )
+                return
+            if path.startswith("/v1/schedules/from-job/"):
+                source_job_id = path[len("/v1/schedules/from-job/") :]
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "schedule": self.daemon.schedule_service.create_from_job(source_job_id, self._body())},
+                )
+                return
+            if path.startswith("/v1/schedules/"):
+                suffix = path[len("/v1/schedules/") :]
+                if suffix.endswith("/pause"):
+                    self._json(
+                        HTTPStatus.OK,
+                        {"ok": True, "schedule": self.daemon.schedule_service.pause(suffix[: -len("/pause")])},
+                    )
+                    return
+                if suffix.endswith("/resume"):
+                    self._json(
+                        HTTPStatus.OK,
+                        {"ok": True, "schedule": self.daemon.schedule_service.resume(suffix[: -len("/resume")])},
+                    )
+                    return
+                if suffix.endswith("/run-now"):
+                    self._json(
+                        HTTPStatus.OK,
+                        {"ok": True, "run": self.daemon.schedule_service.run_now(suffix[: -len("/run-now")])},
+                    )
+                    return
             if path == "/v1/jobs":
                 request = JobRequest.from_dict(self._body())
                 request.caller = "human"
@@ -286,6 +341,37 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json(500, {"ok": False, "error_code": "INTERNAL_ERROR", "error_message": str(exc)})
 
+    def do_PATCH(self) -> None:
+        if not self._authorized():
+            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
+            return
+        path = urlsplit(self.path).path
+        if path.startswith("/v1/schedules/"):
+            try:
+                schedule_id = path[len("/v1/schedules/") :]
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "schedule": self.daemon.schedule_service.update(schedule_id, self._body())},
+                )
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
+        self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+
+    def do_DELETE(self) -> None:
+        if not self._authorized():
+            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
+            return
+        path = urlsplit(self.path).path
+        if path.startswith("/v1/schedules/"):
+            try:
+                schedule_id = path[len("/v1/schedules/") :]
+                self._json(HTTPStatus.OK, {"ok": True, "deleted": self.daemon.schedule_service.delete(schedule_id)})
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+
 
 class RelayDaemon:
     def __init__(self, config: Config):
@@ -293,6 +379,7 @@ class RelayDaemon:
         self.config.init()
         self.db = Database(config.path_value("database_path"))
         self.engine = RelayEngine(config, self.db)
+        self.schedule_service = ScheduleService(self.config, self.db, self.engine)
         self.scheduler = Scheduler(self.engine)
         self.maintenance = MaintenanceLoop(config, self.db)
         self.runtime = config.path_value("runtime_root")
