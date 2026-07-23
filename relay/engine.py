@@ -136,11 +136,19 @@ class RelayEngine:
         return output, artifacts
 
     def create_job(
-        self, request: JobRequest, queued: bool = False, submitted_via: str | None = None
+        self,
+        request: JobRequest,
+        queued: bool = False,
+        submitted_via: str | None = None,
+        *,
+        schedule_id: str | None = None,
+        scheduled_for: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         self._resolve_request_task(request)
         self.config.reload()
-        if request.caller.lower() in {"hermes", "service", "daemon"} and not self.config.get(
+        if schedule_id and request.caller.lower() != "schedule":
+            raise RelayError("INVALID_REQUEST", "Only Schedule requests can link a Schedule ID.")
+        if request.caller.lower() in {"hermes", "service", "daemon", "schedule"} and not self.config.get(
             "service_isolation_acknowledged", False
         ):
             raise RelayError(
@@ -149,7 +157,7 @@ class RelayEngine:
                 "After configuring ACL isolation, run: relay config set service_isolation_acknowledged true",
             )
         validate_attachment_paths(self.config, request.caller, request.attachments)
-        if request.workspace and request.caller.lower() in {"hermes", "service", "daemon"}:
+        if request.workspace and request.caller.lower() in {"hermes", "service", "daemon", "schedule"}:
             workspace_root = safe_resolve(Path(request.workspace))
             if not is_within(workspace_root, self.config.path_value("workspace_root")):
                 raise RelayError(
@@ -204,6 +212,9 @@ class RelayEngine:
             "request_json": json.dumps(request.to_dict(), ensure_ascii=False),
             "replayable": 1 if replayable else 0,
         }
+        if schedule_id:
+            row["schedule_id"] = schedule_id
+            row["scheduled_for"] = scheduled_for
         try:
             self.db.create_job(row)
         except sqlite3.IntegrityError as exc:
@@ -550,6 +561,33 @@ class RelayEngine:
 
     def queue(self, request: JobRequest, submitted_via: str | None = None) -> dict[str, Any]:
         job, reused = self.create_job(request, queued=True, submitted_via=submitted_via)
+        return {
+            "ok": True,
+            "status": "reused" if reused else "queued",
+            "job_id": job["job_id"],
+            "deduplicated": reused,
+        }
+
+    def queue_scheduled(
+        self,
+        request: JobRequest,
+        *,
+        schedule_id: str,
+        scheduled_for: str,
+        output_path: Path,
+        artifact_path: Path,
+    ) -> dict[str, Any]:
+        request.caller = "schedule"
+        request.force_new = True
+        request.output_path = str(output_path)
+        request.artifact_path = str(artifact_path)
+        job, reused = self.create_job(
+            request,
+            queued=True,
+            submitted_via="schedule",
+            schedule_id=schedule_id,
+            scheduled_for=scheduled_for,
+        )
         return {
             "ok": True,
             "status": "reused" if reused else "queued",

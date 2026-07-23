@@ -14,19 +14,21 @@ def _allowed(path: Path, roots: Iterable[str]) -> bool:
 
 
 def validate_requested_paths(config: Config, caller: str, output_path: Path, artifact_path: Path) -> None:
-    service_mode = caller.lower() in {"hermes", "service", "daemon"}
+    service_mode = caller.lower() in {"hermes", "service", "daemon", "schedule"}
     if service_mode or not config.get("allow_manual_outside_roots", True):
-        if not _allowed(output_path, config.get("allowed_output_roots", [])):
+        output_roots = [*config.get("allowed_output_roots", []), str(config.home / "schedule-outputs")]
+        artifact_roots = [*config.get("allowed_artifact_roots", []), str(config.home / "schedule-outputs")]
+        if not _allowed(output_path, output_roots):
             raise RelayError("OUTPUT_PATH_NOT_ALLOWED", f"Output path is outside allowed roots: {output_path}")
-        if not _allowed(artifact_path, config.get("allowed_artifact_roots", [])):
+        if not _allowed(artifact_path, artifact_roots):
             raise RelayError("ARTIFACT_PATH_NOT_ALLOWED", f"Artifact path is outside allowed roots: {artifact_path}")
 
 
 def validate_attachment_paths(config: Config, caller: str, attachments: list[str]) -> None:
-    service_mode = caller.lower() in {"hermes", "service", "daemon"}
+    service_mode = caller.lower() in {"hermes", "service", "daemon", "schedule"}
     if not service_mode:
         return
-    roots = config.get("allowed_input_roots", [])
+    roots = [*config.get("allowed_input_roots", []), str(config.home / "schedule-inputs")]
     for value in attachments:
         path = safe_resolve(Path(value))
         if not _allowed(path, roots):

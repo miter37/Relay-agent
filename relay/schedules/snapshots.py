@@ -156,6 +156,25 @@ def materialize_snapshot(
     )
 
 
+def load_snapshot(schedule_id: str, root: Path) -> ScheduleSnapshot:
+    root = safe_resolve(root)
+    task_file = root / "request.md"
+    manifest_path = root / "attachments.json"
+    if not root.is_dir() or not task_file.is_file() or not manifest_path.is_file():
+        raise RelayError("SCHEDULE_INPUT_MISSING", f"Schedule input snapshot is incomplete: {schedule_id}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RelayError("SCHEDULE_INPUT_INVALID", f"Schedule input manifest is invalid: {schedule_id}") from exc
+    attachments: list[Path] = []
+    for item in manifest.get("attachments", []):
+        path = safe_resolve(root / str(item.get("stored_path") or ""))
+        if not is_within(path, root) or not path.is_file() or _has_symlink_component(path):
+            raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", f"Schedule input escapes its snapshot: {path}")
+        attachments.append(path)
+    return ScheduleSnapshot(schedule_id, root, task_file, tuple(attachments), manifest_path)
+
+
 def build_scheduled_request(
     source: JobRequest,
     snapshot: ScheduleSnapshot,
@@ -181,10 +200,11 @@ def schedule_output_paths(
     run_id: str,
     scheduled_local: datetime,
     result_format: str,
+    output_root: Path | None = None,
 ) -> tuple[Path, Path]:
     if scheduled_local.tzinfo is None:
         raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Scheduled output time must include a timezone.")
-    root = safe_resolve(config.home / "schedule-outputs" / schedule_id)
+    root = safe_resolve(output_root or config.home / "schedule-outputs" / schedule_id)
     folder = f"{scheduled_local.strftime('%Y-%m-%d_%H%M%z')}_{run_id[:12]}"
     run_root = safe_resolve(root / folder)
     if not is_within(run_root, root):

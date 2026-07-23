@@ -20,6 +20,7 @@ DEFAULTS: dict[str, Any] = {
     "poll_interval_seconds": 2,
     "max_concurrent_jobs": 2,
     "max_concurrent_per_worker": 1,
+    "schedule_poll_interval_seconds": 1,
     "fallback_enabled": True,
     "history_mode": "metadata",
     "store_replayable_requests": True,

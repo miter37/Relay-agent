@@ -494,6 +494,17 @@ class Database:
                 (job_id, status, utc_now(), run_id),
             )
 
+    def update_schedule_run(self, run_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE schedule_runs SET {','.join(f'{key}=?' for key in keys)} WHERE run_id=?",
+                [changes[key] for key in keys] + [run_id],
+            )
+
     def list_jobs(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         with self.connect() as conn:
             if status:

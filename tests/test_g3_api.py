@@ -21,6 +21,7 @@ class G3ScheduleApiTests(unittest.TestCase):
         self.home = Path(self.temp.name) / "relay-home"
         self.config = Config(self.home)
         self.config.init()
+        self.config.set("service_isolation_acknowledged", True)
         self.db = Database(self.config.path_value("database_path"))
         self.engine = RelayEngine(self.config, self.db)
         self.clients: list[tuple[RPCClient, threading.Thread]] = []
@@ -44,6 +45,7 @@ class G3ScheduleApiTests(unittest.TestCase):
         client = RPCClient(self.config)
         self.assertTrue(client.wait_until_healthy(3))
         daemon.scheduler.stop_event.set()
+        daemon.schedule_loop.stop_event.set()
         self.clients.append((client, thread))
         return client
 

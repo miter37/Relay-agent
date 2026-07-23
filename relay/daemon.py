@@ -18,6 +18,7 @@ from .db import Database
 from .engine import RelayEngine
 from .errors import RelayError
 from .models import JobRequest
+from .schedules.runtime import ScheduleRuntime
 from .schedules.service import ScheduleService
 from .util import ensure_dir, json_dump, random_token, utc_now
 
@@ -61,6 +62,31 @@ class Scheduler:
     def stop(self) -> None:
         self.stop_event.set()
         self.executor.shutdown(wait=False, cancel_futures=False)
+
+
+class ScheduleLoop:
+    def __init__(self, runtime: ScheduleRuntime, interval_seconds: float = 1.0):
+        self.runtime = runtime
+        self.interval_seconds = interval_seconds
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self.loop, name="relay-schedule-loop", daemon=True)
+        self.thread.start()
+
+    def loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self.runtime.tick()
+            except Exception:
+                pass
+            self.stop_event.wait(self.interval_seconds)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=5)
 
 
 class MaintenanceLoop:
@@ -380,7 +406,11 @@ class RelayDaemon:
         self.db = Database(config.path_value("database_path"))
         self.engine = RelayEngine(config, self.db)
         self.schedule_service = ScheduleService(self.config, self.db, self.engine)
+        self.schedule_runtime = ScheduleRuntime(self.config, self.db, self.engine)
         self.scheduler = Scheduler(self.engine)
+        self.schedule_loop = ScheduleLoop(
+            self.schedule_runtime, float(self.config.get("schedule_poll_interval_seconds", 1))
+        )
         self.maintenance = MaintenanceLoop(config, self.db)
         self.runtime = config.path_value("runtime_root")
         ensure_dir(self.runtime)
@@ -413,11 +443,13 @@ class RelayDaemon:
             },
         )
         self.scheduler.start()
+        self.schedule_loop.start()
         self.maintenance.start()
         try:
             self.server.serve_forever(poll_interval=0.5)
         finally:
             self.maintenance.stop()
+            self.schedule_loop.stop()
             self.scheduler.stop()
             self.pid_path.unlink(missing_ok=True)
 

@@ -73,6 +73,11 @@ class ScheduleService:
         return result
 
     def create_from_job(self, source_job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.config.get("service_isolation_acknowledged", False):
+            raise RelayError(
+                "PERMISSION_BLOCKED",
+                "Schedule execution requires service isolation acknowledgement before creation.",
+            )
         source = self.db.get_job(source_job_id)
         if not source:
             raise RelayError("JOB_NOT_FOUND", f"Job not found: {source_job_id}")
