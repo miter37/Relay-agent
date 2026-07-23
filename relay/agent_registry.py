@@ -35,7 +35,7 @@ class AgentRegistry:
                 "builtin": False,
                 "command": manifest.get("executable"),
                 "default_model": manifest.get("default_model"),
-                "status": "ready" if manifest.get("enabled") else "disabled",
+                "status": str(manifest.get("status") or ("ready" if manifest.get("enabled") else "disabled")),
                 "manifest_hash": self.agent_apps.definition_hash(manifest),
             }
         config = self.config.worker(agent_id)
@@ -57,6 +57,20 @@ class AgentRegistry:
 
     def list_enabled_agents(self) -> list[dict[str, Any]]:
         return [agent for agent in self.list_agents() if agent["enabled"]]
+
+    def list_agent_ids(self) -> list[str]:
+        return self._agent_ids()
+
+    def get_worker_config(self, agent_id: str) -> dict[str, Any]:
+        self.get_definition(agent_id)
+        if agent_id not in BUILTIN_AGENT_IDS:
+            manifest = self.agent_apps.get(agent_id)
+            if manifest:
+                value = dict(manifest)
+                value["_definition_hash"] = self.agent_apps.definition_hash(manifest)
+                value["require_deep_doctor"] = True
+                return value
+        return self.config.worker(agent_id)
 
     def get_adapter(self, agent_id: str):
         self.get_definition(agent_id)

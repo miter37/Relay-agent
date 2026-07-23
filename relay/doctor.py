@@ -25,7 +25,7 @@ class Doctor:
         results = []
         for worker in workers:
             cfg = self.config.worker(worker)
-            adapter = get_adapter(worker, cfg, self.spec_root)
+            adapter = self.engine_adapter(worker, cfg)
             spec = adapter.shallow_audit()
             self.db.add_audit(
                 worker, spec.version, "shallow", "passed" if spec.shallow_ok else "failed", spec.to_dict()
@@ -51,7 +51,7 @@ class Doctor:
             return []
         bypassing = []
         for worker in workers:
-            adapter = get_adapter(worker, self.config.worker(worker), self.spec_root)
+            adapter = self.engine_adapter(worker, self.config.worker(worker))
             mode = adapter.permission_mode()
             if mode in {"bypassPermissions", "dangerously-skip-permissions"}:
                 bypassing.append(f"{worker} ({mode})")
@@ -64,6 +64,15 @@ class Doctor:
             "full rights of the current OS account. Run Relay under a dedicated low-privilege "
             "account, then record it with: relay config set service_isolation_acknowledged true"
         ]
+
+    def engine_adapter(self, worker: str, fallback_config: dict[str, Any]):
+        from .agent_registry import AgentRegistry
+
+        registry = AgentRegistry(self.config, self.spec_root)
+        try:
+            return registry.get_adapter(worker)
+        except KeyError:
+            return get_adapter(worker, fallback_config, self.spec_root)
 
     def _deep_probe(self, adapter, spec: AdapterSpec) -> AdapterSpec:
         worker = adapter.name
@@ -108,6 +117,9 @@ Do not ask questions. Do not wait for user input.
             config=adapter.worker_config,
         )
         details = dict(spec.details)
+        definition_hash = adapter.worker_config.get("_definition_hash")
+        if definition_hash:
+            details["definition_hash"] = definition_hash
         try:
             command, stdin_bytes, env_extra = adapter.build_command(ctx)
             outcome = run_supervised(

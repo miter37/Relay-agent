@@ -63,7 +63,7 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("task", nargs=None if task_required else "?", default="")
     parser.add_argument("--title", help="Optional short title shown in job history")
     parser.add_argument("--task-file")
-    parser.add_argument("--worker", choices=["auto", "claude", "codex", "antigravity"], default="auto")
+    parser.add_argument("--worker", default="auto", help="Agent ID from the built-in or custom Agent registry")
     parser.add_argument("--fallback", action="store_true", default=None)
     parser.add_argument("--no-fallback", action="store_false", dest="fallback")
     parser.add_argument("--fallback-agent", action="append", default=None, dest="fallback_agents")
@@ -296,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=("Examples:\n  relay doctor\n  relay doctor --worker claude --deep"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    doctor.add_argument("--worker", choices=["claude", "codex", "antigravity"])
+    doctor.add_argument("--worker", help="Agent ID from the built-in or custom Agent registry")
     doctor.add_argument("--deep", action="store_true")
     doctor.add_argument("--machine", action="store_true")
 
@@ -421,7 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    models.add_argument("--worker", choices=["all", "claude", "codex", "antigravity"], default="all")
+    models.add_argument("--worker", default="all", help="Agent ID or all")
     models.add_argument("--refresh", action="store_true")
     models.add_argument("--include-hidden", action="store_true")
     models.add_argument("--verify", action="store_true")
@@ -437,7 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Examples:\n  relay model-check --worker claude --model sonnet",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    model_check.add_argument("--worker", required=True, choices=["claude", "codex", "antigravity"])
+    model_check.add_argument("--worker", required=True, help="Agent ID from the Agent registry")
     model_check.add_argument("--model", required=True)
     model_check.add_argument("--machine", action="store_true")
 
@@ -497,6 +497,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit single-line JSON output (default: pretty-printed).",
     )
+
+    agent_app = sub.add_parser(
+        "agent-app",
+        help="List and manage custom Agent Apps",
+        description="Manage manifest-backed custom Agent Apps.",
+    )
+    agent_app_sub = agent_app.add_subparsers(dest="agent_app_command", required=True)
+    agent_app_sub.add_parser("list", help="List custom Agent Apps")
+    for name, help_text in (
+        ("show", "Show an Agent App manifest"),
+        ("test", "Run the deep Agent App test"),
+        ("enable", "Enable an Agent App after a passing deep test"),
+        ("disable", "Disable an Agent App"),
+        ("delete", "Delete an Agent App"),
+    ):
+        command_parser = agent_app_sub.add_parser(name, help=help_text)
+        command_parser.add_argument("agent_id")
 
     _add_schedule_parsers(sub)
     sub.add_parser("version", help="Print the local Relay version")
@@ -1035,7 +1052,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "rerun":
             _emit(engine.rerun(args.job_id), machine)
         elif args.command == "doctor":
-            workers = [args.worker] if args.worker else ["claude", "codex", "antigravity"]
+            workers = (
+                [args.worker]
+                if args.worker
+                else [item["agent_id"] for item in engine.agent_registry.list_agents()]
+            )
             _emit(Doctor(config, db).audit(workers, deep=args.deep), machine)
         elif args.command == "config":
             if args.config_command == "show":
@@ -1091,14 +1112,16 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "models":
             from .model_discovery import get_model_catalog
 
-            workers = ["claude", "codex", "antigravity"] if args.worker == "all" else [args.worker]
+            workers = (
+                [item["agent_id"] for item in engine.agent_registry.list_agents()]
+                if args.worker == "all"
+                else [args.worker]
+            )
             results = []
 
             for w in workers:
                 try:
-                    adapter = __import__("relay.adapters", fromlist=["get_adapter"]).get_adapter(
-                        w, config.worker(w), config.path_value("adapter_spec_root")
-                    )
+                    adapter = engine.agent_registry.get_adapter(w)
                     catalog = get_model_catalog(
                         config, adapter, refresh=args.refresh, include_hidden=args.include_hidden, verify=args.verify
                     )
@@ -1151,9 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
             from .model_discovery import probe_claude_model
 
             # for codex and antigravity, we check catalog. For claude we actually probe if requested.
-            adapter = __import__("relay.adapters", fromlist=["get_adapter"]).get_adapter(
-                args.worker, config.worker(args.worker), config.path_value("adapter_spec_root")
-            )
+            adapter = engine.agent_registry.get_adapter(args.worker)
             exe = adapter.executable()
             if not exe:
                 raise RelayError("WORKER_NOT_INSTALLED", f"{args.worker} executable not found")
@@ -1172,6 +1193,23 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "add-agent":
             result = _run_add_agent(args, config, db)
             _emit(result, machine)
+        elif args.command == "agent-app":
+            from .agent_apps import AgentAppService
+
+            service = AgentAppService(config, db, engine)
+            if args.agent_app_command == "list":
+                _emit({"ok": True, "agent_apps": service.list()}, machine)
+            elif args.agent_app_command == "show":
+                _emit({"ok": True, "agent": service.show(args.agent_id)}, machine)
+            elif args.agent_app_command == "test":
+                _emit({"ok": True, **service.test(args.agent_id)}, machine)
+            elif args.agent_app_command in {"enable", "disable"}:
+                _emit(
+                    {"ok": True, "agent": service.set_enabled(args.agent_id, args.agent_app_command == "enable")},
+                    machine,
+                )
+            elif args.agent_app_command == "delete":
+                _emit({"ok": True, "deleted": service.delete(args.agent_id)}, machine)
         return 0
     except RelayError as err:
         _emit(

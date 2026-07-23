@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
+from .agent_apps import AgentAppService
 from .api import get_agent, job_artifacts, job_detail, job_events, job_logs, job_result, list_agents, list_jobs
 from .autostart import AutoStartManager
 from .cleanup import CleanupManager
@@ -232,6 +233,18 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
+        if path == "/v1/agent-apps":
+            self._json(HTTPStatus.OK, {"ok": True, "agent_apps": self.daemon.agent_app_service.list()})
+            return
+        if path.startswith("/v1/agent-apps/"):
+            try:
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "agent": self.daemon.agent_app_service.show(path[len("/v1/agent-apps/") :])},
+                )
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
         if path == "/v1/schedules":
             self._json(HTTPStatus.OK, {"ok": True, "schedules": self.daemon.schedule_service.list()})
             return
@@ -313,6 +326,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlsplit(self.path)
             path = parsed.path
+            if path == "/v1/agent-apps":
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "agent": self.daemon.agent_app_service.create(self._body())},
+                )
+                return
+            if path.startswith("/v1/agent-apps/") and path.endswith("/test"):
+                agent_id = path[len("/v1/agent-apps/") : -len("/test")]
+                self._json(HTTPStatus.OK, {"ok": True, **self.daemon.agent_app_service.test(agent_id)})
+                return
             if path == "/v1/schedules/preview":
                 self._json(
                     HTTPStatus.OK,
@@ -392,6 +415,22 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         path = urlsplit(self.path).path
+        if path.startswith("/v1/agent-apps/"):
+            try:
+                suffix = path[len("/v1/agent-apps/") :]
+                if suffix.endswith("/enabled"):
+                    agent_id = suffix[: -len("/enabled")]
+                    payload = self._body()
+                    enabled = payload.get("enabled")
+                    if not isinstance(enabled, bool):
+                        raise RelayError("INVALID_REQUEST", "enabled must be a boolean")
+                    value = self.daemon.agent_app_service.set_enabled(agent_id, enabled)
+                else:
+                    value = self.daemon.agent_app_service.update(suffix, self._body())
+                self._json(HTTPStatus.OK, {"ok": True, "agent": value})
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
         if path == "/v1/autostart":
             try:
                 payload = self._body()
@@ -420,6 +459,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         path = urlsplit(self.path).path
+        if path.startswith("/v1/agent-apps/"):
+            try:
+                agent_id = path[len("/v1/agent-apps/") :]
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, "deleted": self.daemon.agent_app_service.delete(agent_id)},
+                )
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/schedules/"):
             try:
                 schedule_id = path[len("/v1/schedules/") :]
@@ -436,6 +485,7 @@ class RelayDaemon:
         self.config.init()
         self.db = Database(config.path_value("database_path"))
         self.engine = RelayEngine(config, self.db)
+        self.agent_app_service = AgentAppService(self.config, self.db, self.engine)
         self.schedule_service = ScheduleService(self.config, self.db, self.engine)
         self.autostart_manager = AutoStartManager(self.config)
         self.schedule_runtime = ScheduleRuntime(self.config, self.db, self.engine)

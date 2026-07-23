@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -83,6 +84,7 @@ class AgentAppStore:
             raise RelayError("AGENT_TEMPLATE_INVALID", f"Agent manifest is not valid JSON: {path}")
         json_dump(path, value)
         return value
+
 
     def delete(self, agent_id: str) -> bool:
         path = self._path(agent_id)
@@ -209,4 +211,100 @@ class AgentAppStore:
                 "enabled": bool(value.get("enabled", False)),
             }
         )
+        return value
+
+
+class AgentAppService:
+    """Lifecycle operations shared by the daemon API, CLI, and GUI."""
+
+    def __init__(self, config: Config, db, engine):
+        self.config = config
+        self.db = db
+        self.engine = engine
+        self.store = AgentAppStore(config)
+
+    def list(self) -> list[dict[str, Any]]:
+        return [self._public(item) for item in self.store.list()]
+
+    def show(self, agent_id: str) -> dict[str, Any]:
+        manifest = self.store.get(agent_id)
+        if manifest is None:
+            raise RelayError("AGENT_NOT_FOUND", f"Agent App not found: {agent_id}")
+        return self._public(manifest)
+
+    def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(payload.get("agent_id") or "")
+        if self.store.get(agent_id) is not None:
+            raise RelayError("AGENT_DUPLICATE", f"Agent App already exists: {agent_id}")
+        value = dict(payload)
+        value["enabled"] = False
+        value["status"] = "needs_test"
+        return self._public(self.store.save(value))
+
+    def update(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        existing = self.store.get(agent_id)
+        if existing is None:
+            raise RelayError("AGENT_NOT_FOUND", f"Agent App not found: {agent_id}")
+        if "agent_id" in payload and payload["agent_id"] != agent_id:
+            raise RelayError("AGENT_INVALID_NAME", "Agent ID cannot be changed")
+        merged = {**existing, **payload, "agent_id": agent_id}
+        old_hash = self.store.definition_hash(existing)
+        new_hash = self.store.definition_hash(merged)
+        if old_hash != new_hash:
+            merged["enabled"] = False
+            merged["status"] = "needs_test"
+        return self._public(self.store.save(merged))
+
+    def set_enabled(self, agent_id: str, enabled: bool) -> dict[str, Any]:
+        manifest = self.store.get(agent_id)
+        if manifest is None:
+            raise RelayError("AGENT_NOT_FOUND", f"Agent App not found: {agent_id}")
+        if enabled:
+            self.engine.agent_registry.get_adapter(agent_id).require_verified()
+            manifest["enabled"] = True
+            manifest["status"] = "ready"
+        else:
+            manifest["enabled"] = False
+            manifest["status"] = "disabled"
+        return self._public(self.store.save(manifest))
+
+    def test(self, agent_id: str) -> dict[str, Any]:
+        manifest = self.store.get(agent_id)
+        if manifest is None:
+            raise RelayError("AGENT_NOT_FOUND", f"Agent App not found: {agent_id}")
+        from .doctor import Doctor
+
+        report = Doctor(self.config, self.db).audit([agent_id], deep=True)
+        item = (report.get("workers") or [{}])[0]
+        manifest["status"] = "ready" if item.get("status") == "healthy" else "needs_test"
+        self.store.save(manifest)
+        return {"agent": self._public(manifest), "test": item}
+
+    def delete(self, agent_id: str) -> bool:
+        if self.store.get(agent_id) is None:
+            raise RelayError("AGENT_NOT_FOUND", f"Agent App not found: {agent_id}")
+        in_use: list[str] = []
+        for schedule in self.db.list_schedules():
+            if not schedule.get("enabled") or schedule.get("deleted_at"):
+                continue
+            source = self.db.get_job(schedule["source_job_id"])
+            try:
+                request = json.loads(source.get("request_json") or "{}") if source else {}
+            except json.JSONDecodeError:
+                request = {}
+            if isinstance(request, dict) and request.get("worker") == agent_id:
+                in_use.append(schedule["schedule_id"])
+        if in_use:
+            raise RelayError(
+                "AGENT_IN_USE",
+                f"Agent App is used by active Schedules: {', '.join(in_use)}",
+                details={"schedule_ids": in_use},
+            )
+        return self.store.delete(agent_id)
+
+    def _public(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        value = dict(manifest)
+        value["manifest_hash"] = self.store.definition_hash(manifest)
+        value.setdefault("status", "disabled" if not manifest.get("enabled") else "needs_test")
+        value.pop("_definition_hash", None)
         return value

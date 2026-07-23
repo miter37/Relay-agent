@@ -89,8 +89,11 @@ class RelayEngine:
         request.result_format = request.result_format.lower()
         if request.result_format not in {"json", "txt"}:
             raise RelayError("INVALID_REQUEST", "Result format must be json or txt")
-        if request.worker not in {"auto", "claude", "codex", "antigravity"}:
-            raise RelayError("INVALID_REQUEST", f"Unsupported worker: {request.worker}")
+        if request.worker != "auto":
+            try:
+                self.agent_registry.get_definition(request.worker)
+            except KeyError:
+                raise RelayError("INVALID_REQUEST", f"Unsupported worker: {request.worker}") from None
 
     def _history_display_mode(self) -> str:
         mode = str(self.config.get("history_display_mode") or self.config.get("history_mode", "metadata"))
@@ -253,7 +256,8 @@ class RelayEngine:
             if job["fallback_enabled"]:
                 chain.extend(x for x in fallback_order if x != requested)
         seen: set[str] = set()
-        return [x for x in chain if x in {"claude", "codex", "antigravity"} and not (x in seen or seen.add(x))]
+        available = set(self.agent_registry.list_agent_ids())
+        return [x for x in chain if x in available and not (x in seen or seen.add(x))]
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         job = self.db.get_job(job_id)
@@ -323,7 +327,7 @@ class RelayEngine:
         chain = self._worker_chain(job, request)
         errors: list[dict[str, Any]] = []
         for index, worker in enumerate(chain):
-            worker_cfg = self.config.worker(worker)
+            worker_cfg = self.agent_registry.get_worker_config(worker)
             if not worker_cfg.get("enabled", False):
                 err = RelayError("WORKER_DISABLED", f"Worker is disabled: {worker}")
                 errors.append({"worker": worker, "code": err.code, "message": err.message})
