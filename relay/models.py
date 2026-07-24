@@ -8,9 +8,11 @@ from typing import Any
 @dataclass(slots=True)
 class JobRequest:
     task: str
+    title: str | None = None
     task_file: str | None = None
     worker: str = "auto"
     fallback: bool | None = None
+    fallback_agents: list[str] | None = None
     result_format: str = "json"
     output_path: str | None = None
     artifact_path: str | None = None
@@ -20,6 +22,7 @@ class JobRequest:
     request_id: str | None = None
     attachments: list[str] = field(default_factory=list)
     workspace: str | None = None
+    target_path: str | None = None
     overwrite: bool = False
     machine: bool = False
     force_new: bool = False

@@ -23,7 +23,7 @@ class AntigravityAdapter(Adapter):
         }
 
     def permission_mode(self) -> str:
-        return "dangerously-skip-permissions"
+        return "dangerously-skip-permissions" if self.full_access_mode_enabled() else "default"
 
     def discover_models(
         self,
@@ -59,10 +59,11 @@ class AntigravityAdapter(Adapter):
         prompt = (
             "Read request.md in the current directory and complete the task non-interactively. "
             f"Write the final {ctx.result_format.upper()} result to {ctx.result_file.relative_to(ctx.workspace).as_posix()}. "
-            "Write any artifact files only in the artifacts directory. Do not ask questions."
+            "Follow request.md for target/ edits; write other artifact files only in the artifacts directory. "
+            "Do not ask questions."
         )
         args = [exe]
-        if ctx.config.get("dangerously_skip_permissions", True):
+        if self.full_access_mode_enabled():
             args.append("--dangerously-skip-permissions")
         model = ctx.model or ctx.config.get("default_model")
         if model:
@@ -81,6 +82,16 @@ class AntigravityAdapter(Adapter):
         if ctx.result_file.exists() and ctx.result_file.stat().st_size:
             return
         raw = stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+
+        if stderr_path.exists():
+            stderr_raw = stderr_path.read_text(encoding="utf-8", errors="replace")
+            if self.has_permission_error(stderr_raw) and not self.full_access_mode_enabled():
+                raise RelayError(
+                    "PERMISSION_BLOCKED",
+                    self.permission_failure_message("Antigravity reported an access or sandbox permission error"),
+                    False,
+                )
+
         if not raw:
             raise RelayError("EMPTY_OUTPUT", "Antigravity returned no result file and no stdout", True)
         if ctx.result_format == "txt":

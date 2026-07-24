@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -69,6 +70,7 @@ def build_request_markdown(
     result_file: Path,
     artifact_dir: Path,
     attachments: list[dict],
+    target_working_copy: Path | None = None,
 ) -> str:
     format_rules = (
         "Return a UTF-8 JSON object matching schema.json exactly. Do not wrap it in Markdown fences.\n"
@@ -91,6 +93,19 @@ def build_request_markdown(
         "analysis-only": "- Do not modify input files.\n- Produce analysis only.",
         "general-artifact": "- Produce the requested result and any requested supporting artifacts.",
     }.get(request.profile, "- Complete the requested task faithfully.")
+    task_text = request.task.strip()
+    if target_working_copy and request.target_path:
+        task_text = re.sub(rf"{re.escape(request.target_path)}[\\/]*", "target/", task_text, flags=re.IGNORECASE)
+    target_rules = (
+        """## Working Folder
+- Relay provided the real requested folder as an isolated editable copy at `target/`.
+- Perform every requested filesystem creation, edit, rename, or deletion inside `target/`.
+- Do not recreate the drive name or requested folder name under `artifacts/`.
+- Relay will safely apply the verified changes to the real folder and copy changed/created files to the Artifact directory.
+"""
+        if target_working_copy
+        else ""
+    )
     return f"""# Relay Task
 
 ## Execution Contract
@@ -102,6 +117,7 @@ def build_request_markdown(
 - {format_rules}
 - Do not claim completion if required work could not be completed.
 
+{target_rules}
 ## Profile
 {profile_rules}
 
@@ -109,5 +125,5 @@ def build_request_markdown(
 {attachment_lines}
 
 ## User Task
-{request.task.strip()}
+{task_text}
 """

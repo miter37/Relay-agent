@@ -35,6 +35,19 @@ class Adapter(ABC):
     command_name: str
     version_args: tuple[str, ...] = ("--version",)
     help_args: tuple[str, ...] = ("--help",)
+    permission_error_markers = (
+        "permission denied",
+        "access denied",
+        "access is denied",
+        "operation not permitted",
+        "not permitted",
+        "approval required",
+        "requires approval",
+        "blocked by policy",
+        "createprocessasuserw failed: 5",
+        "액세스가 거부되었습니다",
+        "권한이 거부되었습니다",
+    )
 
     def __init__(self, worker_config: dict[str, Any], spec_root: Path):
         self.worker_config = worker_config
@@ -44,20 +57,26 @@ class Adapter(ABC):
     def executable(self) -> str | None:
         return which(self.command_name)
 
+    def subprocess_environment(self) -> dict[str, str] | None:
+        return None
+
     def capture(self, args: list[str], timeout: int = 20) -> tuple[int, str, str]:
         executable = self.executable()
         if not executable:
             raise RelayError("WORKER_NOT_INSTALLED", f"{self.name} executable not found: {self.command_name}")
         try:
-            cp = subprocess.run(
-                [executable, *args],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-                env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
-            )
+            base_env = self.subprocess_environment()
+            run_kwargs = {
+                "capture_output": True,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "timeout": timeout,
+                "env": {**(os.environ if base_env is None else base_env), "NO_COLOR": "1", "TERM": "dumb"},
+            }
+            if os.name == "nt":
+                run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            cp = subprocess.run([executable, *args], **run_kwargs)
             return cp.returncode, cp.stdout, cp.stderr
         except subprocess.TimeoutExpired as exc:
             raise RelayError("TIMEOUT", f"{self.name} capability command timed out", True) from exc
@@ -144,6 +163,12 @@ class Adapter(ABC):
                 "WORKER_UNVERIFIED",
                 f"{self.name} deep doctor has not passed for version {spec.version}",
             )
+        expected_definition_hash = self.worker_config.get("_definition_hash")
+        if expected_definition_hash and spec.details.get("definition_hash") != expected_definition_hash:
+            raise RelayError(
+                "WORKER_UNVERIFIED",
+                f"{self.name} configuration changed since the last deep doctor audit",
+            )
         if spec.status != "healthy":
             raise RelayError("WORKER_UNHEALTHY", f"{self.name} audit status is {spec.status}")
         return spec
@@ -166,6 +191,26 @@ class Adapter(ABC):
     def sandbox_mode(self) -> str:
         return "external-workspace"
 
+    def full_access_mode_enabled(self) -> bool:
+        return bool(
+            self.worker_config.get("full_access_mode", False)
+            or self.worker_config.get("unsafe_yolo", False)
+            or self.worker_config.get("dangerously_skip_permissions", False)
+        )
+
+    def has_permission_error(self, stderr: str) -> bool:
+        lower = stderr.casefold()
+        return any(marker in lower for marker in self.permission_error_markers)
+
+    def permission_failure_message(self, detail: str) -> str:
+        if self.full_access_mode_enabled():
+            return detail
+        display_name = {"codex": "Codex", "claude": "Claude", "antigravity": "Antigravity"}.get(self.name, self.name)
+        return (
+            f"{detail}. If this task needs unrestricted access, enable Settings > General > "
+            f"{display_name} Full Access Mode."
+        )
+
     def discover_models(
         self,
         *,
@@ -186,7 +231,7 @@ class Adapter(ABC):
             return "RATE_LIMITED", True
         if "quota" in lower or "usage limit" in lower:
             return "QUOTA_EXCEEDED", True
-        if "permission" in lower or "not allowed" in lower:
+        if self.has_permission_error(stderr) or "permission" in lower or "not allowed" in lower:
             return "PERMISSION_BLOCKED", False
         return "PROCESS_CRASHED", True
 

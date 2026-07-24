@@ -41,6 +41,7 @@ Relay-agent is a reliable task broker designed to connect your always-on AI agen
 - 📂 **Dedicated Workspaces**: Each job runs from a separate Relay-agent managed workspace. This reduces accidental file collisions but is not a complete OS sandbox. Unattended use requires a dedicated low-privilege OS account.
 - 🗄️ **Persistent History**: Every delegated job's metadata, errors, and output paths are recorded in a local SQLite database.
 - ✅ **Validated Delivery Contract**: Relay-agent checks result-file creation, encoding, JSON/TXT structure, artifact paths, and process completion before publishing outputs.
+- 🔎 **Non-interrupting Progress Checks**: The GUI can inspect a running process, recent activity, stalls, and common error signals without messaging or interrupting the Agent.
 
 ---
 
@@ -148,6 +149,20 @@ relay run `
   --worker claude `
   --format json
 ```
+
+### Creating or Editing Files in a Real Folder
+
+Use `--target` when the Agent must create or modify files in a real folder. Relay edits an isolated copy, validates
+the result, applies only the changed files to the real folder, and also copies changed/created files to the normal
+artifacts folder. `--out` still controls the JSON/TXT result, while `--artifacts` controls the Relay file copy.
+
+```powershell
+relay run "Review and improve this code" --target "D:\project" --artifacts "D:\relay-copies"
+```
+
+For interactive CLI/GUI jobs, Relay can also detect one unambiguous absolute target path from a file-writing task.
+Choose **Working folder** explicitly when the task mentions multiple paths. Working-folder jobs are not eligible for
+unattended Schedules.
 
 ---
 
@@ -287,6 +302,14 @@ relay security --machine
 relay config set service_isolation_acknowledged true
 ```
 
+Full Access Mode is a separate, per-worker switch. It disables the selected AI CLI's permission checks or sandbox restrictions and applies immediately to a running daemon. Inspect the effective state or change it from either GUI Settings > General or the CLI:
+```sh
+relay security --worker codex --machine
+relay security --enable-full-access codex --machine
+relay security --disable-full-access codex --machine
+```
+Use it only with a trusted task and a dedicated low-privilege OS account. GUI and CLI changes use the same persisted configuration and daemon API, so their reported state stays consistent.
+
 **Set default workers and fallbacks:**
 ```sh
 relay config set default_worker claude
@@ -315,6 +338,7 @@ relay cleanup --status
 ## 📚 Documentation
 
 For deeper details, consult the `docs/` folder:
+- [Current project memory and navigation](wiki/index.md)
 - [Development Plan](docs/DEVELOPMENT_PLAN.md)
 - [Capability Audit](docs/CAPABILITY_AUDIT.md)
 - [Security Guidelines](docs/SECURITY.md)

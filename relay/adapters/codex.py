@@ -24,9 +24,13 @@ class CodexAdapter(Adapter):
         }
 
     def permission_mode(self) -> str:
+        if self.full_access_mode_enabled():
+            return "dangerously-bypass-approvals-and-sandbox"
         return str(self.worker_config.get("approval", "never"))
 
     def sandbox_mode(self) -> str:
+        if self.full_access_mode_enabled():
+            return "none"
         return str(self.worker_config.get("sandbox", "workspace-write"))
 
     def discover_models(
@@ -86,9 +90,12 @@ class CodexAdapter(Adapter):
             exe,
             "exec",
             "--ephemeral",
-            "--sandbox",
-            str(ctx.config.get("sandbox", "workspace-write")),
         ]
+
+        if self.full_access_mode_enabled():
+            args.append("--dangerously-bypass-approvals-and-sandbox")
+        else:
+            args.extend(["--sandbox", str(ctx.config.get("sandbox", "workspace-write"))])
         args.extend(
             [
                 "--skip-git-repo-check",
@@ -109,7 +116,8 @@ class CodexAdapter(Adapter):
         prompt = (
             b"Read request.md in the current working directory and complete it without asking questions. "
             b"Return only the requested final JSON or text. "
-            b"For JSON work: Do not attempt direct filesystem writes for artifacts. Put every artifact's exact "
+            b"Follow request.md for target/ edits. Do not attempt direct filesystem writes for artifacts "
+            b"other than those target/ edits. Put every other JSON artifact's exact "
             b"content in the structured artifacts payload required by schema.json; Relay will safely materialize "
             b"the files, and the valid artifact payload counts as completed work. Artifact relative_path values "
             b"are relative to ./artifacts and must not start with artifacts/."
@@ -134,6 +142,16 @@ class CodexAdapter(Adapter):
                 ctx.result_file.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
             return
         raw = stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+
+        if stderr_path.exists():
+            stderr_raw = stderr_path.read_text(encoding="utf-8", errors="replace")
+            if self.has_permission_error(stderr_raw) and not self.full_access_mode_enabled():
+                raise RelayError(
+                    "PERMISSION_BLOCKED",
+                    self.permission_failure_message("Codex reported an access or sandbox permission error"),
+                    False,
+                )
+
         if not raw:
             raise RelayError("OUTPUT_NOT_CREATED", "Codex did not create its output-last-message file", True)
         ctx.result_file.write_text(raw, encoding="utf-8")
