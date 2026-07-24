@@ -1,0 +1,3 @@
+- [ ] Review and merge Draft PR #14 (`feat/g5-custom-agent-apps`) after confirming the final G5 scope.
+- [ ] Reconcile README's legacy `relay add-agent` description with the current manifest-backed Agent App workflow.
+- [ ] Start G6 packaging/platform operations only after G5 is accepted.

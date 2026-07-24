@@ -1,0 +1,2 @@
+- 2026-07-24 10:33 | Established the fixed project-memory structure and documented the current Relay v1.1.0/G5 state.
+- 2026-07-24 10:33 | Current G5 branch passes 191 local tests and the full Windows, Ubuntu, macOS PR #14 CI matrix.

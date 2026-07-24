@@ -315,6 +315,7 @@ relay cleanup --status
 ## 📚 Documentation
 
 For deeper details, consult the `docs/` folder:
+- [Current project memory and navigation](wiki/index.md)
 - [Development Plan](docs/DEVELOPMENT_PLAN.md)
 - [Capability Audit](docs/CAPABILITY_AUDIT.md)
 - [Security Guidelines](docs/SECURITY.md)

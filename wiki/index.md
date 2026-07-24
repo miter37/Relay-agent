@@ -1,0 +1,6 @@
+- [Overview](overview.md) — current orientation and development state.
+- [Goals and scope](goals-and-scope.md) — product goals, constraints, and non-goals.
+- [Project model](project-model.md) — components, actors, flows, and durable artifacts.
+- [Knowledge and evidence](knowledge-and-evidence.md) — verified facts, sources, and uncertainty.
+- [Decisions](decisions.md) — active and superseded consequential choices.
+- [Working method](working-method.md) — development workflow and quality gates.
