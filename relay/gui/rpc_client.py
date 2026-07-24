@@ -17,6 +17,7 @@ class GuiRpcClient(QObject):
         self.config = config
         self.manager = QNetworkAccessManager(self)
         self._sequence = 0
+        self._replies: list[QNetworkReply] = []
 
     def get(self, path: str, *, timeout_ms: int = 5000) -> int:
         return self._request("GET", path, None, timeout_ms=timeout_ms)
@@ -51,12 +52,15 @@ class GuiRpcClient(QObject):
             reply = self.manager.deleteResource(request)
         else:
             reply = self.manager.sendCustomRequest(request, method.encode("ascii"), data)
+        self._replies.append(reply)
         reply.setProperty("relay_request_id", request_id)
         reply.setProperty("relay_timeout_ms", timeout_ms)
         reply.finished.connect(lambda: self._finished(reply))
         return request_id
 
     def _finished(self, reply) -> None:
+        if reply in self._replies:
+            self._replies.remove(reply)
         request_id = int(reply.property("relay_request_id"))
         payload: Any = None
         error: str | None = None
@@ -68,3 +72,10 @@ class GuiRpcClient(QObject):
             error = reply.errorString()
         self.response.emit(request_id, payload, error)
         reply.deleteLater()
+
+    def close(self) -> None:
+        for reply in self._replies:
+            reply.finished.disconnect()
+            reply.abort()
+            reply.deleteLater()
+        self._replies.clear()

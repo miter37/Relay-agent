@@ -201,6 +201,9 @@ class MainWindow(QMainWindow):
         self.search.setText(str(self.state.value("filters/search", "")))
 
     def closeEvent(self, event) -> None:
+        for timer in (self.health_timer, self.active_timer, self.finished_timer, self.log_timer):
+            timer.stop()
+        self.client.close()
         self.state.set_value("window/geometry", self.saveGeometry())
         self.state.set_value("window/splitter_state", self.splitter.saveState())
         self.state.set_value("filters/search", self.search.text())
