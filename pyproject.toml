@@ -7,12 +7,13 @@ name = "relay-ai-cli-broker"
 dynamic = ["version"]
 description = "Reliable delegation broker for Antigravity CLI, Claude Code, and Codex CLI"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "tzdata>=2025.2; platform_system == 'Windows'",
+]
 
 [project.optional-dependencies]
 gui = [
   "PySide6>=6.8,<7",
-  "tzdata>=2025.2",
 ]
 
 [project.scripts]
@@ -24,8 +25,8 @@ version = { attr = "relay.__version__" }
 [tool.setuptools.packages.find]
 include = ["relay*"]
 
-# ruff is a development tool only. Relay-agent itself has zero runtime
-# dependencies and we intend to keep it that way.
+# Ruff is a development tool only. Relay uses the OS timezone database where
+# available and installs tzdata only on Windows.
 [tool.ruff]
 line-length = 120
 target-version = "py311"

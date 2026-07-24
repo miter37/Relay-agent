@@ -43,11 +43,11 @@ class G2JobApiTests(unittest.TestCase):
     def _start_daemon(self) -> RPCClient:
         self.config.set("daemon_port", self._free_port())
         daemon = RelayDaemon(self.config)
+        daemon.scheduler.stop_event.set()
         thread = threading.Thread(target=daemon.serve, daemon=True)
         thread.start()
         client = RPCClient(self.config)
         self.assertTrue(client.wait_until_healthy(3))
-        daemon.scheduler.stop_event.set()
         self.daemon_clients.append((client, thread))
         return client
 

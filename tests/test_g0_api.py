@@ -76,6 +76,20 @@ class G0ApiTests(unittest.TestCase):
         self.assertEqual(health["min_gui_version"], "1.1.0")
         self.assertEqual(health["relay_home_id"], relay_home_id(self.home))
 
+    def test_daemon_shutdown_joins_background_loops(self):
+        daemon, client, thread = self._start_daemon()
+
+        client.request("POST", "/shutdown")
+        thread.join(timeout=10)
+
+        self.assertFalse(thread.is_alive())
+        self.assertIsNotNone(daemon.scheduler.thread)
+        self.assertFalse(daemon.scheduler.thread.is_alive())
+        self.assertIsNotNone(daemon.schedule_loop.thread)
+        self.assertFalse(daemon.schedule_loop.thread.is_alive())
+        self.assertIsNotNone(daemon.maintenance.thread)
+        self.assertFalse(daemon.maintenance.thread.is_alive())
+
     def test_current_gui_version_meets_daemon_minimum(self):
         self.assertGreaterEqual(tuple(int(part) for part in __version__.split(".")), (0, 8, 0))
 

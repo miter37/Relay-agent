@@ -1,3 +1,29 @@
+# Relay 1.1.0 release notes
+
+Relay 1.1.0 adds Custom Agent Apps across the CLI, GUI, and Schedules.
+
+## Added
+
+- Manifest-backed custom Agent registration, editing, deep testing, enable/disable, and recoverable deletion.
+- A shell-free generic CLI adapter with validated argv placeholders and normalized text or JSON results.
+- Agent App model discovery and executable-version invalidation that requires changed Agents to be retested.
+- Agent App management in Settings and custom Agent selection for ordinary and scheduled Jobs.
+- API schema revision 5 with GUI minimum version 1.1.0.
+
+## Fixed
+
+- GUI daemon requests now recognize successful Qt network replies and enforce their configured timeout.
+- Schedule timezone data is installed on Windows.
+- Daemon shutdown waits for scheduler workers before temporary Relay Homes are removed.
+- Schedule snapshots and retention accept macOS system path aliases while continuing to reject symlinks inside Relay-managed roots.
+
+## Verification
+
+GitHub Actions checks Ruff formatting and lint, the full test suite on Windows, Ubuntu, and macOS with Python 3.11–3.13,
+and real daemon-backed GUI smoke coverage.
+
+---
+
 # Relay 1.0.0 release notes
 
 Relay 1.0.0 adds the G4 Schedule GUI and daemon auto-start controls.

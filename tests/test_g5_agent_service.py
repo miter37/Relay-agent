@@ -42,7 +42,9 @@ class G5AgentAppServiceTests(unittest.TestCase):
         created = self.service.create({**payload(), "enabled": True})
         self.assertFalse(created["enabled"])
 
-        updated = self.service.update("opencode", {"argv": ["run", "--safe", "{request_file}", "{result_file}"], "enabled": True})
+        updated = self.service.update(
+            "opencode", {"argv": ["run", "--safe", "{request_file}", "{result_file}"], "enabled": True}
+        )
 
         self.assertFalse(updated["enabled"])
         self.assertEqual(updated["status"], "needs_test")

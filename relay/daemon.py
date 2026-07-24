@@ -39,13 +39,15 @@ class Scheduler:
             for name in ("claude", "codex", "antigravity")
         }
         self._worker_limit_size = int(self.config.get("max_concurrent_per_worker", 1))
+        self.thread: threading.Thread | None = None
 
     def worker_limit(self, worker: str) -> threading.Semaphore:
         with self.lock:
             return self.worker_limits.setdefault(worker, threading.Semaphore(self._worker_limit_size))
 
     def start(self) -> None:
-        threading.Thread(target=self.loop, name="relay-scheduler", daemon=True).start()
+        self.thread = threading.Thread(target=self.loop, name="relay-scheduler", daemon=True)
+        self.thread.start()
 
     def loop(self) -> None:
         while not self.stop_event.is_set():
@@ -69,7 +71,9 @@ class Scheduler:
 
     def stop(self) -> None:
         self.stop_event.set()
-        self.executor.shutdown(wait=False, cancel_futures=False)
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+        self.executor.shutdown(wait=True, cancel_futures=True)
 
 
 class ScheduleLoop:
@@ -167,8 +171,11 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _body(self) -> dict:
+        if hasattr(self, "_parsed_body"):
+            return self._parsed_body
         length = int(self.headers.get("Content-Length", "0"))
-        return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        self._parsed_body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        return self._parsed_body
 
     def do_GET(self) -> None:
         if not self._authorized():
@@ -329,6 +336,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         try:
+            self._body()
             parsed = urlsplit(self.path)
             path = parsed.path
             if path == "/v1/agent-apps":

@@ -119,7 +119,10 @@ class ScheduleRetentionTests(unittest.TestCase):
         outside = Path(self.tmp.name) / "outside"
         outside.mkdir()
         link = self.root / "escape"
-        link.symlink_to(outside, target_is_directory=True)
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlinks are unavailable: {exc}")
         self.db.insert_schedule_run(
             "sch-1",
             {

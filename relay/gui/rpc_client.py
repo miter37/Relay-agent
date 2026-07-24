@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from PySide6.QtCore import QObject, QUrl, Signal
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 
 class GuiRpcClient(QObject):
@@ -36,6 +36,7 @@ class GuiRpcClient(QObject):
         request = QNetworkRequest(
             QUrl(f"http://{self.config.get('daemon_host')}:{self.config.get('daemon_port')}{path}")
         )
+        request.setTransferTimeout(timeout_ms)
         token_path = self.config.path_value("runtime_root") / "daemon.token"
         if token_path.exists():
             request.setRawHeader(b"X-Relay-Token", token_path.read_text(encoding="utf-8").strip().encode("utf-8"))
@@ -63,7 +64,7 @@ class GuiRpcClient(QObject):
             payload = json.loads(bytes(reply.readAll()).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             error = str(exc)
-        if reply.error() and error is None:
+        if reply.error() != QNetworkReply.NetworkError.NoError and error is None:
             error = reply.errorString()
         self.response.emit(request_id, payload, error)
         reply.deleteLater()

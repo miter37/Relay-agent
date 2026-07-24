@@ -88,9 +88,11 @@ class G5GenericAdapterTests(unittest.TestCase):
             self.workspace,
             name="opencode",
         )
-        with patch.object(adapter, "executable", return_value="/usr/bin/opencode"), patch.object(
-            adapter, "version", return_value="1.2.3"
-        ), patch.object(adapter, "capture", return_value=(0, "fast\npro\nfast\n", "")):
+        with (
+            patch.object(adapter, "executable", return_value="/usr/bin/opencode"),
+            patch.object(adapter, "version", return_value="1.2.3"),
+            patch.object(adapter, "capture", return_value=(0, "fast\npro\nfast\n", "")),
+        ):
             catalog = adapter.discover_models()
         self.assertEqual([model.id for model in catalog.models], ["fast", "pro"])
         self.assertEqual(catalog.source, "manifest_model_list")
@@ -151,8 +153,9 @@ class G5GenericAdapterTests(unittest.TestCase):
         )
         adapter.save_spec(spec)
 
-        with patch.object(adapter, "version", return_value="1.0"), patch.object(
-            adapter, "executable", return_value="/usr/bin/agent"
+        with (
+            patch.object(adapter, "version", return_value="1.0"),
+            patch.object(adapter, "executable", return_value="/usr/bin/agent"),
         ):
             with self.assertRaises(RelayError) as context:
                 adapter.require_verified()

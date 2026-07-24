@@ -1053,9 +1053,7 @@ def main(argv: list[str] | None = None) -> int:
             _emit(engine.rerun(args.job_id), machine)
         elif args.command == "doctor":
             workers = (
-                [args.worker]
-                if args.worker
-                else [item["agent_id"] for item in engine.agent_registry.list_agents()]
+                [args.worker] if args.worker else [item["agent_id"] for item in engine.agent_registry.list_agents()]
             )
             _emit(Doctor(config, db).audit(workers, deep=args.deep), machine)
         elif args.command == "config":

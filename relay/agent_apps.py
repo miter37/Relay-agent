@@ -85,7 +85,6 @@ class AgentAppStore:
         json_dump(path, value)
         return value
 
-
     def delete(self, agent_id: str) -> bool:
         path = self._path(agent_id)
         if not path.exists():
@@ -160,7 +159,9 @@ class AgentAppStore:
         placeholders = set()
         model_list_argv = value.get("model_list_argv") or []
         model_arg = value.get("model_arg") or []
-        if not isinstance(model_list_argv, list) or any(not isinstance(item, str) or not item for item in model_list_argv):
+        if not isinstance(model_list_argv, list) or any(
+            not isinstance(item, str) or not item for item in model_list_argv
+        ):
             raise RelayError("AGENT_TEMPLATE_INVALID", "model_list_argv must be a string list")
         if not isinstance(model_arg, list) or any(not isinstance(item, str) or not item for item in model_arg):
             raise RelayError("AGENT_TEMPLATE_INVALID", "model_arg must be a string list")

@@ -10,9 +10,7 @@ class G5AgentCliTests(unittest.TestCase):
         parser = build_parser()
 
         for command in ("list", "show", "test", "enable", "disable", "delete"):
-            args = parser.parse_args(
-                ["agent-app", command, *([] if command == "list" else ["opencode"])]
-            )
+            args = parser.parse_args(["agent-app", command, *([] if command == "list" else ["opencode"])])
             self.assertEqual(args.command, "agent-app")
             self.assertEqual(args.agent_app_command, command)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from ..config import Config
 from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
-from ..util import new_job_id, safe_resolve, utc_now
+from ..util import new_job_id, utc_now
 from .rules import next_occurrences, validate_rule
 from .snapshots import clone_snapshot, load_snapshot, materialize_snapshot, validate_source_job
 
@@ -81,8 +82,11 @@ class ScheduleService:
 
     @staticmethod
     def _output_root(config: Config, base: Any, schedule_id: str) -> Path:
-        root = safe_resolve(Path(str(base or config.home / "schedule-outputs")) / schedule_id)
-        if root.exists() and root.is_symlink():
+        selected = Path(str(base or config.home / "schedule-outputs")).expanduser()
+        if selected.is_symlink():
+            raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Schedule output root cannot be a symlink")
+        root = Path(os.path.abspath(selected / schedule_id))
+        if root.is_symlink():
             raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Schedule output root cannot be a symlink")
         root.mkdir(parents=True, exist_ok=True)
         return root

@@ -65,13 +65,17 @@ class ScheduleRetentionManager:
         return parsed.astimezone(UTC)
 
     @staticmethod
-    def _has_symlink_component(path: Path) -> bool:
-        current = Path(path.anchor) if path.is_absolute() else Path()
-        for part in path.parts[1:] if path.is_absolute() else path.parts:
-            current /= part
+    def _has_symlink_below(path: Path, root: Path) -> bool:
+        current = Path(os.path.abspath(path.expanduser()))
+        boundary = safe_resolve(root)
+        while True:
             if current.is_symlink():
                 return True
-        return False
+            if safe_resolve(current) == boundary:
+                return False
+            if current == current.parent:
+                return True
+            current = current.parent
 
     @staticmethod
     def _retention(schedule: dict[str, Any]) -> dict[str, Any]:
@@ -108,30 +112,51 @@ class ScheduleRetentionManager:
 
     def _owned_run_root(
         self, schedule: dict[str, Any], run: dict[str, Any]
-    ) -> tuple[Path | None, dict[str, str] | None]:
+    ) -> tuple[Path | None, dict[str, Any] | None]:
         output_value = run.get("output_path")
         root_value = schedule.get("output_root")
         if not output_value or not root_value:
-            return None, {"code": "SCHEDULE_PATH_NOT_ALLOWED", "error": "Schedule run has no output root."}
+            return None, {
+                "code": "SCHEDULE_PATH_NOT_ALLOWED",
+                "error": "Schedule run has no output root.",
+                "retryable": False,
+            }
         raw_root = Path(str(root_value)).expanduser()
         raw_output = Path(str(output_value)).expanduser()
-        if self._has_symlink_component(raw_root) or self._has_symlink_component(raw_output):
-            return None, {"code": "SCHEDULE_PATH_NOT_ALLOWED", "error": "Schedule output contains a symlink."}
+        if raw_root.is_symlink() or self._has_symlink_below(raw_output, raw_root):
+            return None, {
+                "code": "SCHEDULE_PATH_NOT_ALLOWED",
+                "error": "Schedule output contains a symlink.",
+                "retryable": False,
+            }
         root = safe_resolve(raw_root)
-        run_root = safe_resolve(raw_output.parent)
-        if run_root == root or not is_within(run_root, root):
-            return None, {"code": "SCHEDULE_PATH_NOT_ALLOWED", "error": "Schedule run escapes its output root."}
+        run_root = Path(os.path.abspath(raw_output.parent))
+        resolved_run_root = safe_resolve(run_root)
+        if resolved_run_root == root or not is_within(resolved_run_root, root):
+            return None, {
+                "code": "SCHEDULE_PATH_NOT_ALLOWED",
+                "error": "Schedule run escapes its output root.",
+                "retryable": False,
+            }
         marker_path = run_root / _MARKER_NAME
         if not marker_path.is_file():
-            return None, {"code": "SCHEDULE_OUTPUT_UNOWNED", "error": "Run marker is missing."}
+            return None, {"code": "SCHEDULE_OUTPUT_UNOWNED", "error": "Run marker is missing.", "retryable": False}
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return None, {"code": "SCHEDULE_OUTPUT_UNOWNED", "error": "Run marker is invalid."}
+            return None, {"code": "SCHEDULE_OUTPUT_UNOWNED", "error": "Run marker is invalid.", "retryable": False}
         if marker.get("schedule_id") != schedule.get("schedule_id") or marker.get("run_id") != run.get("run_id"):
-            return None, {"code": "SCHEDULE_OUTPUT_UNOWNED", "error": "Run marker identity does not match history."}
+            return None, {
+                "code": "SCHEDULE_OUTPUT_UNOWNED",
+                "error": "Run marker identity does not match history.",
+                "retryable": False,
+            }
         if not run_root.is_dir() or run_root.is_symlink():
-            return None, {"code": "SCHEDULE_PATH_NOT_ALLOWED", "error": "Schedule run root is not a directory."}
+            return None, {
+                "code": "SCHEDULE_PATH_NOT_ALLOWED",
+                "error": "Schedule run root is not a directory.",
+                "retryable": False,
+            }
         return run_root, None
 
     def _run_locked(self, *, dry_run: bool, now: datetime) -> dict[str, Any]:

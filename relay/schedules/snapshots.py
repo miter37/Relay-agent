@@ -30,13 +30,17 @@ def _snapshot_root(config: Config) -> Path:
     return safe_resolve(config.home / "schedule-inputs")
 
 
-def _has_symlink_component(path: Path) -> bool:
-    current = path
-    while current != current.parent:
+def _has_symlink_below(path: Path, root: Path) -> bool:
+    current = Path(os.path.abspath(path.expanduser()))
+    boundary = safe_resolve(root)
+    while True:
         if current.is_symlink():
             return True
+        if safe_resolve(current) == boundary:
+            return False
+        if current == current.parent:
+            return True
         current = current.parent
-    return current.is_symlink()
 
 
 def _hash_file(path: Path) -> tuple[int, str]:
@@ -109,7 +113,11 @@ def materialize_snapshot(
         source = Path(value)
         if not source.exists() or not source.is_file():
             raise RelayError("SCHEDULE_INPUT_MISSING", f"Attachment not found: {source}")
-        if _has_symlink_component(source):
+        trusted_roots = [Path(root) for root in config.get("allowed_input_roots", [])] + [config.home]
+        boundary = next((root for root in trusted_roots if is_within(source, root)), None)
+        if (boundary is not None and _has_symlink_below(source, boundary)) or (
+            boundary is None and source.is_symlink()
+        ):
             raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", f"Symlink attachments are not allowed: {source}")
         name = source.name
         if not name or name in names or name in {"request.md", "attachments.json"}:
@@ -168,8 +176,9 @@ def load_snapshot(schedule_id: str, root: Path) -> ScheduleSnapshot:
         raise RelayError("SCHEDULE_INPUT_INVALID", f"Schedule input manifest is invalid: {schedule_id}") from exc
     attachments: list[Path] = []
     for item in manifest.get("attachments", []):
-        path = safe_resolve(root / str(item.get("stored_path") or ""))
-        if not is_within(path, root) or not path.is_file() or _has_symlink_component(path):
+        raw_path = root / str(item.get("stored_path") or "")
+        path = safe_resolve(raw_path)
+        if not is_within(path, root) or not path.is_file() or _has_symlink_below(raw_path, root):
             raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", f"Schedule input escapes its snapshot: {path}")
         attachments.append(path)
     return ScheduleSnapshot(schedule_id, root, task_file, tuple(attachments), manifest_path)
@@ -177,8 +186,9 @@ def load_snapshot(schedule_id: str, root: Path) -> ScheduleSnapshot:
 
 def clone_snapshot(config: Config, source_root: Path, schedule_id: str) -> ScheduleSnapshot:
     input_root = _snapshot_root(config)
-    source = safe_resolve(source_root)
-    if _has_symlink_component(source) or not is_within(source, input_root):
+    raw_source = Path(source_root).expanduser()
+    source = safe_resolve(raw_source)
+    if _has_symlink_below(raw_source, input_root) or not is_within(source, input_root):
         raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Schedule input snapshot escapes Relay roots.")
     load_snapshot("source", source)
     final_root = input_root / schedule_id
@@ -229,11 +239,12 @@ def schedule_output_paths(
     if scheduled_local.tzinfo is None:
         raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Scheduled output time must include a timezone.")
     raw_root = Path(output_root or config.home / "schedule-outputs" / schedule_id).expanduser()
-    if _has_symlink_component(raw_root):
+    boundary = config.home if is_within(raw_root, config.home) else raw_root
+    if _has_symlink_below(raw_root, boundary):
         raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Schedule output root cannot contain symlinks.")
-    root = safe_resolve(raw_root)
+    root = Path(os.path.abspath(raw_root))
     folder = f"{scheduled_local.strftime('%Y-%m-%d_%H%M%z')}_{run_id[:12]}"
-    run_root = safe_resolve(root / folder)
+    run_root = root / folder
     if not is_within(run_root, root):
         raise RelayError("SCHEDULE_PATH_NOT_ALLOWED", "Schedule output path escapes its root.")
     suffix = ".json" if result_format == "json" else ".txt"
