@@ -584,12 +584,14 @@ class Database:
                 "OR actual_worker LIKE ? ESCAPE '\\' COLLATE NOCASE "
                 "OR profile LIKE ? ESCAPE '\\' COLLATE NOCASE "
                 "OR error_code LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                "OR COALESCE(json_extract(CASE WHEN json_valid(request_json) THEN request_json ELSE '{}' END, '$.task'), '') "
+                "LIKE ? ESCAPE '\\' COLLATE NOCASE "
                 "OR COALESCE(json_extract(CASE WHEN json_valid(request_json) THEN request_json ELSE '{}' END, '$.model'), '') "
                 "LIKE ? ESCAPE '\\' COLLATE NOCASE "
                 "OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(request_json) THEN request_json ELSE '{}' END, '$.attachments') "
                 "WHERE CAST(value AS TEXT) LIKE ? ESCAPE '\\' COLLATE NOCASE))"
             )
-            params.extend([pattern] * 9)
+            params.extend([pattern] * 10)
         if date_from:
             where.append("COALESCE(completed_at, created_at)>=?")
             params.append(date_from)

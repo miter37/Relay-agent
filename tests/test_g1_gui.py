@@ -83,11 +83,15 @@ class G1GuiTests(unittest.TestCase):
             "failed": {"job_id": "failed", "status": "FAILED", "title": "Failed", "submitted_via": "gui"},
         }
         self.window._render_jobs()
-        self.assertEqual(self.window.job_list.count(), 4)
+        self.assertEqual(self.window.job_list.topLevelItemCount(), 1)
         self.window.result_filter.setCurrentText("Failed")
         self.window._render_jobs()
-        self.assertEqual(self.window.job_list.count(), 3)
-        self.assertIn("× Failed", self.window.job_list.item(2).text())
+        self.assertEqual(self.window.job_list.topLevelItemCount(), 1)
+        failed_group = self.window.job_list.topLevelItem(0)
+        failed_date = failed_group.child(0)
+        failed_task = failed_date.child(0)
+        self.assertEqual(failed_task.text(0), "Failed")
+        self.assertEqual(failed_task.text(1), "Fail")
 
     def test_active_refresh_uses_one_request_and_refreshes_selected_detail(self):
         self.window.current_mode = "normal"
@@ -125,8 +129,39 @@ class G1GuiTests(unittest.TestCase):
 
         self.assertIs(self.window.detail_stack.currentWidget(), self.window.new_task_view)
 
+    def test_settings_ignores_stale_detail_response(self):
+        self.window.selected_job_id = "job-1"
+        self.window.detail_view_mode = "job"
+        self.window._show_settings()
+        self.window.pending[1] = ("detail", "job-1")
+
+        self.window._handle_response(1, {"job_id": "job-1", "status": "COMPLETED"}, None)
+
+        self.assertIs(self.window.detail_stack.currentWidget(), self.window.settings_view)
+
+    def test_finished_tree_can_collapse_group_and_date(self):
+        self.window.jobs = {
+            "done": {
+                "job_id": "done",
+                "status": "COMPLETED",
+                "title": "Done",
+                "completed_at": "2026-07-24T01:00:00+00:00",
+            }
+        }
+        self.window._render_jobs()
+        group = self.window.job_list.topLevelItem(0)
+        date = group.child(0)
+        group.setExpanded(False)
+        date.setExpanded(False)
+
+        self.window._render_jobs()
+
+        self.assertFalse(self.window.job_list.topLevelItem(0).isExpanded())
+        self.assertFalse(self.window.job_list.topLevelItem(0).child(0).isExpanded())
+
     def test_result_response_populates_answer_and_raw_result_tabs(self):
         self.window.selected_job_id = "job-1"
+        self.window.detail_view_mode = "job"
         self.window.pending[1] = ("result", "job-1")
         payload = {
             "job_id": "job-1",

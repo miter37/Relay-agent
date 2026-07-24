@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -36,13 +37,6 @@ class NewTaskView(QWidget):
         self.task_edit.setPlaceholderText("What should the agent do?")
         self.task_edit.setMinimumHeight(140)
         form.addRow("Task", self.task_edit)
-        self.task_file_edit = QLineEdit()
-        task_file_row = QHBoxLayout()
-        task_file_row.addWidget(self.task_file_edit)
-        task_file_button = QPushButton("Browse")
-        task_file_button.clicked.connect(self._choose_task_file)
-        task_file_row.addWidget(task_file_button)
-        form.addRow("Task file", task_file_row)
         self.attachment_list = QListWidget()
         self.attachment_list.setMaximumHeight(90)
         attachment_row = QVBoxLayout()
@@ -50,7 +44,9 @@ class NewTaskView(QWidget):
         add_attachment = QPushButton("+ Add files")
         add_attachment.clicked.connect(self._choose_attachments)
         attachment_row.addWidget(add_attachment)
-        form.addRow("Files", attachment_row)
+        form.addRow(
+            self._help_label("Files", "Optional files supplied to the Agent as task attachments."), attachment_row
+        )
         self.worker_combo = QComboBox()
         self.worker_combo.addItems(["auto", "claude", "codex", "antigravity"])
         form.addRow("Agent", self.worker_combo)
@@ -62,25 +58,73 @@ class NewTaskView(QWidget):
         self.profile_combo.addItems(["web-research", "general-artifact", "analysis-only"])
         form.addRow("Profile", self.profile_combo)
         self.fallback_check = QCheckBox("Use another agent if this fails")
-        form.addRow("Fallback", self.fallback_check)
+        form.addRow(
+            self._help_label("Fallback", "If the selected Agent fails technically, try a configured fallback Agent."),
+            self.fallback_check,
+        )
+        self.fallback_check.setChecked(True)
+        layout.addLayout(form)
+
+        self.advanced_toggle = QToolButton()
+        self.advanced_toggle.setText("Advanced options ▲")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setChecked(True)
+        self.advanced_toggle.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        layout.addWidget(self.advanced_toggle)
+
+        self.advanced_panel = QWidget()
+        advanced_form = QFormLayout(self.advanced_panel)
+        self.task_file_edit = QLineEdit()
+        task_file_row = QHBoxLayout()
+        task_file_row.addWidget(self.task_file_edit)
+        task_file_button = QPushButton("Browse")
+        task_file_button.clicked.connect(self._choose_task_file)
+        task_file_row.addWidget(task_file_button)
+        advanced_form.addRow(
+            self._help_label(
+                "Task file",
+                "Use a UTF-8 text or Markdown file as the full task instruction. If both Task and Task file are set, Task file wins.",
+            ),
+            task_file_row,
+        )
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(1, 86400)
         self.timeout_spin.setValue(1200)
-        form.addRow("Time limit (seconds)", self.timeout_spin)
+        advanced_form.addRow("Time limit (seconds)", self.timeout_spin)
         self.format_combo = QComboBox()
         self.format_combo.addItems(["json", "txt"])
-        form.addRow("Result type", self.format_combo)
+        advanced_form.addRow("Result type", self.format_combo)
         self.output_edit = QLineEdit()
-        form.addRow("Result file", self.output_edit)
+        advanced_form.addRow(
+            self._help_label("Result file", "Optional path for the final JSON or TXT result."), self.output_edit
+        )
         self.artifact_edit = QLineEdit()
-        form.addRow("Files folder", self.artifact_edit)
+        advanced_form.addRow(
+            self._help_label("Files folder", "Optional folder where generated artifact files are delivered."),
+            self.artifact_edit,
+        )
         self.request_id_edit = QLineEdit()
-        form.addRow("Request ID", self.request_id_edit)
+        advanced_form.addRow(
+            self._help_label(
+                "External Request ID",
+                "Optional ID from an external system. Reusing it prevents duplicate work; it is not the Job ID.",
+            ),
+            self.request_id_edit,
+        )
         self.force_new_check = QCheckBox("Create a new job even if a similar task exists")
         self.overwrite_check = QCheckBox("Replace an existing result file")
-        form.addRow("Advanced", self.force_new_check)
-        form.addRow("", self.overwrite_check)
-        layout.addLayout(form)
+        advanced_form.addRow(
+            self._help_label("Force new", "Ignore recent similar-task deduplication and always create a new Job."),
+            self.force_new_check,
+        )
+        advanced_form.addRow(
+            self._help_label("Overwrite", "Allow replacing an existing result file at the specified path."),
+            self.overwrite_check,
+        )
+        self.force_new_check.setChecked(True)
+        self.overwrite_check.setChecked(True)
+        layout.addWidget(self.advanced_panel)
         buttons = QHBoxLayout()
         clear = QPushButton("Clear")
         clear.clicked.connect(self.clear)
@@ -89,6 +133,30 @@ class NewTaskView(QWidget):
         self.create_button.clicked.connect(lambda: self.create_requested.emit(self.payload()))
         buttons.addWidget(self.create_button)
         layout.addLayout(buttons)
+
+    @staticmethod
+    def _help_label(label: str, explanation: str) -> QWidget:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel(label))
+        button = QToolButton()
+        button.setText("?")
+        button.setCheckable(True)
+        button.setAutoRaise(True)
+        button.setFixedSize(22, 22)
+        row.addWidget(button)
+        help_text = QLabel(explanation)
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color: #475569; font-size: 11px; padding: 2px 0;")
+        help_text.hide()
+        button.toggled.connect(help_text.setVisible)
+        row.addWidget(help_text, 1)
+        return container
+
+    def _toggle_advanced(self, expanded: bool) -> None:
+        self.advanced_panel.setVisible(expanded)
+        self.advanced_toggle.setText("Advanced options ▲" if expanded else "Advanced options ▼")
 
     def _choose_task_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Choose task file")
@@ -135,8 +203,8 @@ class NewTaskView(QWidget):
         self.attachment_list.clear()
         self.worker_combo.setCurrentText("auto")
         self.profile_combo.setCurrentText("web-research")
-        self.fallback_check.setChecked(False)
+        self.fallback_check.setChecked(True)
         self.timeout_spin.setValue(1200)
         self.format_combo.setCurrentText("json")
-        self.force_new_check.setChecked(False)
-        self.overwrite_check.setChecked(False)
+        self.force_new_check.setChecked(True)
+        self.overwrite_check.setChecked(True)

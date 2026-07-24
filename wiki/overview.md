@@ -6,4 +6,6 @@ The current development branch is `feat/g5-custom-agent-apps` at Relay 1.1.0. G5
 
 The GUI performs health checks at startup and on user request. The daemon reports verification health for every enabled Agent; an unhealthy engine is named in the header instead of being presented as an overall healthy state. Completed replayable Jobs can open the Schedule editor, while schedule creation still requires service-isolation acknowledgement.
 
+The GUI New Task form keeps file attachments visible, places task-file and external-request controls under an explanatory Advanced section, and defaults fallback, force-new, and overwrite on. Finished Jobs are shown as an expandable Finished/date/task tree with a separate right-aligned status column.
+
 Relay Home owns runtime configuration, Agent App manifests, audit specs, history, workspaces, logs, results, and artifacts. Repository source and tests define behavior; this wiki records only the current working understanding.

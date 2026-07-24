@@ -1,3 +1,4 @@
+- 2026-07-24 14:00 | Improved New Task explanations/defaults, added collapsible task history and stronger request search, fixed stale Settings navigation, and restarted the latest daemon/GUI.
 - 2026-07-24 13:20 | Added enabled-Agent health reporting, fixed New Task stale-response navigation, enabled completed-task scheduling, and improved task/status actions in the GUI.
 - 2026-07-24 11:24 | Added manual health status and Antigravity verify-and-enable flow; 203 tests pass with release build verified.
 - 2026-07-24 11:06 | Fixed live Job polling and CP949 JSON output; added a Markdown Answer tab with copy support; 197 tests pass.

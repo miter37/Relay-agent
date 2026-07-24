@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -124,17 +126,17 @@ class MainWindow(QMainWindow):
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search finished jobs...")
+        self.search.setPlaceholderText("Search tasks, names, agents...")
         self.search.textChanged.connect(self._on_filter_changed)
         sidebar_layout.addWidget(self.search)
         self.result_filter = self._combo("Result", ["All", "Completed", "Partial", "Failed", "Cancelled"])
         self.agent_filter = self._combo("Agent", ["All", "Claude", "Codex", "Antigravity"])
         self.source_filter = self._combo("Source", ["All", "Command line", "GUI", "Hermes", "Schedule"])
         self.date_filter = self._combo("Date", ["Any time", "Today", "Last 7 days", "Last 30 days"])
-        sidebar_layout.addWidget(self.result_filter)
-        sidebar_layout.addWidget(self.agent_filter)
-        sidebar_layout.addWidget(self.source_filter)
-        sidebar_layout.addWidget(self.date_filter)
+        filter_row = QHBoxLayout()
+        for combo in (self.result_filter, self.agent_filter, self.source_filter, self.date_filter):
+            filter_row.addWidget(combo, 1)
+        sidebar_layout.addLayout(filter_row)
         for combo in (self.result_filter, self.agent_filter, self.source_filter, self.date_filter):
             combo.currentIndexChanged.connect(self._on_filter_changed)
         sidebar_layout.addWidget(QLabel("<b>Schedules</b>"))
@@ -145,7 +147,11 @@ class MainWindow(QMainWindow):
         self.settings_button = QPushButton("Settings")
         self.settings_button.clicked.connect(self._show_settings)
         sidebar_layout.addWidget(self.settings_button)
-        self.job_list = QListWidget()
+        self.job_list = QTreeWidget()
+        self.job_list.setHeaderLabels(["Task", "Status"])
+        self.job_list.setColumnWidth(0, 210)
+        self.job_list.setRootIsDecorated(True)
+        self.job_list.setAlternatingRowColors(True)
         self.job_list.itemClicked.connect(self._select_item)
         sidebar_layout.addWidget(self.job_list, 1)
         self.load_more = QPushButton("Load more")
@@ -226,6 +232,9 @@ class MainWindow(QMainWindow):
         self.pending[self.client.get(path)] = kind
 
     def _show_settings(self) -> None:
+        self.selected_job_id = None
+        self.current_detail = None
+        self.detail_view_mode = "settings"
         self.detail_stack.setCurrentWidget(self.settings_view)
         if self.current_mode == "normal":
             self._request("autostart", "/v1/autostart")
@@ -580,11 +589,11 @@ class MainWindow(QMainWindow):
             self._open_agent_app_wizard(wizard)
             return
         if isinstance(kind, tuple) and kind[0] == "detail":
-            if self.detail_view_mode != "new_task" and self.selected_job_id == kind[1]:
+            if self.detail_view_mode == "job" and self.selected_job_id == kind[1]:
                 self._show_detail(payload)
             return
         if isinstance(kind, tuple) and kind[0] == "result":
-            if self.detail_view_mode != "new_task" and self.selected_job_id == kind[1]:
+            if self.detail_view_mode == "job" and self.selected_job_id == kind[1]:
                 self.job_detail_view.set_content("Result", self._format_payload(payload))
                 data = payload.get("data")
                 self.job_detail_view.set_answer(data.get("answer") if isinstance(data, dict) else None)
@@ -610,13 +619,13 @@ class MainWindow(QMainWindow):
         if kind == "schedule_detail":
             schedule = payload.get("schedule") or {}
             schedule_id = schedule.get("schedule_id")
-            if schedule_id:
+            if schedule_id and self.detail_view_mode == "schedule":
                 self.schedules[schedule_id] = schedule
                 self._show_schedule_detail(schedule_id)
             return
         if kind == "schedule_runs":
             schedule_id = payload.get("schedule_id")
-            if schedule_id:
+            if schedule_id and self.detail_view_mode == "schedule":
                 self.schedule_runs[schedule_id] = payload.get("runs", [])
                 self._show_schedule_detail(schedule_id)
             return
@@ -835,7 +844,18 @@ class MainWindow(QMainWindow):
         self.new_task_view.worker_combo.blockSignals(False)
 
     def _render_jobs(self) -> None:
-        selected = self.job_list.currentItem().data(Qt.UserRole) if self.job_list.currentItem() else None
+        selected = self.job_list.currentItem().data(0, Qt.UserRole) if self.job_list.currentItem() else None
+        expanded: dict[str, bool] = {}
+        for index in range(self.job_list.topLevelItemCount()):
+            group = self.job_list.topLevelItem(index)
+            state_key = group.data(0, Qt.UserRole + 1)
+            if state_key:
+                expanded[str(state_key)] = group.isExpanded()
+            for child_index in range(group.childCount()):
+                child = group.child(child_index)
+                state_key = child.data(0, Qt.UserRole + 1)
+                if state_key:
+                    expanded[str(state_key)] = child.isExpanded()
         self.job_list.clear()
         groups = (
             ("Waiting", {"CREATED", "QUEUED"}, "created_at"),
@@ -849,9 +869,12 @@ class MainWindow(QMainWindow):
             rows.sort(key=lambda job: job.get(date_key) or job.get("created_at") or "", reverse=True)
             if not rows:
                 continue
-            header = QListWidgetItem(f"▾ {group_name} · {len(rows)}")
+            group_key = f"group:{group_name}"
+            header = QTreeWidgetItem([f"{group_name} · {len(rows)}", ""])
+            header.setData(0, Qt.UserRole + 1, group_key)
+            header.setExpanded(expanded.get(group_key, True))
             header.setFlags(Qt.ItemIsEnabled)
-            self.job_list.addItem(header)
+            self.job_list.addTopLevelItem(header)
             date_groups = {"All": rows}
             if group_name == "Finished":
                 date_groups = {}
@@ -859,16 +882,26 @@ class MainWindow(QMainWindow):
                     date_groups.setdefault(self._local_date(job.get(date_key) or job.get("created_at")), []).append(job)
             for date_name, date_rows in date_groups.items():
                 if group_name == "Finished":
-                    date_item = QListWidgetItem(f"▾ {date_name} · {len(date_rows)}")
+                    date_key = f"date:{group_name}:{date_name}"
+                    date_item = QTreeWidgetItem([f"{date_name} · {len(date_rows)}", ""])
+                    date_item.setData(0, Qt.UserRole + 1, date_key)
+                    date_item.setExpanded(expanded.get(date_key, True))
                     date_item.setFlags(Qt.ItemIsEnabled)
-                    self.job_list.addItem(date_item)
+                    header.addChild(date_item)
                 for job in date_rows:
                     title = job.get("title") or job.get("job_id", "Job")[:8]
                     status = str(job.get("status") or "UNKNOWN")
-                    status_text = status.title()
-                    item = QListWidgetItem(f"{self._status_icon(status)} {status_text} · {title}")
-                    item.setData(Qt.UserRole, job.get("job_id"))
-                    item.setToolTip(job.get("task_preview") or job.get("job_id", ""))
+                    status_text = {
+                        "COMPLETED": "Okay",
+                        "PARTIAL": "Partial",
+                        "FAILED": "Fail",
+                        "CANCELLED": "Cancelled",
+                        "QUEUED": "Queued",
+                    }.get(status, status.title())
+                    item = QTreeWidgetItem([str(title), status_text])
+                    item.setData(0, Qt.UserRole, job.get("job_id"))
+                    item.setToolTip(0, job.get("task_preview") or job.get("job_id", ""))
+                    item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
                     colors = {
                         "COMPLETED": ("#166534", "#F0FDF4"),
                         "PARTIAL": ("#92400E", "#FFFBEB"),
@@ -877,9 +910,10 @@ class MainWindow(QMainWindow):
                     }
                     if status in colors:
                         foreground, background = colors[status]
-                        item.setForeground(QColor(foreground))
-                        item.setBackground(QColor(background))
-                    self.job_list.addItem(item)
+                        for column in range(2):
+                            item.setForeground(column, QColor(foreground))
+                            item.setBackground(column, QColor(background))
+                    (date_item if group_name == "Finished" else header).addChild(item)
                     if job.get("job_id") == selected:
                         self.job_list.setCurrentItem(item)
 
@@ -907,6 +941,7 @@ class MainWindow(QMainWindow):
         schedule_id = item.data(Qt.UserRole)
         if schedule_id:
             self.selected_schedule_id = str(schedule_id)
+            self.detail_view_mode = "schedule"
             self._refresh_schedule(self.selected_schedule_id)
 
     def _refresh_schedule(self, schedule_id: str | None) -> None:
@@ -920,6 +955,7 @@ class MainWindow(QMainWindow):
         if not schedule:
             return
         self.selected_schedule_id = schedule_id
+        self.detail_view_mode = "schedule"
         self.schedule_detail_view.set_schedule(schedule, self.schedule_runs.get(schedule_id, []))
         self.detail_stack.setCurrentWidget(self.schedule_detail_view)
 
@@ -937,7 +973,7 @@ class MainWindow(QMainWindow):
         haystack = " ".join(
             str(job.get(key) or "") for key in ("title", "task_preview", "job_id", "requested_worker", "actual_worker")
         )
-        if query and query not in haystack.casefold():
+        if query and job.get("task_preview") and query not in haystack.casefold():
             return False
         result = self.result_filter.currentText()
         if result != "All" and job.get("status", "").casefold() != result.casefold():
@@ -960,8 +996,8 @@ class MainWindow(QMainWindow):
     def _status_icon(status: str | None) -> str:
         return {"COMPLETED": "✓", "PARTIAL": "◐", "FAILED": "×", "CANCELLED": "—"}.get(status or "", "●")
 
-    def _select_item(self, item: QListWidgetItem) -> None:
-        job_id = item.data(Qt.UserRole)
+    def _select_item(self, item: QTreeWidgetItem, _column: int = 0) -> None:
+        job_id = item.data(0, Qt.UserRole)
         if not job_id:
             return
         self.selected_job_id = job_id

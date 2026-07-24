@@ -51,6 +51,16 @@ class G2NewTaskGuiTests(unittest.TestCase):
         self.assertTrue(payload["force_new"])
         self.assertTrue(payload["overwrite"])
 
+    def test_new_task_defaults_enable_fallback_and_advanced_execution_options(self):
+        view = NewTaskView()
+
+        payload = view.payload()
+
+        self.assertTrue(payload["fallback"])
+        self.assertTrue(payload["force_new"])
+        self.assertTrue(payload["overwrite"])
+        self.assertTrue(view.advanced_toggle.isChecked())
+
     def test_job_detail_has_g2_tabs_and_replay_gating(self):
         view = JobDetailView()
         view.set_job(

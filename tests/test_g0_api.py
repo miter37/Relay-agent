@@ -121,6 +121,19 @@ class G0ApiTests(unittest.TestCase):
         active = client.request("GET", "/v1/jobs?bucket=active")
         self.assertEqual({job["status"] for job in active["jobs"]}, {"QUEUED", "RUNNING"})
 
+    def test_jobs_api_search_matches_request_body_when_preview_is_hidden(self):
+        _, client, _ = self._start_daemon()
+        job, _ = self.engine.create_job(
+            JobRequest(task="Find this hidden request phrase", worker="codex"),
+            queued=True,
+            submitted_via="gui",
+        )
+        self.db.update_job(job["job_id"], status="COMPLETED", result_status="complete")
+
+        result = client.request("GET", "/v1/jobs?bucket=finished&q=hidden%20request%20phrase")
+
+        self.assertEqual([item["job_id"] for item in result["jobs"]], [job["job_id"]])
+
     def test_jobs_api_rejects_invalid_cursor(self):
         _, client, _ = self._start_daemon()
 
