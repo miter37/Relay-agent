@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 from relay.config import Config
 from relay.daemon import RelayDaemon
+from relay.errors import RelayError
 from relay.rpc import RPCClient
 
 
@@ -57,6 +58,19 @@ class G4AutoStartApiTests(unittest.TestCase):
         self.assertFalse(status["autostart"]["enabled"])
         self.assertTrue(enabled["autostart"]["enabled"])
         self.fake.enable.assert_called_once_with()
+
+    def test_antigravity_activation_requires_explicit_confirmation(self):
+        with self.assertRaises(RelayError) as context:
+            self.client.request("POST", "/v1/agents/antigravity/activate", {})
+
+        self.assertEqual(context.exception.code, "PERMISSION_BLOCKED")
+
+    def test_antigravity_setup_reports_activation_state(self):
+        setup = self.client.request("GET", "/v1/agents/antigravity/setup")
+
+        self.assertTrue(setup["ok"])
+        self.assertEqual(setup["antigravity"]["agent_id"], "antigravity")
+        self.assertIn(setup["antigravity"]["state"], {"enabled", "ready", "needs_audit", "unavailable"})
 
 
 if __name__ == "__main__":

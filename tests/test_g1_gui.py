@@ -45,6 +45,22 @@ class G1GuiTests(unittest.TestCase):
         self.assertEqual(self.window.windowTitle(), "Relay-agent")
         self.assertEqual(self.window.sidebar.minimumWidth(), 0)
         self.assertIn("Relay Home:", self.window.statusBar().currentMessage())
+        self.assertFalse(hasattr(self.window, "health_timer"))
+        self.assertIn("Health:", self.window.health_label.text())
+
+    def test_health_status_is_visible_and_uses_manual_refresh(self):
+        self.window._set_connection(
+            "normal",
+            health={
+                "daemon_version": "1.1.0",
+                "api_schema_revision": 5,
+                "started_at": "2026-07-24T01:00:00+00:00",
+            },
+        )
+
+        self.assertEqual(self.window.health_label.text(), "Health: Healthy")
+        self.assertIn("Daemon 1.1.0", self.window.health_label.toolTip())
+        self.assertIn("API schema 5", self.window.health_label.toolTip())
 
     def test_finished_filter_and_status_rendering(self):
         self.window.current_mode = "normal"

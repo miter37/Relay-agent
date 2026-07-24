@@ -23,6 +23,7 @@ from .models import JobRequest
 from .schedules.retention import ScheduleRetentionManager
 from .schedules.runtime import ScheduleRuntime
 from .schedules.service import ScheduleService
+from .security import activate_antigravity, antigravity_setup
 from .util import ensure_dir, json_dump, random_token, utc_now
 
 
@@ -227,6 +228,11 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/agents":
             self._json(HTTPStatus.OK, list_agents(self.daemon.engine))
             return
+        if path == "/v1/agents/antigravity/setup":
+            self._json(
+                HTTPStatus.OK, {"ok": True, "antigravity": antigravity_setup(self.daemon.config, self.daemon.engine)}
+            )
+            return
         if path == "/v1/autostart":
             self._json(HTTPStatus.OK, {"ok": True, "autostart": self.daemon.autostart_manager.status()})
             return
@@ -330,6 +336,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._body()
             parsed = urlsplit(self.path)
             path = parsed.path
+            if path == "/v1/agents/antigravity/activate":
+                self._json(
+                    HTTPStatus.OK,
+                    activate_antigravity(
+                        self.daemon.config,
+                        self.daemon.engine,
+                        isolation_acknowledged=self._body().get("isolation_acknowledged"),
+                    ),
+                )
+                return
             if path == "/v1/agent-apps":
                 self._json(
                     HTTPStatus.OK,

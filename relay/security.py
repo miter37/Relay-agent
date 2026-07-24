@@ -3,6 +3,7 @@ from __future__ import annotations
 import platform
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from .config import Config
 from .errors import RelayError
@@ -65,3 +66,70 @@ def security_posture(config: Config) -> dict:
             "and owner-only Unix permissions or a dedicated service account on Linux/macOS."
         ),
     }
+
+
+def antigravity_setup(config: Config, engine) -> dict[str, Any]:
+    adapter = engine.agent_registry.get_adapter("antigravity")
+    spec = adapter.load_spec()
+    version = adapter.version()
+    current_audit = bool(spec and spec.version == version and spec.status == "healthy" and spec.deep_ok)
+    enabled = bool(config.get("workers.antigravity.enabled", False))
+    verified = bool(config.get("workers.antigravity.security_verified", False))
+    if enabled and verified and current_audit:
+        state = "enabled"
+    elif not adapter.executable():
+        state = "unavailable"
+    elif current_audit:
+        state = "ready"
+    else:
+        state = "needs_audit"
+    return {
+        "agent_id": "antigravity",
+        "state": state,
+        "enabled": enabled,
+        "security_verified": verified,
+        "installed": bool(adapter.executable()),
+        "version": version,
+        "audit": (
+            {
+                "version": spec.version,
+                "status": spec.status,
+                "deep_ok": spec.deep_ok,
+                "audited_at": spec.audited_at,
+            }
+            if spec
+            else None
+        ),
+    }
+
+
+def activate_antigravity(config: Config, engine, *, isolation_acknowledged: bool) -> dict[str, Any]:
+    if isolation_acknowledged is not True:
+        raise RelayError(
+            "PERMISSION_BLOCKED",
+            "Antigravity activation requires explicit confirmation of OS-level isolation.",
+        )
+
+    from .doctor import Doctor
+
+    adapter = engine.agent_registry.get_adapter("antigravity")
+    audit = None
+    try:
+        adapter.require_verified()
+    except RelayError:
+        report = Doctor(config, engine.db).audit(["antigravity"], deep=True)
+        audit = (report.get("workers") or [{}])[0]
+        if not report.get("ok"):
+            raise RelayError(
+                "AGENT_HEALTH_FAILED",
+                "Antigravity deep doctor did not pass. It was not enabled.",
+                details={"audit": audit},
+            ) from None
+        adapter = engine.agent_registry.get_adapter("antigravity")
+        adapter.require_verified()
+
+    worker = config.data["workers"]["antigravity"]
+    worker["security_verified"] = True
+    worker["enabled"] = True
+    config.save()
+    return {"ok": True, "antigravity": antigravity_setup(config, engine), "audit": audit}

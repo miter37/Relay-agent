@@ -10,6 +10,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -64,15 +65,13 @@ class MainWindow(QMainWindow):
         self.current_detail: dict | None = None
         self.log_attempt_id: int | None = None
         self.log_offset: int | None = None
+        self.health_check_request_id: int | None = None
 
         self.setWindowTitle("Relay-agent")
         self.resize(1280, 720)
         self._build_ui()
         self._restore_state()
 
-        self.health_timer = QTimer(self)
-        self.health_timer.timeout.connect(self._refresh_health)
-        self.health_timer.start(5000)
         self.active_timer = QTimer(self)
         self.active_timer.timeout.connect(self._refresh_active)
         self.active_timer.start(1000)
@@ -90,11 +89,18 @@ class MainWindow(QMainWindow):
         header = QFrame()
         header_layout = QVBoxLayout(header)
         title_row = QFrame()
-        title_layout = QVBoxLayout(title_row)
+        title_layout = QHBoxLayout(title_row)
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.addWidget(QLabel("<b>Relay-agent</b>"))
-        self.daemon_label = QLabel("Daemon: Connecting")
-        title_layout.addWidget(self.daemon_label)
+        title_layout.addStretch(1)
+        self.health_label = QLabel("Health: Checking…")
+        self.daemon_label = self.health_label
+        self.health_time_label = QLabel("Not checked")
+        self.health_refresh_button = QPushButton("Refresh health")
+        self.health_refresh_button.clicked.connect(self._refresh_health)
+        title_layout.addWidget(self.health_label)
+        title_layout.addWidget(self.health_time_label)
+        title_layout.addWidget(self.health_refresh_button)
         self.new_task_button = QPushButton("+ New Task")
         self.new_task_button.clicked.connect(self._show_new_task)
         title_layout.addWidget(self.new_task_button)
@@ -169,6 +175,7 @@ class MainWindow(QMainWindow):
         self.detail_stack.addWidget(self.schedule_detail_view)
         self.settings_view = SettingsView()
         self.settings_view.autostart_changed.connect(self._toggle_autostart)
+        self.settings_view.antigravity_activate_requested.connect(self._activate_antigravity)
         agent_apps = self.settings_view.agent_apps_view
         agent_apps.create_requested.connect(self._create_agent_app)
         agent_apps.edit_requested.connect(self._edit_agent_app)
@@ -181,7 +188,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.splitter, 1)
         self.setCentralWidget(root)
         self.statusBar().showMessage(f"Relay Home: {self.config.home}")
-        self._set_connection("disconnected", "waiting for daemon compatibility check")
+        self._set_connection("checking", "waiting for daemon health check")
 
     @staticmethod
     def _combo(prefix: str, values: list[str]) -> QComboBox:
@@ -201,7 +208,7 @@ class MainWindow(QMainWindow):
         self.search.setText(str(self.state.value("filters/search", "")))
 
     def closeEvent(self, event) -> None:
-        for timer in (self.health_timer, self.active_timer, self.finished_timer, self.log_timer):
+        for timer in (self.active_timer, self.finished_timer, self.log_timer):
             timer.stop()
         self.client.close()
         self.state.set_value("window/geometry", self.saveGeometry())
@@ -217,6 +224,7 @@ class MainWindow(QMainWindow):
         if self.current_mode == "normal":
             self._request("autostart", "/v1/autostart")
             self._request("agent_apps", "/v1/agent-apps")
+            self._request("antigravity_setup", "/v1/agents/antigravity/setup")
 
     def _create_agent_app(self) -> None:
         if self.current_mode != "normal":
@@ -286,6 +294,28 @@ class MainWindow(QMainWindow):
         if self.current_mode == "normal":
             self._request_patch("autostart_toggle", "/v1/autostart", {"enabled": enabled})
 
+    def _activate_antigravity(self) -> None:
+        if self.current_mode != "normal":
+            return
+        choice = QMessageBox.warning(
+            self,
+            "Enable Antigravity",
+            "Antigravity runs with permission checks bypassed and can use the full rights of the current OS account.\n\n"
+            "Continue only after verifying that Relay runs under a dedicated low-privilege account or equivalent "
+            "OS-level isolation. Relay does not create that isolation for you.",
+            QMessageBox.Cancel | QMessageBox.Yes,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self.settings_view.set_antigravity_pending(True)
+        self._request_post(
+            "antigravity_activate",
+            "/v1/agents/antigravity/activate",
+            {"isolation_acknowledged": True},
+            timeout_ms=310000,
+        )
+
     def _maybe_prompt_autostart(self) -> None:
         if self.autostart_status.get("enabled") or self._state_truthy("gui/autostart_prompted"):
             return
@@ -306,8 +336,8 @@ class MainWindow(QMainWindow):
             return value.casefold() in {"1", "true", "yes", "on"}
         return bool(value)
 
-    def _request_post(self, kind, path: str, payload: dict) -> None:
-        self.pending[self.client.post(path, payload)] = kind
+    def _request_post(self, kind, path: str, payload: dict, *, timeout_ms: int = 15000) -> None:
+        self.pending[self.client.post(path, payload, timeout_ms=timeout_ms)] = kind
 
     def _show_new_task(self) -> None:
         self.detail_stack.setCurrentWidget(self.new_task_view)
@@ -414,7 +444,13 @@ class MainWindow(QMainWindow):
         self._open_path(schedule.get("output_root"), directory_only=True)
 
     def _refresh_health(self) -> None:
-        self._request("health", "/health")
+        if self.health_check_request_id is not None:
+            return
+        self.health_refresh_button.setEnabled(False)
+        self.health_label.setText("Health: Checking…")
+        request_id = self.client.get("/health")
+        self.health_check_request_id = request_id
+        self.pending[request_id] = "health"
 
     def _refresh_active(self) -> None:
         if self.current_mode == "normal":
@@ -464,7 +500,10 @@ class MainWindow(QMainWindow):
             return
         if error or not isinstance(payload, dict):
             if kind == "health":
-                self._set_connection("disconnected", "Relay daemon is unavailable. Retrying...")
+                self.health_check_request_id = None
+                self.health_refresh_button.setEnabled(True)
+                self.health_time_label.setText(f"Failed {datetime.now().astimezone():%H:%M:%S}")
+                self._set_connection("disconnected", "Relay daemon is unavailable")
             elif isinstance(kind, tuple) and kind[0] == "schedule_preview":
                 kind[1].set_preview_error(str(error or "Invalid schedule"))
             elif isinstance(kind, tuple) and kind[0] == "agent_app_manifest_test":
@@ -473,18 +512,24 @@ class MainWindow(QMainWindow):
                     test_token=None,
                     tested_payload=kind[2],
                 )
+            elif kind == "antigravity_activate":
+                message = (payload or {}).get("error_message") if isinstance(payload, dict) else None
+                self.settings_view.set_antigravity_error(message or str(error or "Activation failed"))
             else:
                 self.banner.setText("Relay could not complete that action. Please try again.")
                 self.banner.show()
             return
         if kind == "health":
+            self.health_check_request_id = None
+            self.health_refresh_button.setEnabled(True)
+            self.health_time_label.setText(f"Checked {datetime.now().astimezone():%H:%M:%S}")
             decision = evaluate_compatibility(
                 payload,
                 gui_version=self.gui_version,
                 expected_relay_home_id=self.expected_home_id,
                 supported_schema_revision=5,
             )
-            self._set_connection(decision.mode, decision.reason)
+            self._set_connection(decision.mode, decision.reason, health=payload)
             if decision.mode == "normal":
                 self._request("agents", "/v1/agents")
                 self._request("autostart", "/v1/autostart")
@@ -502,6 +547,16 @@ class MainWindow(QMainWindow):
             self.settings_view.set_autostart_status(self.autostart_status)
             if kind == "autostart_prompt":
                 self._maybe_prompt_autostart()
+            return
+        if kind == "antigravity_setup":
+            self.settings_view.set_antigravity_status(payload.get("antigravity") or {})
+            return
+        if kind == "antigravity_activate":
+            self.settings_view.set_antigravity_pending(False)
+            self.settings_view.set_antigravity_status(payload.get("antigravity") or {})
+            self._request("agents", "/v1/agents")
+            self.banner.setText("Antigravity was verified and enabled.")
+            self.banner.show()
             return
         if kind == "agent_apps":
             self.custom_agent_apps = payload.get("agent_apps", [])
@@ -680,9 +735,22 @@ class MainWindow(QMainWindow):
         for job_id in [job_id for job_id, job in self.jobs.items() if job.get("status") in statuses]:
             del self.jobs[job_id]
 
-    def _set_connection(self, mode: str, reason: str | None = None) -> None:
-        self.current_mode = mode
-        self.daemon_label.setText("Daemon: Running" if mode == "normal" else "Daemon: Disconnected")
+    def _set_connection(self, mode: str, reason: str | None = None, *, health: dict | None = None) -> None:
+        self.current_mode = mode if mode in {"normal", "read-only"} else "disconnected"
+        if mode == "checking":
+            self._set_health_badge("Health: Checking…", "#FEF3C7", "#92400E", reason)
+        elif mode == "normal":
+            warning = self._health_warning(health)
+            self._set_health_badge(
+                "Health: Attention" if warning else "Health: Healthy",
+                "#FEF3C7" if warning else "#DCFCE7",
+                "#92400E" if warning else "#166534",
+                warning or self._health_tooltip(health),
+            )
+        elif mode == "read-only":
+            self._set_health_badge("Health: Compatibility warning", "#FEF3C7", "#92400E", reason)
+        else:
+            self._set_health_badge("Health: Disconnected", "#FEE2E2", "#991B1B", reason)
         self.new_task_button.setEnabled(mode == "normal")
         self.new_task_view.create_button.setEnabled(mode == "normal")
         self.schedule_list.setEnabled(mode == "normal")
@@ -692,6 +760,34 @@ class MainWindow(QMainWindow):
         else:
             self.banner.setText(f"Read-only compatibility mode: {reason or 'daemon compatibility is unavailable'}")
             self.banner.show()
+
+    def _set_health_badge(self, text: str, background: str, foreground: str, tooltip: str | None) -> None:
+        self.daemon_label.setText(text)
+        self.daemon_label.setStyleSheet(
+            f"QLabel {{ background: {background}; color: {foreground}; "
+            "border-radius: 10px; padding: 3px 9px; font-weight: 600; }"
+        )
+        self.daemon_label.setToolTip(tooltip or text)
+
+    @staticmethod
+    def _health_warning(health: dict | None) -> str | None:
+        if not health:
+            return None
+        for name in ("cleanup", "schedule_retention"):
+            last_report = (health.get(name) or {}).get("last_report")
+            if isinstance(last_report, dict) and (last_report.get("ok") is False or last_report.get("errors")):
+                return f"{name.replace('_', ' ').capitalize()} reported errors."
+        return None
+
+    @staticmethod
+    def _health_tooltip(health: dict | None) -> str:
+        if not health:
+            return "Health details unavailable."
+        return (
+            f"Daemon {health.get('daemon_version') or 'unknown'} · "
+            f"API schema {health.get('api_schema_revision') or 'unknown'} · "
+            f"Started {health.get('started_at') or 'unknown'}"
+        )
 
     def _render_agent_apps(self) -> None:
         combined = {

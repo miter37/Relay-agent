@@ -28,6 +28,26 @@ class G4SettingsTests(unittest.TestCase):
         self.assertIn("manual", view.autostart_status.text().lower())
         self.assertEqual(view.autostart_button.text(), "Enable auto-start")
 
+    def test_antigravity_status_and_activation_button_are_visible(self):
+        view = SettingsView()
+        view.set_antigravity_status(
+            {
+                "state": "ready",
+                "version": "1.1.5",
+                "audit": {"status": "healthy", "deep_ok": True},
+            }
+        )
+
+        self.assertIn("Ready", view.antigravity_status.text())
+        self.assertTrue(view.antigravity_button.isEnabled())
+
+    def test_antigravity_activation_pending_disables_button(self):
+        view = SettingsView()
+        view.set_antigravity_pending(True)
+
+        self.assertFalse(view.antigravity_button.isEnabled())
+        self.assertIn("Checking", view.antigravity_button.text())
+
 
 if __name__ == "__main__":
     unittest.main()
