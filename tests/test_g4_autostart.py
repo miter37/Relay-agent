@@ -34,7 +34,7 @@ class G4AutoStartTests(unittest.TestCase):
         command = runner.call_args.args[0]
         self.assertEqual(command[:5], ["schtasks.exe", "/Create", "/TN", "Relay-agent", "/TR"])
         self.assertIn("daemon", command[5])
-        self.assertIn(str(self.home), command[5])
+        self.assertIn(str(self.config.home), command[5])
         self.assertIn("/SC", command)
         self.assertIn("ONLOGON", command)
         self.assertEqual(runner.call_args.kwargs["shell"], False)
