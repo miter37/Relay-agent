@@ -1,3 +1,4 @@
+- 2026-07-24 16:00 | Fixed bare POSIX Working folder inference for Linux release checks and excluded URL paths; 248 tests, Ruff, and release build passed.
 - 2026-07-24 15:45 | Prepared the complete G5 feature set and release notes for the Relay v1.1.0 GitHub release.
 - 2026-07-24 15:42 | Added manual non-interrupting Job diagnostics with persistent Check results in Logs; 247 tests, Ruff, and release build passed.
 - 2026-07-24 15:06 | Added safe real-folder create/edit delivery with artifact copies, path inference, CLI/GUI Working folder controls, conflict protection, 239 tests, and release build.

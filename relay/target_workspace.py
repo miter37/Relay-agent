@@ -18,6 +18,7 @@ _WRITE_INTENT = re.compile(
 _QUOTED_WINDOWS_PATH = re.compile(r"[`'\"]([A-Za-z]:\\[^`'\"\r\n]+)[`'\"]")
 _BARE_WINDOWS_PATH = re.compile(r"(?<![\w])([A-Za-z]:\\[^\s`'\"<>|?*]+)")
 _QUOTED_POSIX_PATH = re.compile(r"[`'\"](/[^\r\n`'\"]+)[`'\"]")
+_BARE_POSIX_PATH = re.compile(r"(?<![\w:/])(/[^\s`'\"<>|?*]+)")
 _SKIPPED_DIRS = {".git", ".hg", ".svn"}
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
@@ -63,6 +64,7 @@ def task_target_candidates(task: str) -> list[str]:
         *(_clean_candidate(match.group(1)) for match in _QUOTED_WINDOWS_PATH.finditer(task)),
         *(_clean_candidate(match.group(1)) for match in _QUOTED_POSIX_PATH.finditer(task)),
         *(_clean_candidate(match.group(1)) for match in _BARE_WINDOWS_PATH.finditer(task)),
+        *(_clean_candidate(match.group(1)) for match in _BARE_POSIX_PATH.finditer(task)),
     ]
     distinct: list[str] = []
     seen: set[str] = set()

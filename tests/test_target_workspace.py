@@ -19,9 +19,13 @@ class TargetPathInferenceTests(unittest.TestCase):
     def test_infers_one_absolute_path_for_write_task(self):
         self.assertEqual(infer_target_path(r"D:\temp 폴더에 계산기 코드를 만들어줘"), "D:\\temp")
         self.assertEqual(infer_target_path(r"`D:\My Work`에 파일을 생성해줘"), "D:\\My Work")
+        self.assertEqual(infer_target_path("Create a calculator in /tmp/requested-target."), "/tmp/requested-target")
 
     def test_does_not_infer_for_analysis_only_language(self):
         self.assertIsNone(infer_target_path(r"D:\one 내용을 검토해서 설명해줘"))
+
+    def test_does_not_treat_url_as_posix_path(self):
+        self.assertIsNone(infer_target_path("Create a summary from https://example.com/report"))
 
     def test_rejects_ambiguous_write_paths(self):
         with self.assertRaises(RelayError) as context:

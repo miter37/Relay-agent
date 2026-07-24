@@ -30,7 +30,7 @@ Relay 1.1.0 adds Custom Agent Apps across the CLI, GUI, and Schedules.
 
 ## Verification
 
-Local verification passes Ruff formatting and lint, 247 tests with one environment-dependent skip, the release build,
+Local verification passes Ruff formatting and lint, 248 tests with one environment-dependent skip, the release build,
 and daemon-backed GUI smoke coverage. GitHub Actions re-runs the cross-platform Python 3.11–3.13 matrix for the tag.
 
 ---
