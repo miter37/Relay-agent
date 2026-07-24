@@ -48,6 +48,16 @@ class G1GuiTests(unittest.TestCase):
         self.assertFalse(hasattr(self.window, "health_timer"))
         self.assertIn("Health:", self.window.health_label.text())
 
+    def test_new_task_keeps_working_folder_separate_from_files_folder(self):
+        view = self.window.new_task_view
+        view.target_edit.setText(r"D:\project")
+        view.artifact_edit.setText(r"D:\relay-copies")
+
+        payload = view.payload()
+
+        self.assertEqual(payload["target_path"], r"D:\project")
+        self.assertEqual(payload["artifact_path"], r"D:\relay-copies")
+
     def test_health_status_is_visible_and_uses_manual_refresh(self):
         self.window._set_connection(
             "normal",
@@ -139,6 +149,42 @@ class G1GuiTests(unittest.TestCase):
 
         self.assertIs(self.window.detail_stack.currentWidget(), self.window.settings_view)
 
+    def test_settings_reads_full_access_state_from_daemon(self):
+        self.window.current_mode = "normal"
+        requests = []
+        self.window._request = lambda kind, path: requests.append((kind, path))
+
+        self.window._show_settings()
+
+        self.assertIn(("security", "/v1/security"), requests)
+        self.window.pending[1] = "security"
+        self.window._handle_response(
+            1,
+            {"full_access_mode": {"codex": True, "claude": False, "antigravity": True}},
+            None,
+        )
+        self.assertTrue(self.window.settings_view.codex_full_cb.isChecked())
+        self.assertTrue(self.window.settings_view.agy_full_cb.isChecked())
+
+    def test_settings_full_access_disable_uses_daemon_patch(self):
+        self.window.current_mode = "normal"
+        self.window.full_access_states = {"codex": True}
+        requests = []
+        self.window._request_patch = lambda kind, path, payload: requests.append((kind, path, payload))
+
+        self.window._set_full_access_mode("codex", False)
+
+        self.assertEqual(
+            requests,
+            [
+                (
+                    ("full_access", "codex", True),
+                    "/v1/security/full-access/codex",
+                    {"enabled": False},
+                )
+            ],
+        )
+
     def test_finished_tree_can_collapse_group_and_date(self):
         self.window.jobs = {
             "done": {
@@ -159,6 +205,28 @@ class G1GuiTests(unittest.TestCase):
         self.assertFalse(self.window.job_list.topLevelItem(0).isExpanded())
         self.assertFalse(self.window.job_list.topLevelItem(0).child(0).isExpanded())
 
+    def test_finished_tree_keeps_user_expansion_after_refresh(self):
+        self.window.jobs = {
+            "done": {
+                "job_id": "done",
+                "status": "COMPLETED",
+                "title": "Done",
+                "completed_at": "2026-07-24T01:00:00+00:00",
+            }
+        }
+        self.window._render_jobs()
+        group = self.window.job_list.topLevelItem(0)
+        date = group.child(0)
+        group.setExpanded(False)
+        date.setExpanded(False)
+        group.setExpanded(True)
+        date.setExpanded(True)
+
+        self.window._render_jobs()
+
+        self.assertTrue(self.window.job_list.topLevelItem(0).isExpanded())
+        self.assertTrue(self.window.job_list.topLevelItem(0).child(0).isExpanded())
+
     def test_result_response_populates_answer_and_raw_result_tabs(self):
         self.window.selected_job_id = "job-1"
         self.window.detail_view_mode = "job"
@@ -173,6 +241,64 @@ class G1GuiTests(unittest.TestCase):
 
         self.assertIn("Readable answer", self.window.job_detail_view.answer_browser.toPlainText())
         self.assertIn("available", self.window.job_detail_view._browsers["Result"].toPlainText())
+
+    def test_progress_check_opens_logs_and_renders_persisted_check_events(self):
+        self.window.current_mode = "normal"
+        self.window.selected_job_id = "job-1"
+        self.window.detail_view_mode = "job"
+        self.window.current_detail = {"job_id": "job-1", "status": "RUNNING"}
+        self.window.job_detail_view.set_job(
+            {
+                "job_id": "job-1",
+                "status": "RUNNING",
+                "actions": {"can_check_progress": True},
+            }
+        )
+        posts = []
+        gets = []
+        self.window._request_post = lambda kind, path, payload: posts.append((kind, path, payload))
+        self.window._request = lambda kind, path: gets.append((kind, path))
+
+        self.window._check_job("job-1")
+
+        self.assertEqual(
+            posts,
+            [(("progress_check", "job-1"), "/v1/jobs/job-1/check", {})],
+        )
+        self.assertEqual(
+            self.window.job_detail_view.tabs.tabText(self.window.job_detail_view.tabs.currentIndex()), "Logs"
+        )
+        self.assertTrue(self.window.job_detail_view.is_check_stream())
+        self.assertIn("Checking", self.window.job_detail_view._browsers["Logs"].toPlainText())
+
+        self.window.pending[1] = ("progress_check", "job-1")
+        self.window._handle_response(1, {"ok": True, "job_id": "job-1"}, None)
+        self.assertIn((("check_events", "job-1"), "/v1/jobs/job-1/events"), gets)
+
+        self.window.pending[2] = ("check_events", "job-1")
+        self.window._handle_response(
+            2,
+            {
+                "events": [
+                    {
+                        "event_type": "PROGRESS_CHECKED",
+                        "timestamp": "2026-07-24T06:00:00+00:00",
+                        "payload_json": (
+                            '{"checked_at":"2026-07-24T06:00:00+00:00",'
+                            '"headline":"Agent is active","summary":"Recent file activity.",'
+                            '"stage":"running","worker":"codex","process_alive":true,'
+                            '"elapsed_seconds":65,"idle_seconds":3,"recent_activity":{"kind":"workspace"}}'
+                        ),
+                    }
+                ]
+            },
+            None,
+        )
+
+        log_text = self.window.job_detail_view._browsers["Logs"].toPlainText()
+        self.assertIn("Agent is active", log_text)
+        self.assertIn("Elapsed: 1m 5s", log_text)
+        self.assertIn("Recent activity: workspace", log_text)
 
     def test_unsupported_schema_is_read_only(self):
         health = {"ok": True, "api_versions": ["v1"], "api_schema_revision": 99, "min_gui_version": "0.8.0"}

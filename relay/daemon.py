@@ -11,7 +11,17 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .agent_apps import AgentAppService
-from .api import get_agent, job_artifacts, job_detail, job_events, job_logs, job_result, list_agents, list_jobs
+from .api import (
+    check_job_progress,
+    get_agent,
+    job_artifacts,
+    job_detail,
+    job_events,
+    job_logs,
+    job_result,
+    list_agents,
+    list_jobs,
+)
 from .autostart import AutoStartManager
 from .cleanup import CleanupManager
 from .compatibility import relay_home_id
@@ -23,7 +33,13 @@ from .models import JobRequest
 from .schedules.retention import ScheduleRetentionManager
 from .schedules.runtime import ScheduleRuntime
 from .schedules.service import ScheduleService
-from .security import activate_antigravity, antigravity_setup, enabled_worker_health
+from .security import (
+    activate_antigravity,
+    antigravity_setup,
+    enabled_worker_health,
+    security_posture,
+    set_full_access_mode,
+)
 from .util import ensure_dir, json_dump, random_token, utc_now
 
 
@@ -237,6 +253,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/autostart":
             self._json(HTTPStatus.OK, {"ok": True, "autostart": self.daemon.autostart_manager.status()})
             return
+        if path == "/v1/security":
+            self._json(HTTPStatus.OK, {"ok": True, **security_posture(self.daemon.config)})
+            return
         if path.startswith("/v1/agents/"):
             try:
                 self._json(HTTPStatus.OK, get_agent(self.daemon.engine, path[len("/v1/agents/") :]))
@@ -412,6 +431,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/v1/jobs/"):
                 suffix = path[len("/v1/jobs/") :]
+                if suffix.endswith("/check"):
+                    self._json(HTTPStatus.OK, check_job_progress(self.daemon.engine, suffix[: -len("/check")]))
+                    return
                 if suffix.endswith("/cancel"):
                     self._json(HTTPStatus.OK, self.daemon.engine.cancel(suffix[: -len("/cancel")]))
                     return
@@ -442,6 +464,15 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         path = urlsplit(self.path).path
+        if path.startswith("/v1/security/full-access/"):
+            try:
+                worker = path[len("/v1/security/full-access/") :]
+                payload = self._body()
+                settings = set_full_access_mode(self.daemon.config, worker, payload.get("enabled"))
+                self._json(HTTPStatus.OK, {"ok": True, "full_access_mode": settings})
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/agent-apps/"):
             try:
                 suffix = path[len("/v1/agent-apps/") :]

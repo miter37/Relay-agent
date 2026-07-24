@@ -8,6 +8,10 @@ Relay 1.1.0 adds Custom Agent Apps across the CLI, GUI, and Schedules.
 - A shell-free generic CLI adapter with validated argv placeholders and normalized text or JSON results.
 - Agent App model discovery and executable-version invalidation that requires changed Agents to be retested.
 - Agent App management in Settings and custom Agent selection for ordinary and scheduled Jobs.
+- Unified per-Agent Full Access Mode controls shared by the GUI, CLI, daemon API, and built-in adapters.
+- Safe Working folder jobs that apply verified file changes to a requested real directory and retain artifact copies.
+- Manual non-interrupting progress checks with persistent diagnostics in the GUI Logs tab.
+- Enabled-Agent health reporting, readable Answer rendering, stronger history search, and collapsible Job history.
 - API schema revision 5 with GUI minimum version 1.1.0.
 
 ## Fixed
@@ -19,11 +23,15 @@ Relay 1.1.0 adds Custom Agent Apps across the CLI, GUI, and Schedules.
 - Agent App editing preserves advanced manifest fields and invalidates stale GUI test results after any definition change.
 - Pre-save Agent tests use expiring definition-bound tokens without leaving cancelled Agent Apps behind.
 - Custom Agent subprocesses inherit only operational and explicitly declared environment variables.
+- Windows worker subprocesses no longer flash terminal windows during GUI and daemon operation.
+- New Task and Settings remain visible when stale Job-detail responses arrive.
+- Completed replayable Jobs correctly expose Schedule creation and task context in the Overview.
+- Requested real-folder edits are no longer incorrectly delivered only under Relay's artifacts directory.
 
 ## Verification
 
-GitHub Actions checks Ruff formatting and lint, the full test suite on Windows, Ubuntu, and macOS with Python 3.11–3.13,
-and real daemon-backed GUI smoke coverage.
+Local verification passes Ruff formatting and lint, 247 tests with one environment-dependent skip, the release build,
+and daemon-backed GUI smoke coverage. GitHub Actions re-runs the cross-platform Python 3.11–3.13 matrix for the tag.
 
 ---
 

@@ -22,6 +22,7 @@ class JobRequest:
     request_id: str | None = None
     attachments: list[str] = field(default_factory=list)
     workspace: str | None = None
+    target_path: str | None = None
     overwrite: bool = False
     machine: bool = False
     force_new: bool = False

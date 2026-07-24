@@ -59,6 +59,17 @@ class G3SnapshotTests(unittest.TestCase):
         self.assertEqual(request.worker, "codex")
         self.assertEqual(request.attachments, [str(self.attachment)])
 
+    def test_target_writing_job_is_not_schedule_eligible(self):
+        job = self.completed_job()
+        request = json.loads(job["request_json"])
+        request["target_path"] = str(Path(self.temp.name) / "project")
+        job["request_json"] = json.dumps(request)
+
+        with self.assertRaises(RelayError) as context:
+            validate_source_job(job, self.registry)
+
+        self.assertEqual(context.exception.code, "SCHEDULE_TARGET_UNSUPPORTED")
+
     def test_partial_or_non_replayable_job_is_rejected(self):
         for overrides, code in (
             ({"status": "PARTIAL", "result_status": "partial"}, "SCHEDULE_NOT_ELIGIBLE"),

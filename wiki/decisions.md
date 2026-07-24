@@ -12,6 +12,10 @@
 - **GUI health is user-triggered.** Health is checked at startup and by an explicit refresh action, not on a continuous timer.
 - **Finished history is hierarchical.** The GUI uses a collapsible Finished/date/task tree; task names and result states are separate columns.
 - **Task-entry safety defaults are explicit.** GUI-created Jobs default fallback, force-new, and overwrite to enabled, with inline help explaining the consequences.
+- **Unified Full Access Mode:** Workers support a unified `full_access_mode` flag which toggles their respective security bypasses (e.g., YOLO, skip permissions). GUI and CLI read the same daemon/config state; a running daemon is updated through `/v1/security/full-access/{worker}`. When disabled, sandbox/permission errors return specific guidance advising the user about this setting.
+- **Windows worker consoles stay hidden:** GUI, daemon health probes, model discovery, and job workers launch child processes with `CREATE_NO_WINDOW`; job output remains in Relay logs and files.
+- **Working folders and artifacts are distinct.** Interactive Jobs apply a verified isolated delta to `target_path` and copy changed/created files to `artifact_path`; result files retain their existing meaning.
+- **Progress checks are observational and manual.** They never message or signal the Agent; structured results are events shown in the Logs tab without modifying Agent stdout/stderr.
 
 ## Superseded
 

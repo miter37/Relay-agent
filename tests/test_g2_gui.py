@@ -131,6 +131,28 @@ class G2NewTaskGuiTests(unittest.TestCase):
         self.assertTrue(view.open_log_button.isEnabled())
         view.set_content("Logs", "<pre>ERROR failed</pre>")
 
+    def test_running_job_exposes_check_button_and_separate_check_stream(self):
+        view = JobDetailView()
+        checked = []
+        view.check_requested.connect(checked.append)
+        view.set_job(
+            {
+                "job_id": "job-check",
+                "status": "RUNNING",
+                "actions": {"can_check_progress": True},
+                "attempts": [{"attempt_id": 4, "worker": "codex"}],
+            }
+        )
+
+        view.check_button.click()
+        view.select_check_results()
+
+        self.assertEqual(checked, ["job-check"])
+        self.assertEqual(view.tabs.tabText(view.tabs.currentIndex()), "Logs")
+        self.assertTrue(view.is_check_stream())
+        self.assertFalse(view.attempt_combo.isEnabled())
+        self.assertFalse(view.open_log_button.isEnabled())
+
     def test_main_window_contains_new_task_and_job_detail_views(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(Path(directory) / "relay-home")

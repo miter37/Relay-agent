@@ -194,6 +194,22 @@ class G2JobApiTests(unittest.TestCase):
         self.assertEqual(result["text"], "ERROR failed")
         self.assertEqual(result["next_offset"], log_path.stat().st_size)
 
+    def test_progress_check_is_recorded_without_touching_agent_logs(self):
+        client = self._start_daemon()
+        job, _ = self.engine.create_job(JobRequest(task="Wait for a slot", worker="codex"), queued=True)
+        log_path = self.home / "logs" / "stdout.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("original agent output\n", encoding="utf-8")
+        self.db.create_attempt(job["job_id"], "codex", stdout_path=str(log_path))
+        before = log_path.read_bytes()
+
+        result = client.request("POST", f"/v1/jobs/{job['job_id']}/check", {})
+        events = client.request("GET", f"/v1/jobs/{job['job_id']}/events")
+
+        self.assertEqual(result["headline"], "Waiting in queue")
+        self.assertEqual(log_path.read_bytes(), before)
+        self.assertEqual(events["events"][-1]["event_type"], "PROGRESS_CHECKED")
+
     def test_result_artifacts_and_events_are_read_separately(self):
         client = self._start_daemon()
         output = self.home / "results" / "result.json"

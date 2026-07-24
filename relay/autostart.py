@@ -43,7 +43,10 @@ class AutoStartManager:
         return entrypoint_command(["--home", str(self.config.home), "daemon", "serve"])
 
     def _run(self, command: list[str]) -> None:
-        result = self.runner(command, check=False, capture_output=True, text=True, shell=False)
+        kwargs = {"check": False, "capture_output": True, "text": True, "shell": False}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = self.runner(command, **kwargs)
         if getattr(result, "returncode", 1) != 0:
             detail = getattr(result, "stderr", "") or getattr(result, "stdout", "") or "command failed"
             raise RelayError("AUTOSTART_FAILED", str(detail).strip(), True)

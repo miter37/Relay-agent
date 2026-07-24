@@ -69,6 +69,46 @@ class ScheduleCliTests(unittest.TestCase):
         self.assertEqual(args.retention_mode, "latest_runs")
         self.assertTrue(args.machine)
 
+    def test_parser_accepts_full_access_status_and_toggle_options(self):
+        from relay.cli import build_parser
+
+        args = build_parser().parse_args(["security", "--enable-full-access", "codex", "--machine"])
+
+        self.assertEqual(args.command, "security")
+        self.assertEqual(args.enable_full_access, "codex")
+        self.assertTrue(args.machine)
+
+    def test_run_parser_keeps_target_separate_from_artifacts(self):
+        from relay.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["run", "Improve it", "--target", r"D:\project", "--artifacts", r"D:\relay-copies"]
+        )
+
+        self.assertEqual(args.target_path, r"D:\project")
+        self.assertEqual(args.artifact_path, r"D:\relay-copies")
+
+    def test_security_cli_toggles_persisted_state_without_starting_daemon(self):
+        from relay.cli import main
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(["security", "--enable-full-access", "codex", "--machine"]), 0)
+            self.assertEqual(main(["security", "--disable-full-access", "codex", "--machine"]), 0)
+
+        self.assertIn('"enabled":false', output.getvalue())
+
+    def test_security_cli_uses_running_daemon_api(self):
+        from relay.cli import main
+
+        client = Mock()
+        client.health.return_value = True
+        client.request.return_value = {"ok": True, "full_access_mode": {"codex": True}}
+        with patch("relay.cli.RPCClient", return_value=client):
+            self.assertEqual(main(["security", "--enable-full-access", "codex", "--machine"]), 0)
+
+        client.request.assert_called_once_with("PATCH", "/v1/security/full-access/codex", {"enabled": True})
+
     def test_preview_posts_canonical_rule_and_emits_machine_json(self):
         from relay.cli import main
 

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 class JobDetailView(QWidget):
     cancel_requested = Signal(str)
+    check_requested = Signal(str)
     rerun_requested = Signal(str)
     schedule_requested = Signal(str)
     tab_requested = Signal(str)
@@ -43,6 +44,9 @@ class JobDetailView(QWidget):
         self.cancel_button = QPushButton("Stop task")
         self.cancel_button.clicked.connect(self._cancel)
         header.addWidget(self.cancel_button)
+        self.check_button = QPushButton("Check progress")
+        self.check_button.clicked.connect(self._check)
+        header.addWidget(self.check_button)
         self.rerun_button = QPushButton("Run again")
         self.rerun_button.clicked.connect(self._rerun)
         header.addWidget(self.rerun_button)
@@ -62,7 +66,7 @@ class JobDetailView(QWidget):
         self.attempt_combo.setMinimumWidth(160)
         log_controls.addWidget(self.attempt_combo)
         self.stream_combo = QComboBox()
-        self.stream_combo.addItems(["stdout", "stderr"])
+        self.stream_combo.addItems(["stdout", "stderr", "Check results"])
         log_controls.addWidget(self.stream_combo)
         self.errors_only_check = QCheckBox("Errors only")
         log_controls.addWidget(self.errors_only_check)
@@ -73,11 +77,9 @@ class JobDetailView(QWidget):
         self.open_log_button.clicked.connect(self._open_log)
         log_controls.addWidget(self.open_log_button)
         log_controls.addStretch(1)
-        for control in (self.attempt_combo, self.stream_combo, self.errors_only_check):
-            if isinstance(control, QComboBox):
-                control.currentIndexChanged.connect(lambda _index: self.log_options_changed.emit())
-            else:
-                control.stateChanged.connect(lambda _state: self.log_options_changed.emit())
+        self.attempt_combo.currentIndexChanged.connect(lambda _index: self.log_options_changed.emit())
+        self.stream_combo.currentIndexChanged.connect(self._stream_changed)
+        self.errors_only_check.stateChanged.connect(lambda _state: self.log_options_changed.emit())
         layout.addLayout(log_controls)
         self.tabs = QTabWidget()
         self._browsers: dict[str, QTextBrowser] = {}
@@ -104,6 +106,8 @@ class JobDetailView(QWidget):
         layout.addWidget(self.tabs, 1)
         self.answer_text = ""
         self.task_text = ""
+        self._check_pending = False
+        self._can_check_progress = False
         self.set_answer(None)
 
     def set_job(self, job: dict) -> None:
@@ -111,6 +115,11 @@ class JobDetailView(QWidget):
         if job_id != self.job_id:
             self.set_answer(None)
             self.set_content("Result", "")
+            self.set_content("Logs", "")
+            self._check_pending = False
+            self.stream_combo.blockSignals(True)
+            self.stream_combo.setCurrentText("stdout")
+            self.stream_combo.blockSignals(False)
         self.job_id = job_id
         self.title_label.setText(str(job.get("title") or self.job_id or "Job"))
         status = str(job.get("status") or "UNKNOWN")
@@ -118,6 +127,8 @@ class JobDetailView(QWidget):
         self.status_label.setStyleSheet(self._status_style(status))
         actions = job.get("actions") or {}
         self.cancel_button.setEnabled(bool(actions.get("can_cancel")))
+        self._can_check_progress = bool(actions.get("can_check_progress"))
+        self.check_button.setEnabled(self._can_check_progress and not self._check_pending)
         self.rerun_button.setEnabled(bool(actions.get("can_rerun")))
         self.schedule_button.setEnabled(bool(actions.get("can_schedule")))
         self.schedule_button.setToolTip(
@@ -126,12 +137,15 @@ class JobDetailView(QWidget):
             else "Schedule this completed task"
         )
         self.open_folder_button.setEnabled(bool(actions.get("can_open_folder")))
+        self.attempt_combo.blockSignals(True)
         self.attempt_combo.clear()
         for attempt in job.get("attempts") or []:
             attempt_id = attempt.get("attempt_id")
             if attempt_id is not None:
                 self.attempt_combo.addItem(f"Attempt {attempt_id}: {attempt.get('worker') or 'agent'}", int(attempt_id))
+        self.attempt_combo.blockSignals(False)
         self.open_log_button.setEnabled(self.attempt_combo.count() > 0)
+        self._update_log_controls()
         fields = (
             ("Status", job.get("status")),
             ("Registered name", job.get("title")),
@@ -145,6 +159,7 @@ class JobDetailView(QWidget):
             ("Source", job.get("submitted_via")),
             ("Result file", job.get("output_path")),
             ("Files folder", job.get("artifact_path")),
+            ("Working folder", (job.get("request") or {}).get("target_path")),
             ("Job ID", job.get("job_id")),
         )
         request = job.get("request") or {}
@@ -190,6 +205,10 @@ class JobDetailView(QWidget):
         if self.job_id:
             self.cancel_requested.emit(self.job_id)
 
+    def _check(self) -> None:
+        if self.job_id and not self._check_pending:
+            self.check_requested.emit(self.job_id)
+
     def _rerun(self) -> None:
         if self.job_id:
             self.rerun_requested.emit(self.job_id)
@@ -205,6 +224,28 @@ class JobDetailView(QWidget):
     def _open_log(self) -> None:
         if self.job_id:
             self.open_log_requested.emit(self.job_id)
+
+    def _stream_changed(self, _index: int) -> None:
+        self._update_log_controls()
+        self.log_options_changed.emit()
+
+    def _update_log_controls(self) -> None:
+        checks = self.is_check_stream()
+        self.attempt_combo.setEnabled(not checks)
+        self.errors_only_check.setEnabled(not checks)
+        self.open_log_button.setEnabled(not checks and self.attempt_combo.count() > 0)
+
+    def is_check_stream(self) -> bool:
+        return self.stream_combo.currentText() == "Check results"
+
+    def select_check_results(self) -> None:
+        self.stream_combo.setCurrentText("Check results")
+        self.tabs.setCurrentIndex(self.TAB_NAMES.index("Logs"))
+
+    def set_check_pending(self, pending: bool) -> None:
+        self._check_pending = pending
+        self.check_button.setText("Checking…" if pending else "Check progress")
+        self.check_button.setEnabled(self._can_check_progress and not pending)
 
     def _copy_answer(self) -> None:
         if self.answer_text:

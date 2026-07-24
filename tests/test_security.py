@@ -7,10 +7,32 @@ from unittest.mock import Mock
 
 from relay.config import Config
 from relay.models import AdapterSpec
-from relay.security import activate_antigravity, enabled_worker_health
+from relay.security import activate_antigravity, enabled_worker_health, full_access_settings, set_full_access_mode
 
 
 class SecurityTests(unittest.TestCase):
+    def test_full_access_mode_is_persisted_and_legacy_bypass_is_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(Path(directory) / "relay-home")
+            config.init()
+
+            self.assertEqual(full_access_settings(config), {"codex": False, "claude": False, "antigravity": False})
+            self.assertEqual(set_full_access_mode(config, "codex", True)["codex"], True)
+            self.assertTrue(config.get("workers.codex.full_access_mode"))
+
+            config.set("workers.codex.unsafe_yolo", True)
+            self.assertTrue(full_access_settings(config)["codex"])
+            self.assertFalse(set_full_access_mode(config, "codex", False)["codex"])
+            self.assertFalse(config.get("workers.codex.unsafe_yolo"))
+
+    def test_full_access_mode_rejects_unknown_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Config(Path(directory) / "relay-home")
+            config.init()
+            with self.assertRaises(Exception) as context:
+                set_full_access_mode(config, "unknown", True)
+            self.assertEqual(context.exception.code, "INVALID_REQUEST")
+
     def test_enabled_worker_health_reports_all_enabled_agents(self):
         healthy_adapter = Mock()
         unhealthy_adapter = Mock()

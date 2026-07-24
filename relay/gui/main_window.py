@@ -57,17 +57,20 @@ class MainWindow(QMainWindow):
         self.schedule_editor_mode = "create"
         self.schedule_editor_schedule_id: str | None = None
         self.autostart_status: dict = {}
+        self.full_access_states: dict[str, bool] = {}
         self.agent_app_wizard: AgentAppWizard | None = None
         self.agent_app_wizard_mode = "create"
         self.agent_app_wizard_id: str | None = None
         self.current_mode = "disconnected"
         self.current_filter = ""
         self.finished_cursor: str | None = None
+        self.job_tree_expanded: dict[str, bool] = {}
         self.selected_job_id: str | None = None
         self.current_detail: dict | None = None
         self.detail_view_mode = "empty"
         self.log_attempt_id: int | None = None
         self.log_offset: int | None = None
+        self.progress_check_job_id: str | None = None
         self.health_check_request_id: int | None = None
 
         self.setWindowTitle("Relay-agent")
@@ -153,6 +156,8 @@ class MainWindow(QMainWindow):
         self.job_list.setRootIsDecorated(True)
         self.job_list.setAlternatingRowColors(True)
         self.job_list.itemClicked.connect(self._select_item)
+        self.job_list.itemExpanded.connect(lambda item: self._remember_job_tree_state(item, True))
+        self.job_list.itemCollapsed.connect(lambda item: self._remember_job_tree_state(item, False))
         sidebar_layout.addWidget(self.job_list, 1)
         self.load_more = QPushButton("Load more")
         self.load_more.clicked.connect(self._load_more_finished)
@@ -169,6 +174,7 @@ class MainWindow(QMainWindow):
         self.detail_stack.addWidget(self.new_task_view)
         self.job_detail_view = JobDetailView()
         self.job_detail_view.cancel_requested.connect(self._cancel_job)
+        self.job_detail_view.check_requested.connect(self._check_job)
         self.job_detail_view.rerun_requested.connect(self._rerun_job)
         self.job_detail_view.schedule_requested.connect(self._schedule_job)
         self.job_detail_view.tab_requested.connect(self._detail_tab_requested)
@@ -188,6 +194,7 @@ class MainWindow(QMainWindow):
         self.settings_view = SettingsView()
         self.settings_view.autostart_changed.connect(self._toggle_autostart)
         self.settings_view.antigravity_activate_requested.connect(self._activate_antigravity)
+        self.settings_view.full_access_mode_changed.connect(self._set_full_access_mode)
         agent_apps = self.settings_view.agent_apps_view
         agent_apps.create_requested.connect(self._create_agent_app)
         agent_apps.edit_requested.connect(self._edit_agent_app)
@@ -235,9 +242,11 @@ class MainWindow(QMainWindow):
         self.selected_job_id = None
         self.current_detail = None
         self.detail_view_mode = "settings"
+
         self.detail_stack.setCurrentWidget(self.settings_view)
         if self.current_mode == "normal":
             self._request("autostart", "/v1/autostart")
+            self._request("security", "/v1/security")
             self._request("agent_apps", "/v1/agent-apps")
             self._request("antigravity_setup", "/v1/agents/antigravity/setup")
 
@@ -309,6 +318,27 @@ class MainWindow(QMainWindow):
         if self.current_mode == "normal":
             self._request_patch("autostart_toggle", "/v1/autostart", {"enabled": enabled})
 
+    def _set_full_access_mode(self, worker: str, state: bool) -> None:
+        if self.current_mode != "normal":
+            self.settings_view.set_full_access_state(worker, not state)
+            return
+        previous = self.full_access_states.get(worker, not state)
+        if state:
+            choice = QMessageBox.warning(
+                self,
+                "Enable Full Access Mode",
+                f"{worker.title()} Full Access Mode disables that worker's permission checks and sandbox restrictions.\n\n"
+                "The worker can modify anything available to the Relay OS account. Use a dedicated low-privilege "
+                "account and trusted workspace. This setting applies to the running daemon immediately.\n\n"
+                "Enable it only if you understand and accept this risk.",
+                QMessageBox.Cancel | QMessageBox.Yes,
+                QMessageBox.Cancel,
+            )
+            if choice != QMessageBox.Yes:
+                self.settings_view.set_full_access_state(worker, previous)
+                return
+        self._request_patch(("full_access", worker, previous), f"/v1/security/full-access/{worker}", {"enabled": state})
+
     def _activate_antigravity(self) -> None:
         if self.current_mode != "normal":
             return
@@ -368,6 +398,15 @@ class MainWindow(QMainWindow):
     def _cancel_job(self, job_id: str) -> None:
         if self.current_mode == "normal":
             self._request_post("cancel", f"/v1/jobs/{job_id}/cancel", {})
+
+    def _check_job(self, job_id: str) -> None:
+        if self.current_mode != "normal" or self.progress_check_job_id is not None:
+            return
+        self.progress_check_job_id = job_id
+        self.job_detail_view.set_check_pending(True)
+        self.job_detail_view.select_check_results()
+        self._show_check_events([], pending=True)
+        self._request_post(("progress_check", job_id), f"/v1/jobs/{job_id}/check", {})
 
     def _rerun_job(self, job_id: str) -> None:
         if self.current_mode == "normal":
@@ -533,6 +572,21 @@ class MainWindow(QMainWindow):
             elif kind == "antigravity_activate":
                 message = (payload or {}).get("error_message") if isinstance(payload, dict) else None
                 self.settings_view.set_antigravity_error(message or str(error or "Activation failed"))
+            elif isinstance(kind, tuple) and kind[0] == "full_access":
+                self.settings_view.set_full_access_state(kind[1], bool(kind[2]))
+                message = (payload or {}).get("message") if isinstance(payload, dict) else None
+                self.banner.setText(message or str(error or "Full Access Mode could not be updated."))
+                self.banner.show()
+            elif isinstance(kind, tuple) and kind[0] == "progress_check":
+                if self.progress_check_job_id == kind[1]:
+                    self.progress_check_job_id = None
+                if self.selected_job_id == kind[1] and self.detail_view_mode == "job":
+                    self.job_detail_view.set_check_pending(False)
+                    self.job_detail_view.select_check_results()
+                    self.job_detail_view.set_content(
+                        "Logs",
+                        f"<pre>{escape('Check failed: ' + str(error or 'Progress diagnosis failed'))}</pre>",
+                    )
             else:
                 self.banner.setText("Relay could not complete that action. Please try again.")
                 self.banner.show()
@@ -566,6 +620,27 @@ class MainWindow(QMainWindow):
             if kind == "autostart_prompt":
                 self._maybe_prompt_autostart()
             return
+        if kind == "security":
+            self.full_access_states = {
+                str(worker): bool(enabled) for worker, enabled in (payload.get("full_access_mode") or {}).items()
+            }
+            self.settings_view.set_full_access_states(
+                self.full_access_states.get("codex", False),
+                self.full_access_states.get("claude", False),
+                self.full_access_states.get("antigravity", False),
+            )
+            return
+        if isinstance(kind, tuple) and kind[0] == "full_access":
+            settings = payload.get("full_access_mode") or {}
+            self.full_access_states = {str(worker): bool(enabled) for worker, enabled in settings.items()}
+            self.settings_view.set_full_access_states(
+                self.full_access_states.get("codex", False),
+                self.full_access_states.get("claude", False),
+                self.full_access_states.get("antigravity", False),
+            )
+            self.banner.setText(f"{kind[1].title()} Full Access Mode updated for the running daemon.")
+            self.banner.show()
+            return
         if kind == "antigravity_setup":
             self.settings_view.set_antigravity_status(payload.get("antigravity") or {})
             return
@@ -597,6 +672,21 @@ class MainWindow(QMainWindow):
                 self.job_detail_view.set_content("Result", self._format_payload(payload))
                 data = payload.get("data")
                 self.job_detail_view.set_answer(data.get("answer") if isinstance(data, dict) else None)
+            return
+        if isinstance(kind, tuple) and kind[0] == "progress_check":
+            if self.progress_check_job_id == kind[1]:
+                self.progress_check_job_id = None
+            if self.selected_job_id == kind[1] and self.detail_view_mode == "job":
+                self.job_detail_view.set_check_pending(False)
+                self.job_detail_view.select_check_results()
+                self._request(("check_events", kind[1]), f"/v1/jobs/{kind[1]}/events")
+            return
+        if isinstance(kind, tuple) and kind[0] == "check_events":
+            if self.selected_job_id == kind[1] and self.detail_view_mode == "job":
+                self._show_check_events(
+                    payload.get("events", []),
+                    pending=self.progress_check_job_id == kind[1],
+                )
             return
         if kind == "artifacts":
             self.job_detail_view.set_content("Files", self._format_payload(payload.get("artifacts", [])))
@@ -845,7 +935,7 @@ class MainWindow(QMainWindow):
 
     def _render_jobs(self) -> None:
         selected = self.job_list.currentItem().data(0, Qt.UserRole) if self.job_list.currentItem() else None
-        expanded: dict[str, bool] = {}
+        expanded = dict(self.job_tree_expanded)
         for index in range(self.job_list.topLevelItemCount()):
             group = self.job_list.topLevelItem(index)
             state_key = group.data(0, Qt.UserRole + 1)
@@ -856,6 +946,7 @@ class MainWindow(QMainWindow):
                 state_key = child.data(0, Qt.UserRole + 1)
                 if state_key:
                     expanded[str(state_key)] = child.isExpanded()
+        self.job_tree_expanded = expanded
         self.job_list.clear()
         groups = (
             ("Waiting", {"CREATED", "QUEUED"}, "created_at"),
@@ -872,7 +963,6 @@ class MainWindow(QMainWindow):
             group_key = f"group:{group_name}"
             header = QTreeWidgetItem([f"{group_name} · {len(rows)}", ""])
             header.setData(0, Qt.UserRole + 1, group_key)
-            header.setExpanded(expanded.get(group_key, True))
             header.setFlags(Qt.ItemIsEnabled)
             self.job_list.addTopLevelItem(header)
             date_groups = {"All": rows}
@@ -885,7 +975,6 @@ class MainWindow(QMainWindow):
                     date_key = f"date:{group_name}:{date_name}"
                     date_item = QTreeWidgetItem([f"{date_name} · {len(date_rows)}", ""])
                     date_item.setData(0, Qt.UserRole + 1, date_key)
-                    date_item.setExpanded(expanded.get(date_key, True))
                     date_item.setFlags(Qt.ItemIsEnabled)
                     header.addChild(date_item)
                 for job in date_rows:
@@ -916,6 +1005,14 @@ class MainWindow(QMainWindow):
                     (date_item if group_name == "Finished" else header).addChild(item)
                     if job.get("job_id") == selected:
                         self.job_list.setCurrentItem(item)
+                if group_name == "Finished":
+                    date_item.setExpanded(expanded.get(date_key, True))
+            header.setExpanded(expanded.get(group_key, True))
+
+    def _remember_job_tree_state(self, item: QTreeWidgetItem, expanded: bool) -> None:
+        state_key = item.data(0, Qt.UserRole + 1)
+        if state_key:
+            self.job_tree_expanded[str(state_key)] = expanded
 
     def _render_schedules(self) -> None:
         selected = self.schedule_list.currentItem().data(Qt.UserRole) if self.schedule_list.currentItem() else None
@@ -1011,6 +1108,8 @@ class MainWindow(QMainWindow):
             self.detail_view_mode = "empty"
             self.detail_stack.setCurrentWidget(self.empty_detail)
             return
+        if self.progress_check_job_id and self.progress_check_job_id != job.get("job_id"):
+            self.progress_check_job_id = None
         self.detail_view_mode = "job"
         self.current_detail = job
         self.log_attempt_id = None
@@ -1032,6 +1131,9 @@ class MainWindow(QMainWindow):
             kind, path = paths[tab_name]
             self._request(kind, f"/v1/jobs/{job_id}/{path}")
         elif tab_name == "Logs":
+            if self.job_detail_view.is_check_stream():
+                self._request(("check_events", job_id), f"/v1/jobs/{job_id}/events")
+                return
             attempts = self.current_detail.get("attempts") or []
             if attempts:
                 selected = self.job_detail_view.attempt_combo.currentData()
@@ -1041,6 +1143,11 @@ class MainWindow(QMainWindow):
 
     def _log_options_changed(self) -> None:
         if self.job_detail_view.tabs.tabText(self.job_detail_view.tabs.currentIndex()) == "Logs":
+            if self.job_detail_view.is_check_stream():
+                if self.current_detail and self.current_detail.get("job_id"):
+                    job_id = str(self.current_detail["job_id"])
+                    self._request(("check_events", job_id), f"/v1/jobs/{job_id}/events")
+                return
             self.log_offset = None
             self._refresh_log()
 
@@ -1048,6 +1155,8 @@ class MainWindow(QMainWindow):
         if self.current_mode != "normal" or not self.current_detail or self.log_attempt_id is None:
             return
         if self.job_detail_view.tabs.tabText(self.job_detail_view.tabs.currentIndex()) != "Logs":
+            return
+        if self.job_detail_view.is_check_stream():
             return
         stream = self.job_detail_view.stream_combo.currentText()
         query = {
@@ -1059,6 +1168,72 @@ class MainWindow(QMainWindow):
         if self.log_offset is not None:
             query["offset"] = str(self.log_offset)
         self._request("logs", f"/v1/jobs/{self.current_detail['job_id']}/logs?{urlencode(query)}")
+
+    def _show_check_events(self, events: list[dict], *, pending: bool = False) -> None:
+        records: list[str] = []
+        for event in events:
+            if event.get("event_type") != "PROGRESS_CHECKED":
+                continue
+            payload = event.get("payload_json")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(payload, dict):
+                continue
+            timestamp = str(payload.get("checked_at") or event.get("timestamp") or "Unknown time")
+            lines = [
+                f"[{timestamp}] CHECK — {payload.get('headline') or 'Progress checked'}",
+                str(payload.get("summary") or ""),
+                " | ".join(
+                    item
+                    for item in (
+                        f"Stage: {payload.get('stage')}" if payload.get("stage") else "",
+                        f"Agent: {payload.get('worker')}" if payload.get("worker") else "",
+                        (
+                            f"Process alive: {'yes' if payload.get('process_alive') else 'no'}"
+                            if payload.get("process_alive") is not None
+                            else ""
+                        ),
+                        (
+                            f"Elapsed: {self._duration_text(payload.get('elapsed_seconds'))}"
+                            if payload.get("elapsed_seconds") is not None
+                            else ""
+                        ),
+                        (
+                            f"Idle: {self._duration_text(payload.get('idle_seconds'))}"
+                            if payload.get("idle_seconds") is not None
+                            else ""
+                        ),
+                    )
+                    if item
+                ),
+            ]
+            activity = payload.get("recent_activity") or {}
+            if activity.get("kind"):
+                lines.append(f"Recent activity: {activity['kind']}")
+            if activity.get("recent_line"):
+                lines.append(f"Recent {activity.get('recent_stream') or 'output'}: {activity['recent_line']}")
+            issue = payload.get("detected_issue") or {}
+            if issue.get("code"):
+                lines.append(f"Detected issue: {issue['code']} — {issue.get('message') or ''}")
+            records.append("\n".join(line for line in lines if line))
+        if pending:
+            records.append("[Checking…] Relay is inspecting the current process, activity, and logs.")
+        text = "\n\n".join(records) if records else "No progress checks have been recorded for this Job."
+        self.job_detail_view.set_content("Logs", f"<pre>{escape(text)}</pre>")
+
+    @staticmethod
+    def _duration_text(value) -> str:
+        seconds = max(0, int(float(value)))
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}h {minutes}m {seconds}s"
+        if minutes:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
 
     def _open_result(self, job_id: str) -> None:
         self._open_stored_path(job_id, "output_path", file_only=True)

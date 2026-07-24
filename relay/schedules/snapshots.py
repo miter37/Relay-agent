@@ -79,6 +79,11 @@ def validate_source_job(job: dict[str, Any], registry: AgentRegistry) -> JobRequ
         except KeyError:
             raise RelayError("SCHEDULE_AGENT_MISSING", f"The Agent is no longer registered: {worker}") from None
     request = JobRequest.from_dict(request_data)
+    if request.target_path:
+        raise RelayError(
+            "SCHEDULE_TARGET_UNSUPPORTED",
+            "Jobs that modify a Working folder cannot become unattended Schedules.",
+        )
     if not isinstance(request.attachments, list) or any(not isinstance(path, str) for path in request.attachments):
         raise RelayError("SCHEDULE_INPUT_INVALID", "Attachment paths are invalid.")
     return request

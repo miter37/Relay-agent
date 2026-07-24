@@ -61,6 +61,7 @@ DEFAULTS: dict[str, Any] = {
             "max_budget_usd": 5.0,
             "tools": "WebSearch,WebFetch,Read,Write,Glob,Grep",
             "disallowed_tools": "mcp__*",
+            "full_access_mode": False,
         },
         "codex": {
             "enabled": True,
@@ -70,16 +71,16 @@ DEFAULTS: dict[str, Any] = {
             "sandbox": "workspace-write",
             "approval": "never",
             "live_search": True,
-            "unsafe_yolo": False,
+            "full_access_mode": False,
         },
         "antigravity": {
             "enabled": False,
             "command": "agy",
             "require_deep_doctor": True,
             "default_model": "",
-            "dangerously_skip_permissions": True,
             "enable_only_if_security_verified": True,
             "security_verified": False,
+            "full_access_mode": False,
         },
     },
 }

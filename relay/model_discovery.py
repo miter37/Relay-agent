@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -27,16 +28,18 @@ def list_codex_models(
     timeout_seconds: float = 20.0,
     include_hidden: bool = False,
 ) -> dict[str, Any]:
-    process = subprocess.Popen(
-        [executable, "app-server", "--listen", "stdio://"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
+    popen_kwargs = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    process = subprocess.Popen([executable, "app-server", "--listen", "stdio://"], **popen_kwargs)
 
     if process.stdin is None or process.stdout is None:
         process.kill()
@@ -155,6 +158,9 @@ def parse_claude_settings() -> list[str]:
 
 def probe_claude_model(executable: str, model: str) -> bool:
     try:
+        run_kwargs = {"capture_output": True, "text": True, "timeout": 30}
+        if os.name == "nt":
+            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         process = subprocess.run(
             [
                 executable,
@@ -167,9 +173,7 @@ def probe_claude_model(executable: str, model: str) -> bool:
                 "--output-format",
                 "json",
             ],
-            capture_output=True,
-            text=True,
-            timeout=30,
+            **run_kwargs,
         )
         return "MODEL_OK" in process.stdout or process.returncode == 0
     except subprocess.TimeoutExpired:

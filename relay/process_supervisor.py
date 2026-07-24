@@ -109,10 +109,13 @@ def _workspace_fingerprint(root: Path) -> tuple[int, int, int]:
     newest = 0
     try:
         for base, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = [d for d in dirs if not (Path(base) / d).is_symlink()]
+            base_path = Path(base)
+            dirs[:] = [
+                d for d in dirs if not (base_path / d).is_symlink() and not (base_path == root and d == "runtime")
+            ]
             for name in files:
                 try:
-                    stat = (Path(base) / name).stat()
+                    stat = (base_path / name).stat()
                 except OSError:
                     continue
                 count += 1
@@ -155,6 +158,7 @@ def terminate_process_tree(process: subprocess.Popen, job: WindowsJobObject | No
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except Exception:
             try:
@@ -188,6 +192,7 @@ def run_supervised(
     base_env: dict[str, str] | None = None,
     cancel_requested: Callable[[], bool] | None = None,
     event_callback: Callable[[str, dict], None] | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> ProcessOutcome:
     ensure_dir(stdout_path.parent)
     env = {
@@ -199,7 +204,7 @@ def run_supervised(
         "TERM": "dumb",
         "CLICOLOR": "0",
     }
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     start_new_session = os.name != "nt"
     command_record = {
         "command": command,
@@ -217,6 +222,30 @@ def run_supervised(
     last_activity = time.monotonic()
     previous_stdout = (0, 0)
     previous_stderr = (0, 0)
+    last_activity_kind: str | None = None
+
+    def report(process_alive: bool, *, return_code: int | None = None) -> None:
+        if not progress_callback:
+            return
+        snapshot = {
+            "process_alive": process_alive,
+            "return_code": return_code,
+            "elapsed_seconds": round(time.monotonic() - start, 1),
+            "idle_seconds": round(time.monotonic() - last_activity, 1),
+            "last_activity_kind": last_activity_kind,
+            "activity_observed": last_activity_kind is not None,
+            "stdout_bytes": previous_stdout[0],
+            "stderr_bytes": previous_stderr[0],
+            "workspace_files": previous_fp[0],
+            "workspace_bytes": previous_fp[1],
+            "prompt_detected": marker_seen,
+            "soft_stall_seconds": soft_stall_seconds,
+            "hard_stall_seconds": hard_stall_seconds,
+        }
+        try:
+            progress_callback(snapshot)
+        except Exception:
+            pass
 
     with stdout_path.open("wb", buffering=0) as stdout_file, stderr_path.open("wb", buffering=0) as stderr_file:
         process = subprocess.Popen(
@@ -232,6 +261,7 @@ def run_supervised(
         job = WindowsJobObject() if os.name == "nt" else None
         if job:
             job.assign(process)
+        report(True)
         if stdin_bytes is not None and process.stdin:
             try:
                 process.stdin.write(stdin_bytes)
@@ -255,11 +285,20 @@ def run_supervised(
                 fp = _workspace_fingerprint(cwd)
                 stdout_state = _file_state(stdout_path)
                 stderr_state = _file_state(stderr_path)
+                changed: list[str] = []
+                if fp != previous_fp:
+                    changed.append("workspace")
+                if stdout_state[0] != previous_stdout[0]:
+                    changed.append("stdout")
+                if stderr_state[0] != previous_stderr[0]:
+                    changed.append("stderr")
                 if fp != previous_fp or stdout_state != previous_stdout or stderr_state != previous_stderr:
                     previous_fp = fp
                     previous_stdout = stdout_state
                     previous_stderr = stderr_state
                     last_activity = now
+                    if changed:
+                        last_activity_kind = "+".join(changed)
                     soft_reported = False
                     if _tail_contains_prompt(stdout_path) or _tail_contains_prompt(stderr_path):
                         marker_seen = True
@@ -277,6 +316,7 @@ def run_supervised(
                     stalled = True
                     terminate_process_tree(process, job)
                     break
+                report(True)
                 time.sleep(max(0.05, poll_seconds))
 
             try:
@@ -289,6 +329,7 @@ def run_supervised(
                 job.close()
 
     duration = time.monotonic() - start
+    report(False, return_code=process.returncode)
     failure_code = None
     if cancelled:
         failure_code = "CANCELLED"

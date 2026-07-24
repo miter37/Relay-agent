@@ -76,6 +76,19 @@ class G0ApiTests(unittest.TestCase):
         self.assertEqual(health["min_gui_version"], "1.1.0")
         self.assertEqual(health["relay_home_id"], relay_home_id(self.home))
 
+    def test_security_api_reads_and_updates_running_daemon(self):
+        _, client, _ = self._start_daemon()
+
+        initial = client.request("GET", "/v1/security")
+        self.assertFalse(initial["full_access_mode"]["codex"])
+
+        updated = client.request("PATCH", "/v1/security/full-access/codex", {"enabled": True})
+
+        self.assertTrue(updated["ok"])
+        self.assertTrue(updated["full_access_mode"]["codex"])
+        self.assertTrue(client.request("GET", "/v1/security")["full_access_mode"]["codex"])
+        self.assertTrue(self.config.get("workers.codex.full_access_mode"))
+
     def test_daemon_shutdown_joins_background_loops(self):
         daemon, client, thread = self._start_daemon()
 

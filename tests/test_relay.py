@@ -142,6 +142,72 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(value["status"], "complete")
         self.assertTrue((Path(result["artifact_path"]) / "manifest.json").is_file())
 
+    def test_target_create_updates_real_folder_and_custom_artifacts(self):
+        self.audit_all(deep=False)
+        target = Path(self.tmp.name) / "requested-target"
+        artifacts = Path(self.tmp.name) / "custom-artifacts"
+        os.environ["RELAY_MOCK_CODEX_BEHAVIOR"] = "target-create"
+
+        result = self.engine.run(
+            JobRequest(
+                task=f"Create a calculator in {target}.",
+                worker="codex",
+                fallback=False,
+                artifact_path=str(artifacts),
+            )
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((target / "calculator.py").read_text(encoding="utf-8"), "print(2 + 2)\n")
+        self.assertEqual((artifacts / "calculator.py").read_text(encoding="utf-8"), "print(2 + 2)\n")
+        self.assertEqual(result["target_path"], str(target.resolve()))
+        self.assertEqual(result["target_changes"]["added"], ["calculator.py"])
+
+    def test_target_modify_applies_delta_and_keeps_artifact_copy(self):
+        self.audit_all(deep=False)
+        target = Path(self.tmp.name) / "existing-project"
+        target.mkdir()
+        (target / "app.py").write_text("print('old')\n", encoding="utf-8")
+        (target / "remove.py").write_text("remove\n", encoding="utf-8")
+        (target / "keep.py").write_text("keep\n", encoding="utf-8")
+        os.environ["RELAY_MOCK_CLAUDE_BEHAVIOR"] = "target-modify"
+
+        result = self.engine.run(
+            JobRequest(task="Improve this project.", worker="claude", fallback=False, target_path=str(target))
+        )
+
+        artifacts = Path(result["artifact_path"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((target / "app.py").read_text(encoding="utf-8"), "print('improved')\n")
+        self.assertEqual((target / "keep.py").read_text(encoding="utf-8"), "keep\n")
+        self.assertFalse((target / "remove.py").exists())
+        self.assertEqual((artifacts / "app.py").read_text(encoding="utf-8"), "print('improved')\n")
+        self.assertFalse((artifacts / "keep.py").exists())
+
+    def test_invalid_result_does_not_apply_staged_target_changes(self):
+        self.audit_all(deep=False)
+        target = Path(self.tmp.name) / "must-stay-absent"
+        os.environ["RELAY_MOCK_CODEX_BEHAVIOR"] = "target-invalid"
+
+        result = self.engine.run(
+            JobRequest(task="Create the requested file.", worker="codex", fallback=False, target_path=str(target))
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(target.exists())
+
+    def test_success_without_requested_target_change_is_rejected(self):
+        self.audit_all(deep=False)
+        target = Path(self.tmp.name) / "ignored-target"
+
+        result = self.engine.run(
+            JobRequest(task="Create the requested file.", worker="codex", fallback=False, target_path=str(target))
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_code"], "TARGET_NOT_MODIFIED")
+        self.assertFalse(target.exists())
+
     def test_fallback_to_codex(self):
         self.audit_all(deep=False)
         os.environ["RELAY_MOCK_CLAUDE_BEHAVIOR"] = "crash"
@@ -224,6 +290,53 @@ class RelayTests(unittest.TestCase):
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn(b"Do not attempt direct filesystem writes for artifacts", prompt)
         self.assertIn(b"valid artifact payload counts as completed work", prompt)
+
+    def test_codex_full_access_command_and_receipt_metadata_match(self):
+        from relay.adapters.base import AdapterContext
+        from relay.adapters.codex import CodexAdapter
+
+        worker_config = self.config.worker("codex")
+        worker_config["full_access_mode"] = True
+        worker_config["command"] = mock_cli("codex")
+        adapter = CodexAdapter(worker_config, self.config.path_value("adapter_spec_root"))
+        workspace = self.home / "workspace" / "codex-full-access"
+        workspace.mkdir(parents=True)
+        ctx = AdapterContext(
+            job_id="command-test",
+            workspace=workspace,
+            request_file=workspace / "request.md",
+            result_file=workspace / "result.json.partial",
+            artifact_dir=workspace / "artifacts",
+            schema_file=workspace / "schema.json",
+            result_format="json",
+            profile="web-research",
+            model=None,
+            config=worker_config,
+        )
+        command, _, _ = adapter.build_command(ctx)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertNotIn("--sandbox", command)
+        self.assertEqual(adapter.permission_mode(), "dangerously-bypass-approvals-and-sandbox")
+        self.assertEqual(adapter.sandbox_mode(), "none")
+
+    def test_permission_error_is_classified_with_settings_guidance(self):
+        from relay.adapters.codex import CodexAdapter
+
+        adapter = CodexAdapter(self.config.worker("codex"), self.config.path_value("adapter_spec_root"))
+        code, retryable = adapter.classify_failure(1, "Access is denied while starting sandbox")
+        self.assertEqual(code, "PERMISSION_BLOCKED")
+        self.assertFalse(retryable)
+        self.assertIn("Settings > General > Codex Full Access Mode", adapter.permission_failure_message("Blocked"))
+
+    def test_engine_surfaces_permission_guidance_for_a_worker_exit(self):
+        self.audit_all(deep=False)
+        os.environ["RELAY_MOCK_CODEX_BEHAVIOR"] = "permission"
+
+        result = self.engine.run(JobRequest(task="permission test", worker="codex", fallback=False))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "PERMISSION_BLOCKED")
+        self.assertIn("Settings > General > Codex Full Access Mode", result["error_message"])
 
     def test_claude_command_strips_unsupported_schema_uri(self):
         from relay.adapters.base import AdapterContext
@@ -592,6 +705,48 @@ class RelayTests(unittest.TestCase):
         # The receipt records permission_mode(); the CLI receives the same value.
         self.assertEqual(command[command.index("--permission-mode") + 1], "acceptEdits")
         self.assertNotIn("bypassPermissions", command)
+
+    def test_claude_full_access_uses_only_the_explicit_bypass_flag(self):
+        from relay.adapters.base import AdapterContext
+        from relay.adapters.claude import ClaudeAdapter
+
+        worker_config = self.config.worker("claude")
+        worker_config["full_access_mode"] = True
+        worker_config["command"] = mock_cli("claude")
+        adapter = ClaudeAdapter(worker_config, self.config.path_value("adapter_spec_root"))
+        workspace = self.home / "workspace" / "claude-full-access"
+        workspace.mkdir(parents=True)
+        schema_file = workspace / "schema.json"
+        schema_file.write_text("{}", encoding="utf-8")
+        ctx = AdapterContext(
+            job_id="claude-full-access-test",
+            workspace=workspace,
+            request_file=workspace / "request.md",
+            result_file=workspace / "result.json.partial",
+            artifact_dir=workspace / "artifacts",
+            schema_file=schema_file,
+            result_format="json",
+            profile="analysis-only",
+            model=None,
+            config=worker_config,
+        )
+        command, _, _ = adapter.build_command(ctx)
+        self.assertIn("--dangerously-skip-permissions", command)
+        self.assertNotIn("--permission-mode", command)
+        self.assertEqual(adapter.permission_mode(), "dangerously-skip-permissions")
+
+    def test_antigravity_full_access_flag_matches_receipt_mode(self):
+        from relay.adapters.antigravity import AntigravityAdapter
+
+        spec_root = self.config.path_value("adapter_spec_root")
+        default_config = self.config.worker("antigravity")
+        default_config["command"] = mock_cli("agy")
+        default_adapter = AntigravityAdapter(default_config, spec_root)
+        self.assertEqual(default_adapter.permission_mode(), "default")
+
+        full_config = dict(default_config, full_access_mode=True)
+        full_adapter = AntigravityAdapter(full_config, spec_root)
+        self.assertEqual(full_adapter.permission_mode(), "dangerously-skip-permissions")
 
     def test_doctor_warns_when_bypassing_without_isolation(self):
         self.audit_all(deep=False)

@@ -1,3 +1,9 @@
+- 2026-07-24 15:45 | Prepared the complete G5 feature set and release notes for the Relay v1.1.0 GitHub release.
+- 2026-07-24 15:42 | Added manual non-interrupting Job diagnostics with persistent Check results in Logs; 247 tests, Ruff, and release build passed.
+- 2026-07-24 15:06 | Added safe real-folder create/edit delivery with artifact copies, path inference, CLI/GUI Working folder controls, conflict protection, 239 tests, and release build.
+- 2026-07-24 14:32 | Preserved history tree expansion across refreshes and hid Windows worker subprocess consoles; 225 tests and release build passed, then restarted daemon/GUI.
+- 2026-07-24 14:22 | Unified Full Access Mode across GUI, CLI, daemon API, and adapters; added permission guidance, tests, release build, and restarted daemon/GUI.
+- 2026-07-24 13:57 | Implemented unified full_access_mode setting for all workers with explicit sandbox/permission error reporting.
 - 2026-07-24 14:00 | Improved New Task explanations/defaults, added collapsible task history and stronger request search, fixed stale Settings navigation, and restarted the latest daemon/GUI.
 - 2026-07-24 13:20 | Added enabled-Agent health reporting, fixed New Task stale-response navigation, enabled completed-task scheduling, and improved task/status actions in the GUI.
 - 2026-07-24 11:24 | Added manual health status and Antigravity verify-and-enable flow; 203 tests pass with release build verified.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import threading
@@ -18,13 +19,26 @@ from .models import JobRequest
 from .process_supervisor import run_supervised
 from .request_builder import build_request_markdown, copy_attachments, write_schema
 from .security import validate_attachment_paths, validate_requested_paths
+from .target_workspace import (
+    TargetWorkspace,
+    apply_delta,
+    calculate_delta,
+    copy_delta_to_artifacts,
+    infer_target_path,
+    prepare_target_workspace,
+    resolve_target_path,
+    target_fingerprint,
+    validate_target_path,
+)
 from .util import (
+    canonical_json,
     ensure_dir,
     is_within,
     json_dump,
     local_date,
     new_job_id,
     safe_resolve,
+    sha256_bytes,
     sha256_file,
     task_hash,
     utc_now,
@@ -70,10 +84,25 @@ class RelayEngine:
         self.agent_registry = AgentRegistry(self.config, self.spec_root)
         self._running_processes: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
+        self._progress: dict[str, dict[str, Any]] = {}
+        self._progress_lock = threading.Lock()
         per_worker = int(self.config.get("max_concurrent_per_worker", 1))
         self._per_worker_limit = per_worker
         self._worker_slots = {name: threading.Semaphore(per_worker) for name in ("claude", "codex", "antigravity")}
         self._worker_slots_lock = threading.Lock()
+
+    def _set_progress(self, job_id: str, **changes: Any) -> None:
+        with self._progress_lock:
+            self._progress[job_id] = {**self._progress.get(job_id, {}), **changes}
+
+    def progress_for_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._progress_lock:
+            value = self._progress.get(job_id)
+            return dict(value) if value else None
+
+    def _clear_progress(self, job_id: str) -> None:
+        with self._progress_lock:
+            self._progress.pop(job_id, None)
 
     def _worker_slot(self, worker: str) -> threading.Semaphore:
         with self._worker_slots_lock:
@@ -160,6 +189,9 @@ class RelayEngine:
     ) -> tuple[dict[str, Any], bool]:
         self._resolve_request_task(request)
         self.config.reload()
+        requested_target = request.target_path or infer_target_path(request.task)
+        target = resolve_target_path(requested_target) if requested_target else None
+        request.target_path = str(target) if target else None
         if schedule_id and request.caller.lower() != "schedule":
             raise RelayError("INVALID_REQUEST", "Only Schedule requests can link a Schedule ID.")
         if request.caller.lower() in {"hermes", "service", "daemon", "schedule"} and not self.config.get(
@@ -171,6 +203,11 @@ class RelayEngine:
                 "After configuring ACL isolation, run: relay config set service_isolation_acknowledged true",
             )
         validate_attachment_paths(self.config, request.caller, request.attachments)
+        if target and request.caller.lower() in {"hermes", "service", "daemon", "schedule"}:
+            raise RelayError(
+                "TARGET_PATH_NOT_ALLOWED",
+                "Working-folder updates are available only for interactive CLI and GUI jobs.",
+            )
         if request.workspace and request.caller.lower() in {"hermes", "service", "daemon", "schedule"}:
             workspace_root = safe_resolve(Path(request.workspace))
             if not is_within(workspace_root, self.config.path_value("workspace_root")):
@@ -181,6 +218,17 @@ class RelayEngine:
         computed_hash = task_hash(
             request.task, request.attachments, request.profile, request.worker, request.result_format
         )
+        if target:
+            validate_target_path(target, self.config.home, ())
+            computed_hash = sha256_bytes(
+                canonical_json(
+                    {
+                        "task_hash": computed_hash,
+                        "target_path": os.path.normcase(str(target)),
+                        "target_state": target_fingerprint(target),
+                    }
+                ).encode("utf-8")
+            )
         if request.request_id:
             existing = self.db.get_by_request_id(request.request_id)
             if existing:
@@ -209,6 +257,8 @@ class RelayEngine:
             artifacts,
             extra_output_roots=[str(schedule_output_root)] if schedule_output_root else (),
         )
+        if target:
+            validate_target_path(target, self.config.home, (output, artifacts))
         fallback = self.config.get("fallback_enabled", True) if request.fallback is None else request.fallback
         title, task_preview = self._job_title_and_preview(request, job_id)
         replayable = bool(self.config.get("store_replayable_requests", True))
@@ -284,7 +334,7 @@ class RelayEngine:
         self.db.add_event(job_id, event)
         return {"ok": True, "job_id": job_id, "status": updated["status"], "changed": True}
 
-    def _prepare_workspace(self, job_id: str, worker: str, request: JobRequest) -> dict[str, Path]:
+    def _prepare_workspace(self, job_id: str, worker: str, request: JobRequest) -> dict[str, Any]:
         workspace_root = (
             safe_resolve(Path(request.workspace)) if request.workspace else self.config.path_value("workspace_root")
         )
@@ -295,11 +345,23 @@ class RelayEngine:
         artifact_dir = ensure_dir(workspace / "artifacts")
         runtime_dir = ensure_dir(workspace / "runtime")
         input_dir = ensure_dir(workspace / "input")
+        target_workspace: TargetWorkspace | None = None
+        if request.target_path:
+            target_workspace = prepare_target_workspace(
+                resolve_target_path(request.target_path),
+                workspace / "target",
+            )
         result_file = output_dir / ("result.json.partial" if request.result_format == "json" else "result.txt.partial")
         schema_file = workspace / "schema.json"
         write_schema(schema_file)
         attachments = copy_attachments(request, input_dir)
-        request_md = build_request_markdown(request, result_file, artifact_dir, attachments)
+        request_md = build_request_markdown(
+            request,
+            result_file,
+            artifact_dir,
+            attachments,
+            target_workspace.working_copy if target_workspace else None,
+        )
         request_file = workspace / "request.md"
         request_file.write_text(request_md, encoding="utf-8", newline="\n")
         json_dump(
@@ -311,6 +373,7 @@ class RelayEngine:
                 "artifact_dir": str(artifact_dir),
                 "profile": request.profile,
                 "attachments": attachments,
+                "target_working_copy": str(target_workspace.working_copy) if target_workspace else None,
             },
         )
         return {
@@ -320,6 +383,7 @@ class RelayEngine:
             "artifacts": artifact_dir,
             "request": request_file,
             "schema": schema_file,
+            "target": target_workspace,
         }
 
     def _cancel_requested(self, job_id: str) -> bool:
@@ -332,11 +396,13 @@ class RelayEngine:
             raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
         request = JobRequest.from_dict(json.loads(job["request_json"]))
         self._resolve_request_task(request)
+        self._set_progress(job_id, stage="preparing", process_alive=None)
         self.db.update_job(job_id, status="PREPARING", started_at=utc_now())
         self.db.add_event(job_id, "JOB_PREPARING")
         chain = self._worker_chain(job, request)
         errors: list[dict[str, Any]] = []
         for index, worker in enumerate(chain):
+            self._set_progress(job_id, stage="preparing", worker=worker, process_alive=None)
             worker_cfg = self.agent_registry.get_worker_config(worker)
             if not worker_cfg.get("enabled", False):
                 err = RelayError("WORKER_DISABLED", f"Worker is disabled: {worker}")
@@ -369,6 +435,8 @@ class RelayEngine:
             )
             try:
                 command, stdin_bytes, env_extra = adapter.build_command(ctx)
+                if paths.get("target"):
+                    env_extra = {**env_extra, "RELAY_TARGET_DIR": str(paths["target"].working_copy)}
             except RelayError as err:
                 errors.append({"worker": worker, "code": err.code, "message": err.message})
                 continue
@@ -389,6 +457,15 @@ class RelayEngine:
             self.db.update_attempt(attempt_id, status="ACTIVE")
             self.db.add_event(job_id, "ATTEMPT_STARTED", {"worker": worker, "attempt": index + 1})
             timeout = request.timeout_seconds or int(self.config.get("timeout_seconds", 1200))
+            self._set_progress(
+                job_id,
+                stage="running",
+                worker=worker,
+                attempt_id=attempt_id,
+                process_alive=None,
+                soft_stall_seconds=int(self.config.get("soft_stall_seconds", 120)),
+                hard_stall_seconds=int(self.config.get("hard_stall_seconds", 300)),
+            )
             slot = self._worker_slot(worker)
             slot.acquire()
             try:
@@ -406,13 +483,27 @@ class RelayEngine:
                     base_env=adapter.subprocess_environment(),
                     cancel_requested=lambda: self._cancel_requested(job_id),
                     event_callback=lambda event, payload: self.db.add_event(job_id, event, payload),
+                    progress_callback=lambda snapshot, current_worker=worker, current_attempt_id=attempt_id: (
+                        self._set_progress(
+                            job_id,
+                            stage="running",
+                            worker=current_worker,
+                            attempt_id=current_attempt_id,
+                            **snapshot,
+                        )
+                    ),
                 )
             finally:
                 slot.release()
             stderr_text = outcome.stderr_path.read_text(encoding="utf-8", errors="replace")
+            permission_error = adapter.has_permission_error(stderr_text)
             if outcome.failure_code:
-                code = outcome.failure_code
-                message = f"{worker} ended with {code} after {outcome.duration_seconds:.1f}s"
+                code = "PERMISSION_BLOCKED" if permission_error else outcome.failure_code
+                message = (
+                    adapter.permission_failure_message(f"{worker} reported an access or sandbox permission error")
+                    if permission_error
+                    else f"{worker} ended with {code} after {outcome.duration_seconds:.1f}s"
+                )
                 self.db.update_attempt(
                     attempt_id,
                     status="TERMINATED",
@@ -426,6 +517,7 @@ class RelayEngine:
                         job_id, status="CANCELLED", error_code=code, error_message=message, completed_at=utc_now()
                     )
                     self.db.scrub_non_replayable(job_id)
+                    self._clear_progress(job_id)
                     return self.receipt(job_id)
                 errors.append({"worker": worker, "code": code, "message": message})
                 if job["fallback_enabled"] and code in TECHNICAL_FALLBACK_CODES:
@@ -433,7 +525,11 @@ class RelayEngine:
                 return self._fail_job(job_id, code, message, errors)
             if outcome.exit_code not in (0, None):
                 code, retryable = adapter.classify_failure(outcome.exit_code, stderr_text)
-                message = f"{worker} exited with code {outcome.exit_code}"
+                message = (
+                    adapter.permission_failure_message(f"{worker} reported an access or sandbox permission error")
+                    if code == "PERMISSION_BLOCKED"
+                    else f"{worker} exited with code {outcome.exit_code}"
+                )
                 self.db.update_attempt(
                     attempt_id,
                     status="FAILED",
@@ -448,6 +544,7 @@ class RelayEngine:
                 return self._fail_job(job_id, code, message, errors)
             try:
                 adapter.normalize_output(ctx, outcome.stdout_path, outcome.stderr_path)
+                self._set_progress(job_id, stage="validating", process_alive=False)
                 self.db.update_job(job_id, status="VALIDATING")
                 if request.result_format == "json":
                     value = validate_json_result(ctx.result_file, int(self.config.get("result_max_bytes")))
@@ -461,6 +558,21 @@ class RelayEngine:
                     materialized_artifacts = materialize_artifact_payloads(
                         value, ctx.artifact_dir, max_artifact_files, max_artifact_bytes
                     )
+                target_workspace = paths.get("target")
+                target_delta = calculate_delta(target_workspace) if target_workspace else None
+                if (
+                    target_workspace
+                    and target_delta
+                    and not target_delta.changed
+                    and not target_delta.deleted
+                    and request.profile != "analysis-only"
+                ):
+                    raise RelayError(
+                        "TARGET_NOT_MODIFIED",
+                        "The Agent did not create or modify anything in the requested Working folder.",
+                    )
+                if target_workspace and target_delta and (target_delta.changed or target_delta.deleted):
+                    copy_delta_to_artifacts(target_workspace, target_delta, ctx.artifact_dir)
                 artifact_records = scan_artifacts(ctx.artifact_dir, max_artifact_files, max_artifact_bytes)
                 if value is not None:
                     value = reconcile_json_artifacts(value, artifact_records)
@@ -471,6 +583,7 @@ class RelayEngine:
                 if result_status == "failed":
                     raise RelayError("PROCESS_CRASHED", f"{worker} returned status=failed", False)
                 self.db.update_job(job_id, status="DELIVERING")
+                self._set_progress(job_id, stage="delivering", process_alive=False)
                 output_path = safe_resolve(Path(job["output_path"]))
                 artifact_path = safe_resolve(Path(job["artifact_path"]))
                 atomic_deliver_pair(
@@ -480,6 +593,8 @@ class RelayEngine:
                     artifact_path,
                     overwrite=request.overwrite,
                 )
+                if target_workspace and target_delta and (target_delta.changed or target_delta.deleted):
+                    apply_delta(target_workspace, target_delta)
                 for item in artifact_records:
                     self.db.add_artifact(
                         job_id,
@@ -502,6 +617,8 @@ class RelayEngine:
                     "result_sha256": sha256_file(output_path),
                     "artifacts_count": len(artifact_records),
                     "materialized_artifacts_count": len(materialized_artifacts),
+                    "target_path": str(target_workspace.target) if target_workspace else None,
+                    "target_changes": target_delta.to_dict() if target_delta else None,
                     "attempted_workers": [e["worker"] for e in errors] + [worker],
                     "content_verified": False,
                     "content_verification_note": "Relay verifies delivery and format, not factual accuracy.",
@@ -527,6 +644,7 @@ class RelayEngine:
                 json_dump(output_path.parent / "relay-receipt.json", receipt)
                 json_dump(artifact_path / "manifest.json", {"job_id": job_id, "artifacts": artifact_records})
                 self.db.scrub_non_replayable(job_id)
+                self._clear_progress(job_id)
                 return receipt
             except RelayError as err:
                 self.db.update_attempt(
@@ -571,6 +689,7 @@ class RelayEngine:
         )
         self.db.add_event(job_id, "JOB_FAILED", receipt)
         self.db.scrub_non_replayable(job_id)
+        self._clear_progress(job_id)
         return receipt
 
     def run(self, request: JobRequest, submitted_via: str | None = None) -> dict[str, Any]:

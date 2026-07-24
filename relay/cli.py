@@ -23,7 +23,7 @@ from .engine import RelayEngine
 from .errors import RelayError
 from .models import JobRequest
 from .rpc import RPCClient
-from .security import security_posture
+from .security import security_posture, set_full_access_mode
 from .util import entrypoint_command, utc_now
 
 COMMANDS = {
@@ -76,6 +76,11 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("--request-id")
     parser.add_argument("--attach", action="append", default=[], dest="attachments")
     parser.add_argument("--workspace")
+    parser.add_argument(
+        "--target",
+        dest="target_path",
+        help="Real folder to create or modify; changed files are also copied to --artifacts",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--force-new", action="store_true")
     parser.add_argument("--model")
@@ -404,6 +409,20 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     security.add_argument("--machine", action="store_true")
+    security.add_argument("--worker", choices=["claude", "codex", "antigravity"], help="Show one worker's mode")
+    full_access = security.add_mutually_exclusive_group()
+    full_access.add_argument(
+        "--enable-full-access",
+        metavar="WORKER",
+        choices=["claude", "codex", "antigravity"],
+        help="Enable that worker's permission/sandbox bypass",
+    )
+    full_access.add_argument(
+        "--disable-full-access",
+        metavar="WORKER",
+        choices=["claude", "codex", "antigravity"],
+        help="Disable that worker's permission/sandbox bypass",
+    )
 
     models = sub.add_parser(
         "models",
@@ -537,6 +556,7 @@ def _request_from_args(args, config: Config) -> JobRequest:
         request_id=args.request_id,
         attachments=args.attachments,
         workspace=args.workspace,
+        target_path=args.target_path,
         overwrite=args.overwrite,
         machine=args.machine,
         force_new=args.force_new,
@@ -1120,7 +1140,42 @@ def main(argv: list[str] | None = None) -> int:
                     machine,
                 )
         elif args.command == "security":
-            _emit({"ok": True, **security_posture(config)}, machine)
+            action_worker = args.enable_full_access or args.disable_full_access
+            if action_worker:
+                enabled = bool(args.enable_full_access)
+                client = RPCClient(config)
+                if client.health():
+                    value = client.request(
+                        "PATCH",
+                        f"/v1/security/full-access/{action_worker}",
+                        {"enabled": enabled},
+                    )
+                    value["source"] = "daemon"
+                else:
+                    value = {
+                        "ok": True,
+                        "full_access_mode": set_full_access_mode(config, action_worker, enabled),
+                        "source": "config",
+                    }
+                _emit(
+                    {
+                        **value,
+                        "worker": action_worker,
+                        "enabled": value.get("full_access_mode", {}).get(action_worker, enabled),
+                    },
+                    machine,
+                )
+            else:
+                client = RPCClient(config)
+                value = (
+                    client.request("GET", "/v1/security")
+                    if client.health()
+                    else {"ok": True, **security_posture(config)}
+                )
+                if args.worker:
+                    value["selected_worker"] = args.worker
+                    value["selected_enabled"] = bool(value.get("full_access_mode", {}).get(args.worker, False))
+                _emit(value, machine)
         elif args.command == "models":
             from .model_discovery import get_model_catalog
 

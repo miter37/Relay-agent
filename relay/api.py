@@ -8,6 +8,7 @@ from typing import Any
 
 from .db import Database
 from .errors import RelayError
+from .progress import diagnose_progress
 from .schedules.snapshots import validate_source_job
 
 RESULT_STATUS = {
@@ -136,6 +137,7 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             "profile",
             "timeout_seconds",
             "workspace",
+            "target_path",
             "overwrite",
             "force_new",
             "model",
@@ -162,6 +164,15 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
         schedule_reason = "SCHEDULE_NOT_ELIGIBLE"
     detail["actions"] = {
         "can_cancel": status in {"QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING"},
+        "can_check_progress": status
+        in {
+            "QUEUED",
+            "PREPARING",
+            "RUNNING",
+            "VALIDATING",
+            "DELIVERING",
+            "CANCEL_REQUESTED",
+        },
         "can_rerun": (
             status in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}
             and bool(raw.get("replayable", 1))
@@ -215,6 +226,19 @@ def job_events(db: Database, job_id: str) -> dict[str, Any]:
     if not db.get_job(job_id):
         raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
     return {"ok": True, "job_id": job_id, "events": db.events_for_job(job_id)}
+
+
+def check_job_progress(engine, job_id: str) -> dict[str, Any]:
+    job = engine.db.get_job(job_id)
+    if not job:
+        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+    result = diagnose_progress(
+        job,
+        engine.progress_for_job(job_id),
+        engine.db.attempts_for_job(job_id),
+    )
+    engine.db.add_event(job_id, "PROGRESS_CHECKED", result)
+    return result
 
 
 def job_logs(

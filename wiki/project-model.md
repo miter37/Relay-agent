@@ -14,6 +14,7 @@
 - Schedules snapshot replayable Job inputs and create ordinary linked Jobs for each occurrence.
 - SQLite stores Jobs, attempts, events, artifacts, Schedules, Schedule runs, and capability audit history.
 - `/health` includes manual-check results for all enabled Agents; the GUI presents unhealthy Agent IDs in its header badge.
+- Running Job diagnostics use in-memory supervisor telemetry; manual Check results are persisted as `PROGRESS_CHECKED` events and rendered separately from Agent stdout/stderr.
 
 ## Data flow
 
@@ -28,3 +29,7 @@ result and artifact validation → SQLite history and delivered outputs
 ```
 
 The synchronous CLI path uses the same engine and validation contracts without requiring the daemon.
+
+For interactive file-writing Jobs, `target_path` identifies the real Working folder while `artifact_path` remains
+the Relay-managed copy destination. Agents edit an isolated `target/` copy; Relay applies its verified delta to the
+real folder and copies changed/created files to artifacts. Target-writing Jobs are not Schedule-eligible.

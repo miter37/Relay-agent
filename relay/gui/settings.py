@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget
 
 from .agent_apps import AgentAppListView
 
@@ -9,6 +9,7 @@ from .agent_apps import AgentAppListView
 class SettingsView(QWidget):
     autostart_changed = Signal(bool)
     antigravity_activate_requested = Signal()
+    full_access_mode_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,7 +25,25 @@ class SettingsView(QWidget):
         self.autostart_button = QPushButton("Enable auto-start")
         self.autostart_button.clicked.connect(self._toggle_autostart)
         general_layout.addWidget(self.autostart_button)
-        general_layout.addWidget(QLabel("Antigravity safety"))
+
+        general_layout.addWidget(QLabel("<br><b>Worker Security Bypasses</b>"))
+        general_layout.addWidget(
+            QLabel(
+                "<i>These switches change the running daemon immediately. They disable permission checks or "
+                "sandbox restrictions for the selected worker.</i>"
+            )
+        )
+        self.codex_full_cb = QCheckBox("Codex: Full Access Mode (bypass sandbox and approvals)")
+        self.codex_full_cb.toggled.connect(lambda checked: self.full_access_mode_changed.emit("codex", checked))
+        general_layout.addWidget(self.codex_full_cb)
+        self.claude_full_cb = QCheckBox("Claude: Full Access Mode (skip permissions)")
+        self.claude_full_cb.toggled.connect(lambda checked: self.full_access_mode_changed.emit("claude", checked))
+        general_layout.addWidget(self.claude_full_cb)
+        self.agy_full_cb = QCheckBox("Antigravity: Full Access Mode (skip permissions)")
+        self.agy_full_cb.toggled.connect(lambda checked: self.full_access_mode_changed.emit("antigravity", checked))
+        general_layout.addWidget(self.agy_full_cb)
+
+        general_layout.addWidget(QLabel("<br><b>Antigravity safety</b>"))
         self.antigravity_status = QLabel("Antigravity status unavailable")
         self.antigravity_status.setWordWrap(True)
         general_layout.addWidget(self.antigravity_status)
@@ -41,6 +60,22 @@ class SettingsView(QWidget):
 
     def set_agent_apps(self, agents: list[dict]) -> None:
         self.agent_apps_view.set_agents(agents)
+
+    def set_full_access_states(self, codex: bool, claude: bool, agy: bool) -> None:
+        for worker, enabled in (("codex", codex), ("claude", claude), ("antigravity", agy)):
+            self.set_full_access_state(worker, enabled)
+
+    def set_full_access_state(self, worker: str, enabled: bool) -> None:
+        checkbox = {
+            "codex": self.codex_full_cb,
+            "claude": self.claude_full_cb,
+            "antigravity": self.agy_full_cb,
+        }.get(worker)
+        if checkbox is None:
+            return
+        checkbox.blockSignals(True)
+        checkbox.setChecked(bool(enabled))
+        checkbox.blockSignals(False)
 
     def set_autostart_status(self, status: dict) -> None:
         self._enabled = bool(status.get("enabled"))

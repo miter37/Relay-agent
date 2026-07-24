@@ -73,9 +73,8 @@ class ClaudeAdapter(Adapter):
         )
 
     def permission_mode(self) -> str:
-        # Operators can tighten this; the default stays as-is for compatibility.
-        # build_command() passes this same value, so the receipt always records
-        # the mode the CLI actually ran under.
+        if self.full_access_mode_enabled():
+            return "dangerously-skip-permissions"
         return str(self.worker_config.get("permission_mode") or "bypassPermissions")
 
     def build_command(self, ctx: AdapterContext) -> tuple[list[str], bytes | None, dict[str, str]]:
@@ -85,20 +84,22 @@ class ClaudeAdapter(Adapter):
         prompt = (
             "Read the UTF-8 file request.md in the current working directory. "
             "Complete the task non-interactively. Return only the final result matching the requested format. "
-            "Create any requested artifacts only in the artifacts directory."
+            "Follow request.md for target/ edits; create other requested artifacts only in the artifacts directory."
         )
         args = [
             exe,
             "-p",
             prompt,
-            "--permission-mode",
-            self.permission_mode(),
             "--output-format",
             "json" if ctx.result_format == "json" else "text",
             "--no-session-persistence",
             "--max-turns",
             str(int(ctx.config.get("max_turns", 30))),
         ]
+        if self.full_access_mode_enabled():
+            args.append("--dangerously-skip-permissions")
+        else:
+            args[3:3] = ["--permission-mode", self.permission_mode()]
         model = ctx.model or ctx.config.get("default_model")
         if model:
             args.extend(["--model", str(model)])
@@ -130,6 +131,16 @@ class ClaudeAdapter(Adapter):
         if ctx.result_file.exists() and ctx.result_file.stat().st_size:
             return
         raw = stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+
+        if stderr_path.exists():
+            stderr_raw = stderr_path.read_text(encoding="utf-8", errors="replace")
+            if self.has_permission_error(stderr_raw) and not self.full_access_mode_enabled():
+                raise RelayError(
+                    "PERMISSION_BLOCKED",
+                    self.permission_failure_message("Claude reported an access or sandbox permission error"),
+                    False,
+                )
+
         if not raw:
             raise RelayError("EMPTY_OUTPUT", "Claude completed without a result file or stdout", True)
         if ctx.result_format == "txt":

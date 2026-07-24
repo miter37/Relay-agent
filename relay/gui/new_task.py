@@ -104,6 +104,20 @@ class NewTaskView(QWidget):
             self._help_label("Files folder", "Optional folder where generated artifact files are delivered."),
             self.artifact_edit,
         )
+        self.target_edit = QLineEdit()
+        target_row = QHBoxLayout()
+        target_row.addWidget(self.target_edit)
+        target_button = QPushButton("Browse")
+        target_button.clicked.connect(self._choose_target)
+        target_row.addWidget(target_button)
+        advanced_form.addRow(
+            self._help_label(
+                "Working folder",
+                "The real folder the Agent must create or modify. Changed files are also copied to Files folder. "
+                "Leave blank to detect one unambiguous absolute path from the task.",
+            ),
+            target_row,
+        )
         self.request_id_edit = QLineEdit()
         advanced_form.addRow(
             self._help_label(
@@ -169,6 +183,11 @@ class NewTaskView(QWidget):
             if not any(self.attachment_list.item(i).text() == path for i in range(self.attachment_list.count())):
                 self.attachment_list.addItem(path)
 
+    def _choose_target(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Choose working folder")
+        if path:
+            self.target_edit.setText(path)
+
     def payload(self) -> dict:
         payload = {
             "task": self.task_edit.toPlainText(),
@@ -179,6 +198,7 @@ class NewTaskView(QWidget):
             "result_format": self.format_combo.currentText(),
             "output_path": self.output_edit.text().strip() or None,
             "artifact_path": self.artifact_edit.text().strip() or None,
+            "target_path": self.target_edit.text().strip() or None,
             "profile": self.profile_combo.currentText().strip() or "web-research",
             "timeout_seconds": self.timeout_spin.value(),
             "request_id": self.request_id_edit.text().strip() or None,
@@ -196,6 +216,7 @@ class NewTaskView(QWidget):
             self.task_file_edit,
             self.output_edit,
             self.artifact_edit,
+            self.target_edit,
             self.request_id_edit,
             self.model_edit,
         ):

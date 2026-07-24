@@ -9,6 +9,40 @@ from .config import Config
 from .errors import RelayError
 from .util import is_within, safe_resolve
 
+FULL_ACCESS_WORKERS = ("codex", "claude", "antigravity")
+
+
+def full_access_settings(config: Config) -> dict[str, bool]:
+    """Return the effective persisted bypass state for each built-in worker."""
+    legacy_keys = {
+        "codex": "unsafe_yolo",
+        "antigravity": "dangerously_skip_permissions",
+    }
+    result = {}
+    for worker in FULL_ACCESS_WORKERS:
+        enabled = bool(config.get(f"workers.{worker}.full_access_mode", False))
+        legacy_key = legacy_keys.get(worker)
+        if legacy_key:
+            enabled = enabled or bool(config.get(f"workers.{worker}.{legacy_key}", False))
+        result[worker] = enabled
+    return result
+
+
+def set_full_access_mode(config: Config, worker: str, enabled: bool) -> dict[str, bool]:
+    if worker not in FULL_ACCESS_WORKERS:
+        raise RelayError("INVALID_REQUEST", f"Unsupported worker: {worker}")
+    if not isinstance(enabled, bool):
+        raise RelayError("INVALID_REQUEST", "enabled must be a boolean")
+    worker_config = config.data.setdefault("workers", {}).setdefault(worker, {})
+    worker_config["full_access_mode"] = enabled
+    # Old config files may still contain the pre-G5 bypass keys. Keep a single
+    # canonical switch so turning this off cannot leave an old bypass active.
+    legacy_key = {"codex": "unsafe_yolo", "antigravity": "dangerously_skip_permissions"}.get(worker)
+    if legacy_key:
+        worker_config[legacy_key] = False
+    config.save()
+    return full_access_settings(config)
+
 
 def _allowed(path: Path, roots: Iterable[str]) -> bool:
     return any(is_within(path, Path(root)) for root in roots)
@@ -60,6 +94,7 @@ def security_posture(config: Config) -> dict:
         "allowed_input_roots": config.get("allowed_input_roots", []),
         "allowed_output_roots": config.get("allowed_output_roots", []),
         "allowed_artifact_roots": config.get("allowed_artifact_roots", []),
+        "full_access_mode": full_access_settings(config),
         "warning": (
             "Unattended provider modes can execute powerful tools. Run Hermes workloads under a dedicated "
             "low-privilege OS account with filesystem access limited to Relay roots. Use NTFS ACLs on Windows "
