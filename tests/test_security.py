@@ -7,10 +7,27 @@ from unittest.mock import Mock
 
 from relay.config import Config
 from relay.models import AdapterSpec
-from relay.security import activate_antigravity
+from relay.security import activate_antigravity, enabled_worker_health
 
 
 class SecurityTests(unittest.TestCase):
+    def test_enabled_worker_health_reports_all_enabled_agents(self):
+        healthy_adapter = Mock()
+        unhealthy_adapter = Mock()
+        unhealthy_adapter.require_verified.side_effect = Exception("audit missing")
+        engine = Mock()
+        engine.agent_registry.list_enabled_agents.return_value = [
+            {"agent_id": "codex"},
+            {"agent_id": "claude"},
+        ]
+        engine.agent_registry.get_adapter.side_effect = [healthy_adapter, unhealthy_adapter]
+
+        report = enabled_worker_health(engine)
+
+        self.assertEqual(report["status"], "unhealthy")
+        self.assertEqual(report["healthy"], ["codex"])
+        self.assertEqual(report["unhealthy"][0]["agent_id"], "claude")
+
     def test_antigravity_activation_saves_verified_and_enabled_together(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(Path(directory) / "relay-home")

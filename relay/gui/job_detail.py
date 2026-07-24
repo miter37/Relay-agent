@@ -24,7 +24,6 @@ class JobDetailView(QWidget):
     rerun_requested = Signal(str)
     schedule_requested = Signal(str)
     tab_requested = Signal(str)
-    open_result_requested = Signal(str)
     open_folder_requested = Signal(str)
     open_log_requested = Signal(str)
     log_options_changed = Signal()
@@ -50,9 +49,9 @@ class JobDetailView(QWidget):
         self.schedule_button = QPushButton("Schedule")
         self.schedule_button.clicked.connect(self._schedule)
         header.addWidget(self.schedule_button)
-        self.open_result_button = QPushButton("Open result")
-        self.open_result_button.clicked.connect(self._open_result)
-        header.addWidget(self.open_result_button)
+        self.copy_task_button = QPushButton("Copy task")
+        self.copy_task_button.clicked.connect(self._copy_task)
+        header.addWidget(self.copy_task_button)
         self.open_folder_button = QPushButton("Open folder")
         self.open_folder_button.clicked.connect(self._open_folder)
         header.addWidget(self.open_folder_button)
@@ -104,6 +103,7 @@ class JobDetailView(QWidget):
         self.tabs.currentChanged.connect(lambda index: self.tab_requested.emit(self.tabs.tabText(index)))
         layout.addWidget(self.tabs, 1)
         self.answer_text = ""
+        self.task_text = ""
         self.set_answer(None)
 
     def set_job(self, job: dict) -> None:
@@ -113,12 +113,18 @@ class JobDetailView(QWidget):
             self.set_content("Result", "")
         self.job_id = job_id
         self.title_label.setText(str(job.get("title") or self.job_id or "Job"))
-        self.status_label.setText(str(job.get("status") or ""))
+        status = str(job.get("status") or "UNKNOWN")
+        self.status_label.setText(self._status_text(status))
+        self.status_label.setStyleSheet(self._status_style(status))
         actions = job.get("actions") or {}
         self.cancel_button.setEnabled(bool(actions.get("can_cancel")))
         self.rerun_button.setEnabled(bool(actions.get("can_rerun")))
         self.schedule_button.setEnabled(bool(actions.get("can_schedule")))
-        self.open_result_button.setEnabled(bool(actions.get("can_open_result")))
+        self.schedule_button.setToolTip(
+            "Service isolation must be acknowledged before saving a schedule."
+            if actions.get("schedule_requires_isolation")
+            else "Schedule this completed task"
+        )
         self.open_folder_button.setEnabled(bool(actions.get("can_open_folder")))
         self.attempt_combo.clear()
         for attempt in job.get("attempts") or []:
@@ -128,6 +134,7 @@ class JobDetailView(QWidget):
         self.open_log_button.setEnabled(self.attempt_combo.count() > 0)
         fields = (
             ("Status", job.get("status")),
+            ("Registered name", job.get("title")),
             ("Requested agent", job.get("requested_worker")),
             ("Actual agent", job.get("actual_worker") or job.get("requested_worker")),
             ("Model", (job.get("request") or {}).get("model") or job.get("model")),
@@ -140,17 +147,21 @@ class JobDetailView(QWidget):
             ("Files folder", job.get("artifact_path")),
             ("Job ID", job.get("job_id")),
         )
+        request = job.get("request") or {}
+        task_text = str(request.get("task") or job.get("task_text") or job.get("task_preview") or "").strip()
+        self.task_text = task_text
+        self.copy_task_button.setEnabled(bool(task_text) and bool(actions.get("can_copy", True)))
+        request_preview = job.get("task_preview") or task_text
         self.set_content(
             "Overview",
-            "<table>{}</table>".format(
+            "<table>{}</table>{}".format(
                 "".join(
                     f"<tr><td><b>{escape(str(key))}</b></td><td>{escape(str(value or '—'))}</td></tr>"
                     for key, value in fields
-                )
+                ),
+                f"<p><b>Requested task</b></p><pre>{escape(str(request_preview or 'Task details are unavailable.'))}</pre>",
             ),
         )
-        request = job.get("request") or {}
-        task_text = request.get("task") or job.get("task_text") or job.get("task_preview")
         self.set_content("Task", escape(str(task_text or "Task details are hidden by your history settings.")))
         self.set_content("Progress", self._format_json(job.get("attempts", [])))
         self.set_content("Events", self._format_json(job.get("events", [])))
@@ -187,10 +198,6 @@ class JobDetailView(QWidget):
         if self.job_id:
             self.schedule_requested.emit(self.job_id)
 
-    def _open_result(self) -> None:
-        if self.job_id:
-            self.open_result_requested.emit(self.job_id)
-
     def _open_folder(self) -> None:
         if self.job_id:
             self.open_folder_requested.emit(self.job_id)
@@ -202,6 +209,33 @@ class JobDetailView(QWidget):
     def _copy_answer(self) -> None:
         if self.answer_text:
             QApplication.clipboard().setText(self.answer_text)
+
+    def _copy_task(self) -> None:
+        if self.task_text:
+            QApplication.clipboard().setText(self.task_text)
+
+    @staticmethod
+    def _status_text(status: str) -> str:
+        return {
+            "COMPLETED": "✓ COMPLETED",
+            "PARTIAL": "◐ PARTIAL",
+            "FAILED": "× FAILED",
+            "CANCELLED": "— CANCELLED",
+        }.get(status, f"● {status}")
+
+    @staticmethod
+    def _status_style(status: str) -> str:
+        colors = {
+            "COMPLETED": ("#166534", "#DCFCE7", "#86EFAC"),
+            "PARTIAL": ("#92400E", "#FEF3C7", "#FCD34D"),
+            "FAILED": ("#991B1B", "#FEE2E2", "#FCA5A5"),
+            "CANCELLED": ("#475569", "#F1F5F9", "#CBD5E1"),
+        }
+        foreground, background, border = colors.get(status, ("#1D4ED8", "#DBEAFE", "#93C5FD"))
+        return (
+            f"QLabel {{ color: {foreground}; background: {background}; border: 1px solid {border}; "
+            "border-radius: 10px; padding: 5px 10px; font-size: 13px; font-weight: 800; }"
+        )
 
     def selected_attempt(self) -> dict | None:
         attempt_id = self.attempt_combo.currentData()

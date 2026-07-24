@@ -13,6 +13,7 @@
 - Agent App manifests live under `Relay Home/config/agent-apps/`; capability specs bind executable version and definition hash.
 - Schedules snapshot replayable Job inputs and create ordinary linked Jobs for each occurrence.
 - SQLite stores Jobs, attempts, events, artifacts, Schedules, Schedule runs, and capability audit history.
+- `/health` includes manual-check results for all enabled Agents; the GUI presents unhealthy Agent IDs in its header badge.
 
 ## Data flow
 

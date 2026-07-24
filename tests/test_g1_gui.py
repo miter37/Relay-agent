@@ -62,6 +62,20 @@ class G1GuiTests(unittest.TestCase):
         self.assertIn("Daemon 1.1.0", self.window.health_label.toolTip())
         self.assertIn("API schema 5", self.window.health_label.toolTip())
 
+    def test_unhealthy_enabled_engines_are_named_instead_of_marked_healthy(self):
+        self.window._set_connection(
+            "normal",
+            health={
+                "worker_health": {
+                    "status": "unhealthy",
+                    "unhealthy": [{"agent_id": "claude", "code": "WORKER_UNVERIFIED"}],
+                }
+            },
+        )
+
+        self.assertEqual(self.window.health_label.text(), "Unhealthy: claude")
+        self.assertIn("claude: WORKER_UNVERIFIED", self.window.health_label.toolTip())
+
     def test_finished_filter_and_status_rendering(self):
         self.window.current_mode = "normal"
         self.window.jobs = {
@@ -100,6 +114,16 @@ class G1GuiTests(unittest.TestCase):
         self.window._handle_response(1, {"job_id": "job-1", "status": "COMPLETED"}, None)
 
         self.assertIsNone(self.window.current_detail)
+
+    def test_new_task_ignores_stale_detail_response(self):
+        self.window.selected_job_id = "job-1"
+        self.window.detail_view_mode = "job"
+        self.window._show_new_task()
+        self.window.pending[1] = ("detail", "job-1")
+
+        self.window._handle_response(1, {"job_id": "job-1", "status": "COMPLETED"}, None)
+
+        self.assertIs(self.window.detail_stack.currentWidget(), self.window.new_task_view)
 
     def test_result_response_populates_answer_and_raw_result_tabs(self):
         self.window.selected_job_id = "job-1"

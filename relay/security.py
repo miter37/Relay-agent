@@ -68,6 +68,30 @@ def security_posture(config: Config) -> dict:
     }
 
 
+def enabled_worker_health(engine) -> dict[str, Any]:
+    """Report the current verification state of every enabled Agent."""
+    healthy: list[str] = []
+    unhealthy: list[dict[str, str]] = []
+    for definition in engine.agent_registry.list_enabled_agents():
+        agent_id = str(definition.get("agent_id") or "")
+        if not agent_id:
+            continue
+        try:
+            engine.agent_registry.get_adapter(agent_id).require_verified()
+        except RelayError as exc:
+            unhealthy.append({"agent_id": agent_id, "code": exc.code, "message": exc.message})
+        except Exception as exc:  # Health reporting must include a broken adapter instead of failing whole health.
+            unhealthy.append({"agent_id": agent_id, "code": "HEALTH_CHECK_FAILED", "message": str(exc)})
+        else:
+            healthy.append(agent_id)
+    return {
+        "status": "healthy" if healthy and not unhealthy else "unhealthy" if unhealthy else "no-active-engines",
+        "enabled": [*healthy, *(item["agent_id"] for item in unhealthy)],
+        "healthy": healthy,
+        "unhealthy": unhealthy,
+    }
+
+
 def antigravity_setup(config: Config, engine) -> dict[str, Any]:
     adapter = engine.agent_registry.get_adapter("antigravity")
     spec = adapter.load_spec()

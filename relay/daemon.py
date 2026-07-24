@@ -23,7 +23,7 @@ from .models import JobRequest
 from .schedules.retention import ScheduleRetentionManager
 from .schedules.runtime import ScheduleRuntime
 from .schedules.service import ScheduleService
-from .security import activate_antigravity, antigravity_setup
+from .security import activate_antigravity, antigravity_setup, enabled_worker_health
 from .util import ensure_dir, json_dump, random_token, utc_now
 
 
@@ -185,6 +185,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     "started_at": self.daemon.started_at,
                     "cleanup": self.daemon.maintenance.manager.status(),
                     "schedule_retention": self.daemon.maintenance.schedule_manager.status(),
+                    "worker_health": enabled_worker_health(self.daemon.engine),
                     "daemon_version": __version__,
                     "api_versions": ["v1"],
                     "api_schema_revision": 5,

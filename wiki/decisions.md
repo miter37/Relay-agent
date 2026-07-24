@@ -8,6 +8,8 @@
 - **GUI pre-save testing is non-persistent.** A tested definition receives a short-lived one-use token instead of creating a cancellable ghost Agent.
 - **Custom Agent environments are allowlisted.** Operational variables and manifest-declared names are inherited; secret values are never stored in manifests.
 - **Schedules produce ordinary Jobs.** Schedule lifecycle data remains separate while history and outputs survive Schedule deletion.
+- **Schedule eligibility is separate from schedule permission.** A successful replayable Job may open the Schedule editor; saving still requires service-isolation acknowledgement.
+- **GUI health is user-triggered.** Health is checked at startup and by an explicit refresh action, not on a continuous timer.
 
 ## Superseded
 

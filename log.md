@@ -1,3 +1,4 @@
+- 2026-07-24 13:20 | Added enabled-Agent health reporting, fixed New Task stale-response navigation, enabled completed-task scheduling, and improved task/status actions in the GUI.
 - 2026-07-24 11:24 | Added manual health status and Antigravity verify-and-enable flow; 203 tests pass with release build verified.
 - 2026-07-24 11:06 | Fixed live Job polling and CP949 JSON output; added a Markdown Answer tab with copy support; 197 tests pass.
 - 2026-07-24 10:33 | Established the fixed project-memory structure and documented the current Relay v1.1.0/G5 state.

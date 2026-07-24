@@ -111,6 +111,15 @@ def _load_request(job: dict[str, Any]) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _task_preview(value: Any) -> str | None:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return None
+    if len(text) <= 200:
+        return text
+    return f"{text[:100]} … {text[-100:]}"
+
+
 def job_detail(engine, job_id: str) -> dict[str, Any]:
     raw = engine.db.get_job(job_id)
     if not raw:
@@ -139,18 +148,16 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             if key in request:
                 safe_request[key] = request[key]
     detail["request"] = safe_request
+    detail["task_preview"] = _task_preview(request.get("task") or raw.get("task_text") or raw.get("task_preview"))
     status = raw.get("status")
     can_schedule = False
     schedule_reason: str | None = None
     if status == "COMPLETED" and raw.get("result_status") == "complete":
-        if not engine.config.get("service_isolation_acknowledged", False):
-            schedule_reason = "PERMISSION_BLOCKED"
-        else:
-            try:
-                validate_source_job(raw, engine.agent_registry)
-                can_schedule = True
-            except RelayError as exc:
-                schedule_reason = exc.code
+        try:
+            validate_source_job(raw, engine.agent_registry)
+            can_schedule = True
+        except RelayError as exc:
+            schedule_reason = exc.code
     else:
         schedule_reason = "SCHEDULE_NOT_ELIGIBLE"
     detail["actions"] = {
@@ -163,6 +170,7 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
         "can_copy": bool(raw.get("replayable", 1)) or bool(detail.get("task_text") or detail.get("task_preview")),
         "can_schedule": can_schedule,
         "schedule_reason": schedule_reason,
+        "schedule_requires_isolation": not bool(engine.config.get("service_isolation_acknowledged", False)),
         "can_open_result": bool(detail.get("output_path") and Path(detail["output_path"]).is_file()),
         "can_open_folder": bool(detail.get("artifact_path") and Path(detail["artifact_path"]).is_dir()),
     }

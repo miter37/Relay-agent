@@ -6,7 +6,7 @@ from html import escape
 from urllib.parse import urlencode
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self.finished_cursor: str | None = None
         self.selected_job_id: str | None = None
         self.current_detail: dict | None = None
+        self.detail_view_mode = "empty"
         self.log_attempt_id: int | None = None
         self.log_offset: int | None = None
         self.health_check_request_id: int | None = None
@@ -102,6 +103,12 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.health_time_label)
         title_layout.addWidget(self.health_refresh_button)
         self.new_task_button = QPushButton("+ New Task")
+        self.new_task_button.setStyleSheet(
+            "QPushButton { background: #2563EB; color: white; border: 0; border-radius: 7px; "
+            "padding: 8px 16px; font-weight: 700; }"
+            "QPushButton:hover { background: #1D4ED8; }"
+            "QPushButton:disabled { background: #93C5FD; color: #EFF6FF; }"
+        )
         self.new_task_button.clicked.connect(self._show_new_task)
         title_layout.addWidget(self.new_task_button)
         header_layout.addWidget(title_row)
@@ -159,7 +166,6 @@ class MainWindow(QMainWindow):
         self.job_detail_view.rerun_requested.connect(self._rerun_job)
         self.job_detail_view.schedule_requested.connect(self._schedule_job)
         self.job_detail_view.tab_requested.connect(self._detail_tab_requested)
-        self.job_detail_view.open_result_requested.connect(self._open_result)
         self.job_detail_view.open_folder_requested.connect(self._open_folder)
         self.job_detail_view.open_log_requested.connect(self._open_log)
         self.job_detail_view.log_options_changed.connect(self._log_options_changed)
@@ -340,6 +346,9 @@ class MainWindow(QMainWindow):
         self.pending[self.client.post(path, payload, timeout_ms=timeout_ms)] = kind
 
     def _show_new_task(self) -> None:
+        self.selected_job_id = None
+        self.current_detail = None
+        self.detail_view_mode = "new_task"
         self.detail_stack.setCurrentWidget(self.new_task_view)
 
     def _create_task(self, payload: dict) -> None:
@@ -571,11 +580,11 @@ class MainWindow(QMainWindow):
             self._open_agent_app_wizard(wizard)
             return
         if isinstance(kind, tuple) and kind[0] == "detail":
-            if self.selected_job_id == kind[1]:
+            if self.detail_view_mode != "new_task" and self.selected_job_id == kind[1]:
                 self._show_detail(payload)
             return
         if isinstance(kind, tuple) and kind[0] == "result":
-            if self.selected_job_id == kind[1]:
+            if self.detail_view_mode != "new_task" and self.selected_job_id == kind[1]:
                 self.job_detail_view.set_content("Result", self._format_payload(payload))
                 data = payload.get("data")
                 self.job_detail_view.set_answer(data.get("answer") if isinstance(data, dict) else None)
@@ -696,6 +705,7 @@ class MainWindow(QMainWindow):
             job_id = payload.get("job_id")
             if job_id:
                 self.selected_job_id = job_id
+                self.detail_view_mode = "job"
                 self._request(("detail", job_id), f"/v1/jobs/{job_id}")
             self._refresh_active()
             self._refresh_finished()
@@ -741,10 +751,19 @@ class MainWindow(QMainWindow):
             self._set_health_badge("Health: Checking…", "#FEF3C7", "#92400E", reason)
         elif mode == "normal":
             warning = self._health_warning(health)
+            worker_health = (health or {}).get("worker_health") or {}
+            if worker_health.get("status") == "unhealthy":
+                unhealthy = ", ".join(str(item.get("agent_id")) for item in worker_health.get("unhealthy", []))
+                label = f"Unhealthy: {unhealthy or 'engine'}"
+            elif worker_health.get("status") == "no-active-engines":
+                label = "Health: No active engines"
+            else:
+                label = "Health: Healthy"
+            badge_text = label if worker_health.get("status") == "unhealthy" or not warning else "Health: Attention"
             self._set_health_badge(
-                "Health: Attention" if warning else "Health: Healthy",
-                "#FEF3C7" if warning else "#DCFCE7",
-                "#92400E" if warning else "#166534",
+                badge_text,
+                "#FEE2E2" if worker_health.get("status") == "unhealthy" else "#FEF3C7" if warning else "#DCFCE7",
+                "#991B1B" if worker_health.get("status") == "unhealthy" else "#92400E" if warning else "#166534",
                 warning or self._health_tooltip(health),
             )
         elif mode == "read-only":
@@ -765,7 +784,8 @@ class MainWindow(QMainWindow):
         self.daemon_label.setText(text)
         self.daemon_label.setStyleSheet(
             f"QLabel {{ background: {background}; color: {foreground}; "
-            "border-radius: 10px; padding: 3px 9px; font-weight: 600; }"
+            "border: 1px solid rgba(0,0,0,0.12); border-radius: 10px; padding: 5px 11px; "
+            "font-size: 12px; font-weight: 800; }"
         )
         self.daemon_label.setToolTip(tooltip or text)
 
@@ -773,6 +793,13 @@ class MainWindow(QMainWindow):
     def _health_warning(health: dict | None) -> str | None:
         if not health:
             return None
+        worker_health = health.get("worker_health") or {}
+        if worker_health.get("status") == "unhealthy":
+            details = [
+                f"{item.get('agent_id')}: {item.get('code') or 'unhealthy'}"
+                for item in worker_health.get("unhealthy", [])
+            ]
+            return "Unhealthy engines: " + ", ".join(details)
         for name in ("cleanup", "schedule_retention"):
             last_report = (health.get(name) or {}).get("last_report")
             if isinstance(last_report, dict) and (last_report.get("ok") is False or last_report.get("errors")):
@@ -837,9 +864,21 @@ class MainWindow(QMainWindow):
                     self.job_list.addItem(date_item)
                 for job in date_rows:
                     title = job.get("title") or job.get("job_id", "Job")[:8]
-                    item = QListWidgetItem(f"{self._status_icon(job.get('status'))} {title}")
+                    status = str(job.get("status") or "UNKNOWN")
+                    status_text = status.title()
+                    item = QListWidgetItem(f"{self._status_icon(status)} {status_text} · {title}")
                     item.setData(Qt.UserRole, job.get("job_id"))
                     item.setToolTip(job.get("task_preview") or job.get("job_id", ""))
+                    colors = {
+                        "COMPLETED": ("#166534", "#F0FDF4"),
+                        "PARTIAL": ("#92400E", "#FFFBEB"),
+                        "FAILED": ("#991B1B", "#FEF2F2"),
+                        "CANCELLED": ("#475569", "#F8FAFC"),
+                    }
+                    if status in colors:
+                        foreground, background = colors[status]
+                        item.setForeground(QColor(foreground))
+                        item.setBackground(QColor(background))
                     self.job_list.addItem(item)
                     if job.get("job_id") == selected:
                         self.job_list.setCurrentItem(item)
@@ -926,14 +965,17 @@ class MainWindow(QMainWindow):
         if not job_id:
             return
         self.selected_job_id = job_id
+        self.detail_view_mode = "job"
         self._show_detail(self.jobs.get(job_id, {}))
         if self.current_mode == "normal":
             self._request(("detail", job_id), f"/v1/jobs/{job_id}")
 
     def _show_detail(self, job: dict) -> None:
         if not job or not job.get("job_id"):
+            self.detail_view_mode = "empty"
             self.detail_stack.setCurrentWidget(self.empty_detail)
             return
+        self.detail_view_mode = "job"
         self.current_detail = job
         self.log_attempt_id = None
         self.log_offset = None

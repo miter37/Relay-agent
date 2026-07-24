@@ -75,6 +75,14 @@ class G4ApiReadinessTests(unittest.TestCase):
         self.assertTrue(detail["actions"]["can_schedule"])
         self.assertIsNone(detail["actions"].get("schedule_reason"))
 
+    def test_completed_job_can_open_schedule_editor_before_isolation_acknowledgement(self):
+        self.config.set("service_isolation_acknowledged", False)
+
+        detail = job_detail(self.engine, self.source_id)
+
+        self.assertTrue(detail["actions"]["can_schedule"])
+        self.assertTrue(detail["actions"]["schedule_requires_isolation"])
+
     def test_preview_honors_start_and_end_bounds(self):
         preview = self.service.preview(
             {

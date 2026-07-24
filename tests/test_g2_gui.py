@@ -67,7 +67,7 @@ class G2NewTaskGuiTests(unittest.TestCase):
         self.assertEqual(labels, ["Overview", "Task", "Progress", "Answer", "Result", "Files", "Logs", "Events"])
         self.assertFalse(view.cancel_button.isEnabled())
         self.assertTrue(view.rerun_button.isEnabled())
-        self.assertFalse(view.open_result_button.isEnabled())
+        self.assertFalse(view.copy_task_button.isEnabled())
         self.assertFalse(view.open_folder_button.isEnabled())
 
     def test_answer_tab_renders_markdown_and_copies_plain_text(self):
@@ -99,9 +99,10 @@ class G2NewTaskGuiTests(unittest.TestCase):
             {
                 "job_id": "job-2",
                 "status": "RUNNING",
-                "actions": {"can_cancel": True, "can_open_result": True, "can_open_folder": True},
+                "actions": {"can_cancel": True, "can_copy": True, "can_open_folder": True},
                 "output_path": "/tmp/result.json",
                 "artifact_path": "/tmp/artifacts",
+                "request": {"task": "Copy this task"},
                 "attempts": [
                     {
                         "attempt_id": 7,
@@ -113,7 +114,7 @@ class G2NewTaskGuiTests(unittest.TestCase):
             }
         )
 
-        self.assertTrue(view.open_result_button.isEnabled())
+        self.assertTrue(view.copy_task_button.isEnabled())
         self.assertTrue(view.open_folder_button.isEnabled())
         self.assertEqual(view.attempt_combo.currentData(), 7)
         self.assertEqual(view.stream_combo.currentText(), "stdout")
