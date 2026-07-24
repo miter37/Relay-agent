@@ -30,7 +30,7 @@ include = ["relay*"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = ["relay.pyz", "mocks"]
+exclude = ["relay.pyz", "mocks", "docs"]
 
 [tool.ruff.lint]
 # Deliberately conservative to start with. Widen once this is settled.
