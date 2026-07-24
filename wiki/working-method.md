@@ -14,5 +14,5 @@ py relay.pyz version
 git diff --check
 ```
 
-5. Push the feature branch when GitHub validation is required and confirm every PR check, including all GUI smoke jobs.
+5. Do not wait for or poll GitHub CI by default after a push; check it only when the user asks or before a merge or release.
 6. Update memory only when stale memory would cause a future agent to make a wrong decision, repeat work, or miss a constraint.
