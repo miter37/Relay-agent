@@ -87,6 +87,7 @@ def list_jobs(
         sort_value = {
             "waiting": rows[-1]["created_at"],
             "running": rows[-1].get("started_at") or rows[-1]["created_at"],
+            "active": rows[-1]["created_at"],
             "finished": rows[-1].get("completed_at") or rows[-1]["created_at"],
             "all": rows[-1]["created_at"],
         }[bucket]

@@ -6,6 +6,7 @@ from html import escape
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
@@ -28,7 +29,7 @@ class JobDetailView(QWidget):
     open_log_requested = Signal(str)
     log_options_changed = Signal()
 
-    TAB_NAMES = ("Overview", "Task", "Progress", "Result", "Files", "Logs", "Events")
+    TAB_NAMES = ("Overview", "Task", "Progress", "Answer", "Result", "Files", "Logs", "Events")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,12 +86,32 @@ class JobDetailView(QWidget):
             browser = QTextBrowser()
             browser.setOpenExternalLinks(False)
             self._browsers[name] = browser
-            self.tabs.addTab(browser, name)
+            if name == "Answer":
+                answer_page = QWidget()
+                answer_layout = QVBoxLayout(answer_page)
+                answer_layout.setContentsMargins(0, 0, 0, 0)
+                answer_actions = QHBoxLayout()
+                answer_actions.addStretch(1)
+                self.copy_answer_button = QPushButton("Copy answer")
+                self.copy_answer_button.clicked.connect(self._copy_answer)
+                answer_actions.addWidget(self.copy_answer_button)
+                answer_layout.addLayout(answer_actions)
+                answer_layout.addWidget(browser, 1)
+                self.answer_browser = browser
+                self.tabs.addTab(answer_page, name)
+            else:
+                self.tabs.addTab(browser, name)
         self.tabs.currentChanged.connect(lambda index: self.tab_requested.emit(self.tabs.tabText(index)))
         layout.addWidget(self.tabs, 1)
+        self.answer_text = ""
+        self.set_answer(None)
 
     def set_job(self, job: dict) -> None:
-        self.job_id = str(job.get("job_id") or "")
+        job_id = str(job.get("job_id") or "")
+        if job_id != self.job_id:
+            self.set_answer(None)
+            self.set_content("Result", "")
+        self.job_id = job_id
         self.title_label.setText(str(job.get("title") or self.job_id or "Job"))
         self.status_label.setText(str(job.get("status") or ""))
         actions = job.get("actions") or {}
@@ -142,6 +163,14 @@ class JobDetailView(QWidget):
             if tab_name == "Logs" and self.auto_scroll_check.isChecked():
                 browser.moveCursor(QTextCursor.End)
 
+    def set_answer(self, answer: str | None) -> None:
+        self.answer_text = answer if isinstance(answer, str) else ""
+        self.copy_answer_button.setEnabled(bool(self.answer_text))
+        if self.answer_text:
+            self.answer_browser.setMarkdown(self.answer_text)
+        else:
+            self.answer_browser.setHtml("<i>No answer is available for this result.</i>")
+
     @staticmethod
     def _format_json(value) -> str:
         return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
@@ -169,6 +198,10 @@ class JobDetailView(QWidget):
     def _open_log(self) -> None:
         if self.job_id:
             self.open_log_requested.emit(self.job_id)
+
+    def _copy_answer(self) -> None:
+        if self.answer_text:
+            QApplication.clipboard().setText(self.answer_text)
 
     def selected_attempt(self) -> dict | None:
         attempt_id = self.attempt_combo.currentData()

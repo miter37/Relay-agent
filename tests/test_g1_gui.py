@@ -59,6 +59,46 @@ class G1GuiTests(unittest.TestCase):
         self.assertEqual(self.window.job_list.count(), 3)
         self.assertIn("× Failed", self.window.job_list.item(2).text())
 
+    def test_active_refresh_uses_one_request_and_refreshes_selected_detail(self):
+        self.window.current_mode = "normal"
+        self.window.selected_job_id = "job-1"
+        requests = []
+        self.window._request = lambda kind, path: requests.append((kind, path))
+
+        self.window._refresh_active()
+
+        self.assertEqual(requests, [("active", "/v1/jobs?bucket=active&limit=200")])
+        self.window.pending[1] = "active"
+        self.window._handle_response(
+            1,
+            {"jobs": [{"job_id": "job-1", "status": "RUNNING", "title": "Current job"}]},
+            None,
+        )
+        self.assertEqual(self.window.jobs["job-1"]["status"], "RUNNING")
+        self.assertEqual(requests[-1], (("detail", "job-1"), "/v1/jobs/job-1"))
+
+    def test_stale_detail_response_does_not_replace_current_selection(self):
+        self.window.selected_job_id = "job-2"
+        self.window.pending[1] = ("detail", "job-1")
+
+        self.window._handle_response(1, {"job_id": "job-1", "status": "COMPLETED"}, None)
+
+        self.assertIsNone(self.window.current_detail)
+
+    def test_result_response_populates_answer_and_raw_result_tabs(self):
+        self.window.selected_job_id = "job-1"
+        self.window.pending[1] = ("result", "job-1")
+        payload = {
+            "job_id": "job-1",
+            "available": True,
+            "data": {"answer": "## Summary\n\nReadable answer"},
+        }
+
+        self.window._handle_response(1, payload, None)
+
+        self.assertIn("Readable answer", self.window.job_detail_view.answer_browser.toPlainText())
+        self.assertIn("available", self.window.job_detail_view._browsers["Result"].toPlainText())
+
     def test_unsupported_schema_is_read_only(self):
         health = {"ok": True, "api_versions": ["v1"], "api_schema_revision": 99, "min_gui_version": "0.8.0"}
         self.assertEqual(evaluate_compatibility(health, gui_version=__version__).mode, "read-only")

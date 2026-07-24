@@ -855,9 +855,23 @@ def _run_add_agent(args, config: Config, db: Database) -> dict[str, Any]:
     }
 
 
+def _print_json(value: Any, *, compact: bool) -> None:
+    text = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":") if compact else None,
+        indent=None if compact else 2,
+        default=str,
+    )
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding:
+        text = text.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(text)
+
+
 def _emit(value: Any, machine: bool = False) -> None:
     if machine:
-        print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        _print_json(value, compact=True)
         return
     if isinstance(value, dict):
         if value.get("ok") and value.get("status") in {"completed", "partial"}:
@@ -876,7 +890,7 @@ def _emit(value: Any, machine: bool = False) -> None:
             print(f"Status: {value.get('status')}")
             print(f"Job: {value.get('job_id')}")
             return
-    print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+    _print_json(value, compact=False)
 
 
 def _receipt_exit_code(value: Any) -> int:

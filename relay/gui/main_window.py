@@ -418,8 +418,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_active(self) -> None:
         if self.current_mode == "normal":
-            self._request("waiting", "/v1/jobs?bucket=waiting&limit=200")
-            self._request("running", "/v1/jobs?bucket=running&limit=200")
+            self._request("active", "/v1/jobs?bucket=active&limit=200")
 
     def _refresh_finished(self) -> None:
         if self.current_mode == "normal":
@@ -516,11 +515,15 @@ class MainWindow(QMainWindow):
             wizard.set_agent(agent)
             self._open_agent_app_wizard(wizard)
             return
-        if kind == "detail":
-            self._show_detail(payload)
+        if isinstance(kind, tuple) and kind[0] == "detail":
+            if self.selected_job_id == kind[1]:
+                self._show_detail(payload)
             return
-        if kind == "result":
-            self.job_detail_view.set_content("Result", self._format_payload(payload))
+        if isinstance(kind, tuple) and kind[0] == "result":
+            if self.selected_job_id == kind[1]:
+                self.job_detail_view.set_content("Result", self._format_payload(payload))
+                data = payload.get("data")
+                self.job_detail_view.set_answer(data.get("answer") if isinstance(data, dict) else None)
             return
         if kind == "artifacts":
             self.job_detail_view.set_content("Files", self._format_payload(payload.get("artifacts", [])))
@@ -638,7 +641,7 @@ class MainWindow(QMainWindow):
             job_id = payload.get("job_id")
             if job_id:
                 self.selected_job_id = job_id
-                self._request("detail", f"/v1/jobs/{job_id}")
+                self._request(("detail", job_id), f"/v1/jobs/{job_id}")
             self._refresh_active()
             self._refresh_finished()
             if kind == "create":
@@ -648,7 +651,7 @@ class MainWindow(QMainWindow):
             self._remove_statuses({"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"})
         elif kind == "finished_more":
             pass
-        else:
+        elif kind == "active":
             self._remove_statuses(
                 {
                     "CREATED",
@@ -659,8 +662,6 @@ class MainWindow(QMainWindow):
                     "DELIVERING",
                     "CANCEL_REQUESTED",
                 }
-                if kind in {"waiting", "running"}
-                else set()
             )
         for job in payload.get("jobs", []):
             if job.get("job_id"):
@@ -669,6 +670,11 @@ class MainWindow(QMainWindow):
             self.finished_cursor = payload.get("next_cursor")
             self.load_more.setEnabled(bool(payload.get("has_more")))
         self._render_jobs()
+        if kind in {"active", "finished"} and self.selected_job_id:
+            self._request(
+                ("detail", self.selected_job_id),
+                f"/v1/jobs/{self.selected_job_id}",
+            )
 
     def _remove_statuses(self, statuses: set[str]) -> None:
         for job_id in [job_id for job_id, job in self.jobs.items() if job.get("status") in statuses]:
@@ -826,7 +832,7 @@ class MainWindow(QMainWindow):
         self.selected_job_id = job_id
         self._show_detail(self.jobs.get(job_id, {}))
         if self.current_mode == "normal":
-            self._request("detail", f"/v1/jobs/{job_id}")
+            self._request(("detail", job_id), f"/v1/jobs/{job_id}")
 
     def _show_detail(self, job: dict) -> None:
         if not job or not job.get("job_id"):
@@ -844,7 +850,10 @@ class MainWindow(QMainWindow):
         job_id = self.current_detail.get("job_id")
         if not job_id:
             return
-        paths = {"Result": ("result", "result"), "Files": ("artifacts", "artifacts"), "Events": ("events", "events")}
+        if tab_name in {"Answer", "Result"}:
+            self._request(("result", job_id), f"/v1/jobs/{job_id}/result")
+            return
+        paths = {"Files": ("artifacts", "artifacts"), "Events": ("events", "events")}
         if tab_name in paths:
             kind, path = paths[tab_name]
             self._request(kind, f"/v1/jobs/{job_id}/{path}")

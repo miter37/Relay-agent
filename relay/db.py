@@ -540,6 +540,15 @@ class Database:
         bucket_statuses = {
             "waiting": ("CREATED", "QUEUED"),
             "running": ("PREPARING", "RUNNING", "VALIDATING", "DELIVERING", "CANCEL_REQUESTED"),
+            "active": (
+                "CREATED",
+                "QUEUED",
+                "PREPARING",
+                "RUNNING",
+                "VALIDATING",
+                "DELIVERING",
+                "CANCEL_REQUESTED",
+            ),
             "finished": ("COMPLETED", "PARTIAL", "FAILED", "CANCELLED"),
             "all": (),
         }
@@ -591,6 +600,7 @@ class Database:
         sort_expression = {
             "waiting": "created_at",
             "running": "COALESCE(started_at, created_at)",
+            "active": "created_at",
             "finished": "COALESCE(completed_at, created_at)",
             "all": "created_at",
         }[bucket]

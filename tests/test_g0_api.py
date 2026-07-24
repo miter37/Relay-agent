@@ -117,6 +117,10 @@ class G0ApiTests(unittest.TestCase):
         self.assertEqual(len(waiting["jobs"]), 1)
         self.assertEqual(waiting["jobs"][0]["status"], "QUEUED")
 
+        self._create_job("Running task", status="RUNNING")
+        active = client.request("GET", "/v1/jobs?bucket=active")
+        self.assertEqual({job["status"] for job in active["jobs"]}, {"QUEUED", "RUNNING"})
+
     def test_jobs_api_rejects_invalid_cursor(self):
         _, client, _ = self._start_daemon()
 

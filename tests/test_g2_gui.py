@@ -64,11 +64,34 @@ class G2NewTaskGuiTests(unittest.TestCase):
 
         labels = [view.tabs.tabText(index) for index in range(view.tabs.count())]
 
-        self.assertEqual(labels, ["Overview", "Task", "Progress", "Result", "Files", "Logs", "Events"])
+        self.assertEqual(labels, ["Overview", "Task", "Progress", "Answer", "Result", "Files", "Logs", "Events"])
         self.assertFalse(view.cancel_button.isEnabled())
         self.assertTrue(view.rerun_button.isEnabled())
         self.assertFalse(view.open_result_button.isEnabled())
         self.assertFalse(view.open_folder_button.isEnabled())
+
+    def test_answer_tab_renders_markdown_and_copies_plain_text(self):
+        view = JobDetailView()
+
+        view.set_answer("## Summary\n\n- First point\n- Second point")
+        view.copy_answer_button.click()
+
+        self.assertIn("Summary", view.answer_browser.toPlainText())
+        self.assertIn("First point", view.answer_browser.toPlainText())
+        self.assertEqual(QApplication.clipboard().text(), "## Summary\n\n- First point\n- Second point")
+        self.assertTrue(view.copy_answer_button.isEnabled())
+
+    def test_detail_refresh_preserves_answer_until_job_changes(self):
+        view = JobDetailView()
+        view.set_job({"job_id": "job-1", "status": "RUNNING"})
+        view.set_answer("Current answer")
+
+        view.set_job({"job_id": "job-1", "status": "COMPLETED"})
+        self.assertEqual(view.answer_text, "Current answer")
+
+        view.set_job({"job_id": "job-2", "status": "QUEUED"})
+        self.assertEqual(view.answer_text, "")
+        self.assertFalse(view.copy_answer_button.isEnabled())
 
     def test_job_detail_exposes_log_controls_and_open_actions(self):
         view = JobDetailView()

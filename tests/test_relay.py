@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
@@ -82,6 +83,19 @@ class RelayTests(unittest.TestCase):
             spec.deep_ok = spec.unattended_ok = spec.output_ok = spec.artifact_ok = True
             spec.status = "healthy"
             adapter.save_spec(spec)
+
+    def test_machine_output_escapes_characters_unsupported_by_console_encoding(self):
+        from relay.cli import _emit
+
+        buffer = io.BytesIO()
+        stream = io.TextIOWrapper(buffer, encoding="cp949")
+        with patch("sys.stdout", stream):
+            _emit({"message": "before — after"}, machine=True)
+            stream.flush()
+            output = buffer.getvalue().decode("cp949")
+
+        self.assertIn(r"\u2014", output)
+        self.assertEqual(json.loads(output)["message"], "before — after")
 
     def test_daemon_runs_due_cleanup(self):
         self.audit_all(deep=False)
