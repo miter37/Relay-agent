@@ -16,6 +16,9 @@ Relay 1.1.0 adds Custom Agent Apps across the CLI, GUI, and Schedules.
 - Schedule timezone data is installed on Windows.
 - Daemon shutdown waits for scheduler workers before temporary Relay Homes are removed.
 - Schedule snapshots and retention accept macOS system path aliases while continuing to reject symlinks inside Relay-managed roots.
+- Agent App editing preserves advanced manifest fields and invalidates stale GUI test results after any definition change.
+- Pre-save Agent tests use expiring definition-bound tokens without leaving cancelled Agent Apps behind.
+- Custom Agent subprocesses inherit only operational and explicitly declared environment variables.
 
 ## Verification
 

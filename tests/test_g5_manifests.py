@@ -65,7 +65,24 @@ class G5ManifestStoreTests(unittest.TestCase):
     def test_validation_rejects_shell_forms_in_model_discovery(self):
         with self.assertRaises(RelayError) as context:
             self.store.save(manifest(model_list_argv=["models", "&&", "bad"]))
-        self.assertEqual(context.exception.code, "AGENT_TEMPLATE_INVALID")
+            self.assertEqual(context.exception.code, "AGENT_TEMPLATE_INVALID")
+
+    def test_validation_rejects_duplicate_model_injection_and_invalid_env_names(self):
+        with self.assertRaises(RelayError):
+            self.store.save(
+                manifest(
+                    argv=["run", "{request_file}", "--model", "{model}"],
+                    model_arg=["--model", "{model}"],
+                )
+            )
+        with self.assertRaises(RelayError):
+            self.store.save(manifest(safety={"env_names": ["BAD-NAME"]}))
+
+    def test_direct_store_save_cannot_enable_an_untested_agent(self):
+        saved = self.store.save(manifest(enabled=True))
+
+        self.assertFalse(saved["enabled"])
+        self.assertEqual(saved["status"], "needs_test")
 
     def test_delete_moves_manifest_to_recoverable_trash(self):
         self.store.save(manifest())

@@ -34,16 +34,7 @@ class Scheduler:
         self.executor = ThreadPoolExecutor(max_workers=int(self.config.get("max_concurrent_jobs", 2)))
         self.active: set[str] = set()
         self.lock = threading.Lock()
-        self.worker_limits = {
-            name: threading.Semaphore(int(self.config.get("max_concurrent_per_worker", 1)))
-            for name in ("claude", "codex", "antigravity")
-        }
-        self._worker_limit_size = int(self.config.get("max_concurrent_per_worker", 1))
         self.thread: threading.Thread | None = None
-
-    def worker_limit(self, worker: str) -> threading.Semaphore:
-        with self.lock:
-            return self.worker_limits.setdefault(worker, threading.Semaphore(self._worker_limit_size))
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self.loop, name="relay-scheduler", daemon=True)
@@ -343,6 +334,12 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 self._json(
                     HTTPStatus.OK,
                     {"ok": True, "agent": self.daemon.agent_app_service.create(self._body())},
+                )
+                return
+            if path == "/v1/agent-apps/test-manifest":
+                self._json(
+                    HTTPStatus.OK,
+                    {"ok": True, **self.daemon.agent_app_service.test_manifest(self._body())},
                 )
                 return
             if path.startswith("/v1/agent-apps/") and path.endswith("/test"):

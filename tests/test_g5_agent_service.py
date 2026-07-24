@@ -4,12 +4,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from relay.agent_apps import AgentAppService
 from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
+from relay.errors import RelayError
+from relay.models import AdapterSpec
 
 
 def payload():
@@ -58,6 +60,70 @@ class G5AgentAppServiceTests(unittest.TestCase):
 
         adapter.require_verified.assert_called_once_with()
         self.assertTrue(enabled["enabled"])
+
+    def test_manifest_test_does_not_persist_until_token_is_saved(self):
+        spec = AdapterSpec(
+            worker="opencode",
+            executable="/usr/bin/opencode",
+            version="1.0",
+            audited_at="2026-07-24T00:00:00+00:00",
+            help_hash=None,
+            shallow_ok=True,
+            deep_ok=True,
+            unattended_ok=True,
+            output_ok=True,
+            artifact_ok=True,
+            status="healthy",
+            details={},
+        )
+        with patch("relay.doctor.Doctor.audit_adapter", return_value=spec):
+            tested = self.service.test_manifest({"mode": "create", "manifest": payload()})
+
+        self.assertIsNone(self.service.store.get("opencode"))
+        self.assertTrue(tested["test_token"])
+        with self.assertRaises(RelayError) as changed:
+            self.service.create(
+                {
+                    **payload(),
+                    "argv": ["run", "--changed", "{request_file}", "{result_file}"],
+                    "test_token": tested["test_token"],
+                }
+            )
+        self.assertEqual(changed.exception.code, "AGENT_TEST_REQUIRED")
+        self.assertIsNone(self.service.store.get("opencode"))
+
+        created = self.service.create({**payload(), "test_token": tested["test_token"]})
+
+        self.assertEqual(created["status"], "ready")
+        self.assertFalse(created["enabled"])
+        with self.assertRaises(RelayError) as reused:
+            self.service.update("opencode", {**payload(), "test_token": tested["test_token"]})
+        self.assertEqual(reused.exception.code, "AGENT_TEST_REQUIRED")
+
+    def test_update_manifest_test_does_not_change_the_live_definition(self):
+        self.service.create(payload())
+        before = self.service.store.get("opencode")
+        changed = {**payload(), "argv": ["run", "--safe", "{request_file}", "{result_file}"]}
+        spec = AdapterSpec(
+            worker="opencode",
+            executable="/usr/bin/opencode",
+            version="1.0",
+            audited_at="2026-07-24T00:00:00+00:00",
+            help_hash=None,
+            shallow_ok=True,
+            deep_ok=True,
+            unattended_ok=True,
+            output_ok=True,
+            artifact_ok=True,
+            status="healthy",
+            details={},
+        )
+
+        with patch("relay.doctor.Doctor.audit_adapter", return_value=spec):
+            result = self.service.test_manifest({"mode": "update", "manifest": changed})
+
+        self.assertTrue(result["test_token"])
+        self.assertEqual(self.service.store.get("opencode"), before)
 
     def test_delete_is_blocked_when_an_enabled_schedule_references_agent(self):
         job_id = "job-source"

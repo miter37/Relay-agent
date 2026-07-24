@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from relay.config import Config
 from relay.daemon import RelayDaemon
@@ -70,6 +71,24 @@ class G5AgentApiTests(unittest.TestCase):
             self.client.request("PATCH", "/v1/agent-apps/opencode/enabled", {"enabled": True})
 
         self.assertEqual(context.exception.code, "WORKER_UNVERIFIED")
+
+    def test_manifest_test_route_does_not_create_an_agent(self):
+        self.daemon.agent_app_service.test_manifest = Mock(
+            return_value={
+                "test": {"status": "healthy"},
+                "manifest_hash": "hash",
+                "test_token": "token",
+            }
+        )
+
+        result = self.client.request(
+            "POST",
+            "/v1/agent-apps/test-manifest",
+            {"mode": "create", "manifest": agent_payload()},
+        )
+
+        self.assertEqual(result["test_token"], "token")
+        self.assertEqual(self.client.request("GET", "/v1/agent-apps")["agent_apps"], [])
 
 
 if __name__ == "__main__":

@@ -26,12 +26,7 @@ class Doctor:
         for worker in workers:
             cfg = self.config.worker(worker)
             adapter = self.engine_adapter(worker, cfg)
-            spec = adapter.shallow_audit()
-            self.db.add_audit(
-                worker, spec.version, "shallow", "passed" if spec.shallow_ok else "failed", spec.to_dict()
-            )
-            if deep and spec.shallow_ok:
-                spec = self._deep_probe(adapter, spec)
+            spec = self.audit_adapter(adapter, deep=deep)
             results.append(spec.to_dict())
         healthy = sum(1 for item in results if item["status"] == "healthy")
         report = {"ok": healthy == len(results), "deep": deep, "workers": results}
@@ -39,6 +34,20 @@ class Doctor:
         if warnings:
             report["warnings"] = warnings
         return report
+
+    def audit_adapter(self, adapter, *, deep: bool, record_audit: bool = True) -> AdapterSpec:
+        spec = adapter.shallow_audit()
+        if record_audit:
+            self.db.add_audit(
+                adapter.name,
+                spec.version,
+                "shallow",
+                "passed" if spec.shallow_ok else "failed",
+                spec.to_dict(),
+            )
+        if deep and spec.shallow_ok:
+            spec = self._deep_probe(adapter, spec, record_audit=record_audit)
+        return spec
 
     def _isolation_warnings(self, workers: list[str]) -> list[str]:
         """Flag permission-bypassing workers on a host with no isolation on record.
@@ -74,7 +83,7 @@ class Doctor:
         except KeyError:
             return get_adapter(worker, fallback_config, self.spec_root)
 
-    def _deep_probe(self, adapter, spec: AdapterSpec) -> AdapterSpec:
+    def _deep_probe(self, adapter, spec: AdapterSpec, *, record_audit: bool = True) -> AdapterSpec:
         worker = adapter.name
         probe_id = "doctor-" + new_job_id()
         workspace = self.config.path_value("workspace_root") / worker / probe_id
@@ -133,6 +142,7 @@ Do not ask questions. Do not wait for user input.
                 soft_stall_seconds=min(int(self.config.get("soft_stall_seconds", 120)), 60),
                 hard_stall_seconds=min(int(self.config.get("hard_stall_seconds", 300)), 120),
                 poll_seconds=0.5,
+                base_env=adapter.subprocess_environment(),
             )
             if outcome.failure_code:
                 raise RelayError(outcome.failure_code, f"Probe ended with {outcome.failure_code}")
@@ -168,14 +178,15 @@ Do not ask questions. Do not wait for user input.
             spec.audited_at = utc_now()
             spec.details = details
             adapter.save_spec(spec)
-            self.db.add_audit(
-                worker,
-                spec.version,
-                "deep",
-                "passed" if deep_ok else "failed",
-                details,
-                adapter.spec_hash(spec),
-            )
+            if record_audit:
+                self.db.add_audit(
+                    worker,
+                    spec.version,
+                    "deep",
+                    "passed" if deep_ok else "failed",
+                    details,
+                    adapter.spec_hash(spec),
+                )
             return spec
         except RelayError as err:
             details.update({"probe_error_code": err.code, "probe_error": err.message})
@@ -187,5 +198,6 @@ Do not ask questions. Do not wait for user input.
             spec.audited_at = utc_now()
             spec.details = details
             adapter.save_spec(spec)
-            self.db.add_audit(worker, spec.version, "deep", "failed", details, adapter.spec_hash(spec))
+            if record_audit:
+                self.db.add_audit(worker, spec.version, "deep", "failed", details, adapter.spec_hash(spec))
             return spec

@@ -75,6 +75,14 @@ class G5GenericAdapterTests(unittest.TestCase):
 
         self.assertEqual(command[-2:], ["--model", "fast"])
 
+    def test_token_rendering_does_not_replace_placeholders_inside_values(self):
+        rendered = GenericCLIAdapter._render_tokens(
+            ["--task", "{task}", "--model", "{model}"],
+            {"task": "Keep literal {model}", "model": "fast"},
+        )
+
+        self.assertEqual(rendered, ["--task", "Keep literal {model}", "--model", "fast"])
+
     def test_manifest_model_list_supports_line_and_json_parsers(self):
         adapter = GenericCLIAdapter(
             {
@@ -96,11 +104,34 @@ class G5GenericAdapterTests(unittest.TestCase):
             catalog = adapter.discover_models()
         self.assertEqual([model.id for model in catalog.models], ["fast", "pro"])
         self.assertEqual(catalog.source, "manifest_model_list")
+        self.assertFalse(catalog.authoritative)
+        self.assertFalse(catalog.account_scoped)
 
         adapter.model_list_parser = "json"
         with patch.object(adapter, "capture", return_value=(0, '{"models":[{"id":"json-model"}]}', "")):
             catalog = adapter.discover_models()
         self.assertEqual([model.id for model in catalog.models], ["json-model"])
+
+    def test_manifest_environment_only_inherits_safe_and_declared_names(self):
+        adapter = GenericCLIAdapter(
+            {
+                "executable": "opencode",
+                "argv": ["run"],
+                "safety": {"env_names": ["OPENCODE_API_KEY"]},
+            },
+            self.workspace,
+            name="opencode",
+        )
+        with patch.dict(
+            "os.environ",
+            {"PATH": "safe-path", "OPENCODE_API_KEY": "allowed", "UNDECLARED_SECRET": "hidden"},
+            clear=True,
+        ):
+            env = adapter.subprocess_environment()
+
+        self.assertEqual(env["PATH"], "safe-path")
+        self.assertEqual(env["OPENCODE_API_KEY"], "allowed")
+        self.assertNotIn("UNDECLARED_SECRET", env)
 
     def test_stdin_mode_returns_request_bytes_and_stdout_normalizes(self):
         adapter = GenericCLIAdapter(

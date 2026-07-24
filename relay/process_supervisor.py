@@ -185,12 +185,13 @@ def run_supervised(
     soft_stall_seconds: int,
     hard_stall_seconds: int,
     poll_seconds: float,
+    base_env: dict[str, str] | None = None,
     cancel_requested: Callable[[], bool] | None = None,
     event_callback: Callable[[str, dict], None] | None = None,
 ) -> ProcessOutcome:
     ensure_dir(stdout_path.parent)
     env = {
-        **os.environ,
+        **(os.environ if base_env is None else base_env),
         **env_extra,
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",

@@ -44,11 +44,15 @@ class Adapter(ABC):
     def executable(self) -> str | None:
         return which(self.command_name)
 
+    def subprocess_environment(self) -> dict[str, str] | None:
+        return None
+
     def capture(self, args: list[str], timeout: int = 20) -> tuple[int, str, str]:
         executable = self.executable()
         if not executable:
             raise RelayError("WORKER_NOT_INSTALLED", f"{self.name} executable not found: {self.command_name}")
         try:
+            base_env = self.subprocess_environment()
             cp = subprocess.run(
                 [executable, *args],
                 capture_output=True,
@@ -56,7 +60,7 @@ class Adapter(ABC):
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
-                env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
+                env={**(os.environ if base_env is None else base_env), "NO_COLOR": "1", "TERM": "dumb"},
             )
             return cp.returncode, cp.stdout, cp.stderr
         except subprocess.TimeoutExpired as exc:

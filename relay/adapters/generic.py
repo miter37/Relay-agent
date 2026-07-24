@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from pathlib import Path
@@ -16,6 +17,26 @@ KNOWN_PLACEHOLDERS = frozenset({"cli", "request_file", "result_file", "artifact_
 
 _PLACEHOLDER_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 _WORKER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+_SAFE_ENV_NAMES = {
+    "APPDATA",
+    "COMSPEC",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOCALAPPDATA",
+    "PATH",
+    "PATHEXT",
+    "SHELL",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "WINDIR",
+}
 
 
 def validate_worker_id(worker_id: str) -> None:
@@ -98,6 +119,7 @@ class GenericCLIAdapter(Adapter):
         self.result_mode = str(worker_config.get("result_mode") or "result_file")
         self.model_list_argv = [str(item) for item in worker_config.get("model_list_argv", [])]
         self.model_list_parser = str(worker_config.get("model_list_parser") or "lines")
+        self.model_list_timeout_seconds = int(worker_config.get("model_list_timeout_seconds", 30))
         self.model_arg = [str(item) for item in worker_config.get("model_arg", [])]
 
     def detect_capabilities(self, help_text: str) -> dict[str, Any]:
@@ -173,13 +195,10 @@ class GenericCLIAdapter(Adapter):
 
     @staticmethod
     def _render_tokens(tokens: list[str], values: dict[str, str]) -> list[str]:
-        rendered_tokens: list[str] = []
-        for token in tokens:
-            rendered = token
-            for key, value in values.items():
-                rendered = rendered.replace("{" + key + "}", value)
-            rendered_tokens.append(rendered)
-        return rendered_tokens
+        return [
+            _PLACEHOLDER_PATTERN.sub(lambda match: values.get(match.group(1), match.group(0)), token)
+            for token in tokens
+        ]
 
     @staticmethod
     def _manifest_values(ctx: AdapterContext, model: str) -> dict[str, str]:
@@ -207,7 +226,7 @@ class GenericCLIAdapter(Adapter):
             raise RelayError("MODEL_DISCOVERY_UNSUPPORTED", f"{self.name} has no model list command configured")
         if self.model_list_parser not in {"lines", "json"}:
             raise RelayError("AGENT_TEMPLATE_INVALID", f"Unsupported model list parser: {self.model_list_parser}")
-        code, stdout, stderr = self.capture(self.model_list_argv, timeout=30)
+        code, stdout, stderr = self.capture(self.model_list_argv, timeout=self.model_list_timeout_seconds)
         if code != 0:
             raise RelayError("MODEL_DISCOVERY_FAILED", stderr.strip() or f"{self.name} model list failed")
         try:
@@ -257,10 +276,19 @@ class GenericCLIAdapter(Adapter):
             cli_version=self.version(),
             status="ok",
             source="manifest_model_list",
-            account_scoped=True,
-            authoritative=True,
+            account_scoped=False,
+            authoritative=False,
             models=models,
+            warnings=["Models come from a user-defined command and are not independently verified by Relay."],
         )
+
+    def subprocess_environment(self) -> dict[str, str] | None:
+        if not self.manifest_mode:
+            return None
+        safety = self.worker_config.get("safety") or {}
+        declared = safety.get("env_names") or [] if isinstance(safety, dict) else []
+        names = _SAFE_ENV_NAMES | {str(name) for name in declared}
+        return {name: os.environ[name] for name in names if name in os.environ}
 
     def _environment(self, ctx: AdapterContext) -> dict[str, str]:
         env: dict[str, str] = {

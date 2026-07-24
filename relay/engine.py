@@ -77,7 +77,11 @@ class RelayEngine:
 
     def _worker_slot(self, worker: str) -> threading.Semaphore:
         with self._worker_slots_lock:
-            return self._worker_slots.setdefault(worker, threading.Semaphore(self._per_worker_limit))
+            slot = self._worker_slots.get(worker)
+            if slot is None:
+                slot = threading.Semaphore(self._per_worker_limit)
+                self._worker_slots[worker] = slot
+            return slot
 
     def _resolve_request_task(self, request: JobRequest) -> None:
         request.caller = request.caller.strip().lower()
@@ -399,6 +403,7 @@ class RelayEngine:
                     soft_stall_seconds=int(self.config.get("soft_stall_seconds", 120)),
                     hard_stall_seconds=int(self.config.get("hard_stall_seconds", 300)),
                     poll_seconds=float(self.config.get("poll_interval_seconds", 2)),
+                    base_env=adapter.subprocess_environment(),
                     cancel_requested=lambda: self._cancel_requested(job_id),
                     event_callback=lambda event, payload: self.db.add_event(job_id, event, payload),
                 )

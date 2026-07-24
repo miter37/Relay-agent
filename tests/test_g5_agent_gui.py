@@ -30,8 +30,42 @@ class G5AgentGuiTests(unittest.TestCase):
         self.assertEqual(payload["agent_id"], "opencode")
         self.assertEqual(payload["argv"], ["run", "{request_file}", "{result_file}"])
         self.assertFalse(wizard.save_button.isEnabled())
-        wizard.set_test_result({"status": "healthy"})
+        wizard.set_test_result({"status": "healthy"}, test_token="token", tested_payload=payload)
         self.assertTrue(wizard.save_button.isEnabled())
+        wizard.executable_edit.setText("changed")
+        self.assertFalse(wizard.save_button.isEnabled())
+
+    def test_wizard_edit_round_trip_preserves_advanced_and_unknown_fields(self):
+        wizard = AgentAppWizard()
+        manifest = {
+            "agent_id": "opencode",
+            "display_name": "OpenCode",
+            "description": "Agent",
+            "executable": "opencode",
+            "argv": ["run", "{request_file}", "{result_file}"],
+            "input_mode": "request_file",
+            "result_mode": "result_file",
+            "result_formats": ["txt"],
+            "supports_artifacts": False,
+            "default_model": "fast",
+            "model_list_argv": ["models", "--json"],
+            "model_list_parser": "json",
+            "model_list_timeout_seconds": 45,
+            "model_arg": [],
+            "safety": {
+                "network": True,
+                "workspace_write": False,
+                "may_skip_permissions": True,
+                "env_names": ["OPENCODE_API_KEY"],
+                "future_safety": "preserved",
+            },
+            "future_field": {"preserved": True},
+        }
+
+        wizard.set_agent(manifest)
+        payload = wizard.payload()
+
+        self.assertEqual(payload, manifest)
 
     def test_agent_list_renders_needs_test_and_ready_states(self):
         view = AgentAppListView()
@@ -46,6 +80,10 @@ class G5AgentGuiTests(unittest.TestCase):
 
         self.assertIn("Needs a test", texts[0])
         self.assertIn("Ready", texts[1])
+        view._selected = view._agents["opencode"]
+        view.set_agents([])
+        self.assertIsNone(view._selected)
+        self.assertFalse(view.delete_button.isEnabled())
 
 
 if __name__ == "__main__":
