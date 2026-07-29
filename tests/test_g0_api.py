@@ -112,7 +112,8 @@ class G0ApiTests(unittest.TestCase):
         self.assertGreaterEqual(tuple(int(part) for part in __version__.split(".")), (0, 8, 0))
 
     def test_jobs_api_filters_and_cursor_pagination(self):
-        _, client, _ = self._start_daemon()
+        daemon, client, _ = self._start_daemon()
+        daemon.scheduler.stop()
         self._create_job("Market research one", status="COMPLETED")
         self._create_job("Market research two", status="COMPLETED")
         self._create_job("Market research three", status="COMPLETED")
@@ -140,7 +141,8 @@ class G0ApiTests(unittest.TestCase):
         self.assertEqual({job["status"] for job in active["jobs"]}, {"QUEUED", "RUNNING"})
 
     def test_jobs_api_search_matches_request_body_when_preview_is_hidden(self):
-        _, client, _ = self._start_daemon()
+        daemon, client, _ = self._start_daemon()
+        daemon.scheduler.stop()
         job, _ = self.engine.create_job(
             JobRequest(task="Find this hidden request phrase", worker="codex"),
             queued=False,
