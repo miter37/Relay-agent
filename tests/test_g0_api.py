@@ -59,10 +59,15 @@ class G0ApiTests(unittest.TestCase):
 
     def _create_job(self, task: str, *, status: str, submitted_via: str = "cli") -> str:
         job, _ = self.engine.create_job(
-            JobRequest(task=task, worker="codex"), queued=status == "QUEUED", submitted_via=submitted_via
+            JobRequest(task=task, worker="codex"), queued=False, submitted_via=submitted_via
         )
-        if status != "QUEUED":
-            self.db.update_job(job["job_id"], status=status, completed_at="2026-07-23T10:00:00+00:00")
+        self.db.update_job(
+            job["job_id"],
+            status=status,
+            completed_at="2026-07-23T10:00:00+00:00"
+            if status in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}
+            else None,
+        )
         return job["job_id"]
 
     def test_health_reports_compatibility_contract(self):
@@ -138,7 +143,7 @@ class G0ApiTests(unittest.TestCase):
         _, client, _ = self._start_daemon()
         job, _ = self.engine.create_job(
             JobRequest(task="Find this hidden request phrase", worker="codex"),
-            queued=True,
+            queued=False,
             submitted_via="gui",
         )
         self.db.update_job(job["job_id"], status="COMPLETED", result_status="complete")
