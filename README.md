@@ -15,10 +15,10 @@
 Relay-agent is a local job broker for AI command-line tools. A person can create and inspect jobs in the desktop app, while an automation agent can submit the same work through the CLI. Both paths share one daemon, one SQLite history, and the same validated result-delivery contract.
 
 <p align="center">
-  <img src="docs/assets/relay-agent-gui.png" alt="Relay-agent New Task screen" width="1200">
+  <img src="docs/assets/relay-agent-gui-main.png" alt="Relay-agent desktop dashboard" width="1200">
 </p>
 
-<p align="center"><em>Create a task with an Agent, model, profile, attachments, output paths, and an optional real working folder.</em></p>
+<p align="center"><em>Monitor Relay health, search and filter job history, and inspect selected work from the desktop dashboard.</em></p>
 
 > **Reliability boundary:** Relay-agent validates process completion, result-file creation, encoding, schema, artifact paths, and delivery. It does not verify the factual accuracy or reasoning quality of AI-generated content.
 
@@ -55,14 +55,16 @@ Relay-agent adds a durable control and delivery layer around powerful AI CLIs.
 
 - Windows 11, Linux, or macOS
 - Python 3.11+
+- Git for a clone-based source installation
 - At least one installed and logged-in Agent CLI:
   - `claude`
   - `codex`
   - `agy` — optional and gated behind additional security verification
 - PySide6 6.8+ for the desktop GUI
-- A dedicated low-privilege OS account for unattended external-agent execution
 
-The CI matrix runs on Windows, macOS, and Linux with Python 3.11–3.13. The real Claude Code, Codex CLI, and Antigravity CLI integrations have been deeply audited on Windows 11. Linux and macOS CI currently exercise mocks rather than real provider sessions, so run a deep worker audit on every target machine and after each provider CLI upgrade.
+For unattended external-agent or service operation, use a dedicated low-privilege OS account. Interactive desktop use does not require a separate account.
+
+The CI matrix runs on Windows, macOS, and Linux with Python 3.11–3.13. CI validates Relay with mock provider CLIs; live provider behavior depends on the installed CLI version, account, and platform. Run a deep worker audit on every target machine and after each provider CLI upgrade.
 
 ## Quick start: desktop GUI
 
@@ -88,7 +90,7 @@ Then open the desktop app:
 relay --gui
 ```
 
-The GUI connects to the local Relay daemon and starts it automatically when configured to do so.
+The GUI connects to the local Relay daemon and starts it automatically by default. Set `daemon_auto_start` to `false` only when daemon startup is managed separately.
 
 ### If the GUI opens in compatibility mode
 
@@ -152,6 +154,12 @@ Select **+ New Task** and provide as much or as little configuration as needed:
 - result and generated-files locations
 - optional real working folder
 - external request ID and duplicate-control options
+
+<p align="center">
+  <img src="docs/assets/relay-agent-new-task.png" alt="Relay-agent New Task form" width="1200">
+</p>
+
+<p align="center"><em>The New Task form exposes the same Agent, model, fallback, file, result, and working-folder controls available through the CLI.</em></p>
 
 ### 2. Observe the job
 
