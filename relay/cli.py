@@ -47,6 +47,7 @@ COMMANDS = {
     "models",
     "model-check",
     "add-agent",
+    "agent-app",
     "schedule",
 }
 
@@ -193,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"Relay {__version__}")
     parser.add_argument("--home", help="Use this Relay Home directory")
-    parser.add_argument("--gui", action="store_true", help="Open the optional read-only desktop GUI")
+    parser.add_argument("--gui", action="store_true", help="Open the optional desktop GUI")
     sub = parser.add_subparsers(dest="command")
 
     run = sub.add_parser(

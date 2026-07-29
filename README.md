@@ -1,240 +1,295 @@
 <div align="center">
   <h1>🚀 Relay-agent</h1>
-  <p><strong>A reliable delegation broker for AI CLIs (Claude, Codex, Antigravity) on Windows, Linux, and macOS.</strong></p>
+  <p><strong>Run, monitor, and safely deliver work from Claude Code, Codex CLI, Antigravity, and your own agent CLIs.</strong></p>
+  <p>Desktop GUI · CLI automation · Local daemon · Persistent job history</p>
 
   <p>
     <a href="https://github.com/miter37/Relay-agent/actions/workflows/ci.yml"><img src="https://github.com/miter37/Relay-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="https://github.com/miter37/Relay-agent/releases"><img src="https://img.shields.io/github/v/release/miter37/Relay-agent?style=flat-square" alt="Release"></a>
     <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg?style=flat-square" alt="Python"></a>
     <a href="https://github.com/miter37/Relay-agent/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
-    <a href="https://github.com/miter37/Relay-agent/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square" alt="PRs Welcome"></a>
     <img src="https://img.shields.io/badge/OS-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square" alt="OS">
   </p>
 </div>
 
-> **Note on Guarantees**: Relay-agent validates the execution and delivery contract (result-file creation, encoding, schema, artifact paths, and process completion). It **does not** verify the factual accuracy or reasoning quality of the AI-generated content.
+Relay-agent is a local job broker for AI command-line tools. A person can create and inspect jobs in the desktop app, while an automation agent can submit the same work through the CLI. Both paths share one daemon, one SQLite history, and the same validated result-delivery contract.
 
-> **Note on Cross-platform**: The test suite runs on Windows, macOS, and Linux across Python 3.11–3.13 on every commit. All three providers have passed a deep audit against their real CLIs on Windows 11 — Claude Code 2.1.218, Codex CLI 0.144.3, and Antigravity 1.1.5 (see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md)). Real provider CLIs have **not** yet been field-validated on Linux or macOS, where CI exercises mocks only. Validate each worker you intend to use with `relay doctor --worker <worker> --deep`, and run it again whenever the underlying CLI is upgraded.
+<p align="center">
+  <img src="docs/assets/relay-agent-gui.png" alt="Relay-agent New Task screen" width="1200">
+</p>
 
-## 📑 Table of Contents
-- [✨ Key Features](#-key-features)
-- [📦 System Requirements](#-system-requirements)
-- [🚀 Installation & Verification](#-installation--verification)
-- [💡 Usage & Task Files](#-usage--task-files)
-- [🤖 OpenClaw / Hermes AI & Multi-Worker Delegation](#-openclaw--hermes-ai--multi-worker-delegation)
-- [🔍 Model Discovery & Limitations](#-model-discovery--limitations)
-- [📄 JSON Result Contract](#-json-result-contract)
-- [➕ Adding New Workers (`relay add-agent`)](#-adding-new-workers-relay-add-agent)
-- [⚙️ Configuration & Security](#-configuration--security)
-- [🧹 Cleanup and Retention](#-cleanup-and-retention)
-- [📚 Documentation](#-documentation)
+<p align="center"><em>Create a task with an Agent, model, profile, attachments, output paths, and an optional real working folder.</em></p>
 
----
+> **Reliability boundary:** Relay-agent validates process completion, result-file creation, encoding, schema, artifact paths, and delivery. It does not verify the factual accuracy or reasoning quality of AI-generated content.
 
-## ✨ Key Features
+## Contents
 
-Relay-agent is a reliable task broker designed to connect your always-on AI agents with powerful coding CLIs.
+- [Why Relay-agent](#why-relay-agent)
+- [Requirements](#requirements)
+- [Quick start: desktop GUI](#quick-start-desktop-gui)
+- [Portable and CLI-only installation](#portable-and-cli-only-installation)
+- [Desktop workflow](#desktop-workflow)
+- [CLI workflow](#cli-workflow)
+- [Safe work in a real folder](#safe-work-in-a-real-folder)
+- [Custom Agent Apps](#custom-agent-apps)
+- [Automation with OpenClaw or Hermes](#automation-with-openclaw-or-hermes)
+- [Results, security, and operations](#results-security-and-operations)
+- [Documentation](#documentation)
 
-- 🤖 **Supports Three Built-in CLIs**: Natively supports task delegation to `Claude Code`, `Codex CLI`, and `Antigravity`.
-- ➕ **Extensible via `add-agent`**: Register any external AI CLI that follows the standard worker contract (`relay add-agent <id>`).
-- 🤝 **Designed for Agent Delegation**: Always-on AI agents (like Hermes or OpenClaw) can hand off complex, long-running tasks to Relay-agent and retrieve the final results asynchronously.
-- 📂 **Dedicated Workspaces**: Each job runs from a separate Relay-agent managed workspace. This reduces accidental file collisions but is not a complete OS sandbox. Unattended use requires a dedicated low-privilege OS account.
-- 🗄️ **Persistent History**: Every delegated job's metadata, errors, and output paths are recorded in a local SQLite database.
-- ✅ **Validated Delivery Contract**: Relay-agent checks result-file creation, encoding, JSON/TXT structure, artifact paths, and process completion before publishing outputs.
-- 🔎 **Non-interrupting Progress Checks**: The GUI can inspect a running process, recent activity, stalls, and common error signals without messaging or interrupting the Agent.
+## Why Relay-agent
 
----
+Relay-agent adds a durable control and delivery layer around powerful AI CLIs.
 
-## 📦 System Requirements
+- **Desktop task control:** Create jobs with task text or a Markdown file, attachments, Agent and model selection, profiles, fallback behavior, time limits, result paths, and artifact folders.
+- **One shared job history:** GUI, CLI, and external-agent jobs appear in the same searchable history with status, source, timestamps, attempts, and output locations.
+- **Detailed inspection:** Review Overview, Task, Progress, Answer, Result, Files, Logs, and Events without digging through Relay's internal database or workspaces.
+- **Non-interrupting progress checks:** Inspect process state, recent activity, stalls, and common error signals without sending another message to the running Agent.
+- **Useful job controls:** Stop active work, run completed work again, copy task text, and open result or artifact folders.
+- **Built-in and custom Agents:** Use Claude Code, Codex CLI, and Antigravity, or register manifest-backed Agent Apps for other local CLIs.
+- **Safe working-folder delivery:** Let an Agent work on an isolated copy, validate the changed-file set, then apply only those changes to a requested real folder.
+- **Persistent receipts:** Store job metadata, attempts, failures, and output paths in local SQLite history.
+- **Compatibility safety:** GUI write actions are disabled if the desktop app and daemon do not agree on the supported API or Relay Home.
+- **Automation-ready:** Submit background jobs, deduplicate external requests, wait for completion, and consume machine-readable receipts.
+
+## Requirements
 
 - Windows 11, Linux, or macOS
 - Python 3.11+
-- At least one installed and logged-in worker CLI:
+- At least one installed and logged-in Agent CLI:
   - `claude`
   - `codex`
-  - `agy` — *optional, requires additional security verification*
-- *For Hermes Unattended Execution:* A dedicated low-privilege OS account is strictly required.
+  - `agy` — optional and gated behind additional security verification
+- PySide6 6.8+ for the desktop GUI
+- A dedicated low-privilege OS account for unattended external-agent execution
 
----
+The CI matrix runs on Windows, macOS, and Linux with Python 3.11–3.13. The real Claude Code, Codex CLI, and Antigravity CLI integrations have been deeply audited on Windows 11. Linux and macOS CI currently exercise mocks rather than real provider sessions, so run a deep worker audit on every target machine and after each provider CLI upgrade.
 
-## 🚀 Installation & Verification
+## Quick start: desktop GUI
 
-### 1. Clone & Install
+Install the project and its optional GUI dependency from a clone:
 
 ```sh
 git clone https://github.com/miter37/Relay-agent.git
 cd Relay-agent
+python -m pip install ".[gui]"
+relay init
 ```
 
-`relay.pyz` is a build artifact and is **not** stored in the repository, so the
-installer builds it on first run. This needs no network access and takes a
-second. To build it yourself instead:
+Verify each Agent you intend to use:
+
+```sh
+relay doctor --worker claude --deep
+relay doctor --worker codex --deep
+```
+
+Then open the desktop app:
+
+```sh
+relay --gui
+```
+
+The GUI connects to the local Relay daemon and starts it automatically when configured to do so.
+
+### If the GUI opens in compatibility mode
+
+Compatibility mode protects the job database and disables write actions when the running daemon is older, newer, or using a different Relay Home. Restart the daemon with the same Relay installation:
+
+```sh
+relay daemon stop
+relay daemon start
+relay --gui
+```
+
+If the warning remains, confirm that the shell and GUI resolve the same `relay` command and `RELAY_HOME`.
+
+## Portable and CLI-only installation
+
+Relay's core CLI does not require the Qt GUI packages. A fresh clone can build the self-contained `relay.pyz` application with:
 
 ```sh
 python build_release.py
 ```
 
-> Prefer not to build? Download `relay.pyz` and `SHA256SUMS.txt` from the
-> [latest release](https://github.com/miter37/Relay-agent/releases/latest),
-> verify the checksum, and place `relay.pyz` in this directory before running
-> the installer.
+### Windows
 
-**Windows (PowerShell):**
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\install_windows.ps1
 ```
 
-**Linux / macOS:**
+### Linux and macOS
+
 ```sh
 chmod +x scripts/install_unix.sh
 ./scripts/install_unix.sh
 ```
 
-### 2. Verify Workers
+The installer builds `relay.pyz` when it is not already present, copies it into the user install directory, initializes Relay Home, and adds a launcher. Open a new terminal after installation if the command is not yet on `PATH`.
+
+To add the GUI to a portable installation, install PySide6 into the Python interpreter used by the launcher:
+
 ```sh
-relay init
-relay doctor --worker claude --deep
-relay doctor --worker codex --deep
+python -m pip install "PySide6>=6.8,<7"
+relay --gui
 ```
 
-### 3. Antigravity Setup (Optional & Advanced)
-Because Antigravity has strong permission bypass capabilities, it requires explicit opt-in after you have verified your OS-level isolation:
+Prebuilt `relay.pyz` and checksum files are also available from the [latest release](https://github.com/miter37/Relay-agent/releases/latest).
+
+## Desktop workflow
+
+### 1. Create a task
+
+Select **+ New Task** and provide as much or as little configuration as needed:
+
+- optional task name
+- inline task text or a UTF-8 task file
+- attachments
+- Agent and model
+- execution profile
+- fallback preference
+- time limit
+- JSON or text result
+- result and generated-files locations
+- optional real working folder
+- external request ID and duplicate-control options
+
+### 2. Observe the job
+
+The job detail view separates the most useful information:
+
+- **Overview:** status, Agent, model, timestamps, source, output locations, and actions
+- **Task:** the submitted instruction
+- **Progress:** process and activity diagnostics
+- **Answer:** readable final answer with copy support
+- **Result:** the complete delivered result
+- **Files:** generated artifact metadata
+- **Logs:** stdout, stderr, progress-check results, and attempt selection
+- **Events:** lifecycle history
+
+Use **Check progress** when a running job appears quiet. Relay inspects the process and its recent activity without messaging or interrupting the Agent.
+
+### 3. Recover or repeat work
+
+Active jobs can be stopped. Completed replayable jobs can be run again, and output folders can be opened directly from the desktop app. Search and filters make older work easier to find by task text, name, Agent, status, source, or time.
+
+## CLI workflow
+
+The desktop app is optional. Every ordinary job can be submitted and inspected from a terminal.
+
+### Synchronous task
+
 ```sh
-relay doctor --worker antigravity --deep
-# ONLY run these if you have configured OS-level isolation:
-relay config set workers.antigravity.security_verified true
-relay config enable-worker antigravity
+relay run "Review this repository and identify reliability risks" --worker codex
 ```
 
----
+`--worker codex` means “try Codex first, then use configured fallbacks if necessary.” Add `--no-fallback` when only that Agent may run.
 
-## 💡 Usage & Task Files
+### Structured task file
 
-### Short Requests (Inline)
-Use direct task arguments for simple, short requests:
-```sh
-relay "Investigate today's major AI semiconductor news" --worker codex
-```
-*Note on fallback*: `--worker codex` means "Try Codex first, but fallback if it fails." If you want *only* Codex, use `--worker codex --no-fallback`.
-
-### Structured Requests (Task Files)
-For long or structured tasks (recommended for agents), use a UTF-8 Markdown task file:
-
-**Windows (PowerShell):**
 ```powershell
 relay run `
   --task-file "D:\RelayInput\request.md" `
+  --attach "D:\RelayInput\report.pdf" `
   --worker claude `
   --format json `
   --machine
 ```
 
-**Linux / macOS:**
-```sh
-relay run \
-  --task-file "/home/relay/input/request.md" \
-  --worker claude \
-  --format json \
-  --machine
-```
-
-### Attachments
-Relay-agent can pass files along with the prompt (must be inside permitted input directories for Hermes):
-```powershell
-relay run `
-  --task-file "D:\RelayInput\analyze.md" `
-  --attach "D:\RelayInput\report.pdf" `
-  --attach "D:\RelayInput\data.xlsx" `
-  --worker claude `
-  --format json
-```
-
-### Creating or Editing Files in a Real Folder
-
-Use `--target` when the Agent must create or modify files in a real folder. Relay edits an isolated copy, validates
-the result, applies only the changed files to the real folder, and also copies changed/created files to the normal
-artifacts folder. `--out` still controls the JSON/TXT result, while `--artifacts` controls the Relay file copy.
-
-```powershell
-relay run "Review and improve this code" --target "D:\project" --artifacts "D:\relay-copies"
-```
-
-For interactive CLI/GUI jobs, Relay can also detect one unambiguous absolute target path from a file-writing task.
-Choose **Working folder** explicitly when the task mentions multiple paths. Working-folder jobs are not eligible for
-unattended Schedules.
-
----
-
-## 🤖 OpenClaw / Hermes AI & Multi-Worker Delegation
-
-By registering the skill `skills/hermes-relay/SKILL.md` (Skill name: `use_relay_agent`) in your AI environment, **OpenClaw** or **Hermes AI** can use Relay-agent to delegate complex tasks and aggregate results.
-
-**Example:** "Ask Claude, Codex, and Antigravity to propose an architecture for a cross-platform job queue, then compare their trade-offs."
-
-To achieve this without falling back to a different worker on failure, the agent submits 3 separate asynchronous jobs with `--no-fallback` and `--caller hermes`. 
-
-> ⚠️ **Important on `--request-id`**: The request ID is an idempotency key. It must uniquely identify one logical request (e.g., `<conversation-id>-<task-id>-<worker>`). Reusing the same ID returns the existing cached job, even if the task file has changed.
+### Background task
 
 ```sh
-relay submit \
-  --task-file "task.md" \
-  --worker claude \
-  --format json \
-  --request-id "jobqueue-arch-claude" \
-  --caller hermes \
-  --no-fallback \
-  --machine
-
 relay submit \
   --task-file "task.md" \
   --worker codex \
-  --format json \
-  --request-id "jobqueue-arch-codex" \
-  --caller hermes \
-  --no-fallback \
-  --machine
-
-relay submit \
-  --task-file "task.md" \
-  --worker antigravity \
-  --format json \
-  --request-id "jobqueue-arch-agy" \
-  --caller hermes \
+  --request-id "conversation-42-task-7-codex" \
   --no-fallback \
   --machine
 ```
-*(Note: If you omit `--no-fallback`, a failure in Claude might silently trigger a Codex retry, muddling which AI actually answered.)*
 
-**Asynchronous Flow:**
-1. Parse the `job_id` from the `submit` JSON receipt.
-2. Wait for completion: `relay wait <job_id> --machine`
-3. Get final receipt: `relay result <job_id> --machine`
-4. Read the actual output file from the `result_path` provided in the receipt.
-
----
-
-## 🔍 Model Discovery & Limitations
-
-Relay-agent discovers models using worker-specific methods. Codex and Antigravity can provide account-aware catalogs when supported. Claude Code does not expose a complete non-interactive model-list API, so its results may include configured or known model candidates rather than a definitive account-level list.
+Then use the returned `job_id`:
 
 ```sh
-relay models
-relay models --worker codex --refresh
+relay wait <job_id> --machine
+relay result <job_id> --machine
 ```
 
-**Checking Model Availability (`model-check`):**
-Check whether a model is listed or can be minimally verified. Claude uses a small inference probe, while Codex and Antigravity currently check catalog membership.
+`request_id` is an idempotency key for one logical external request. Reusing it returns the existing job even if a local task file has changed. Use a unique value such as `<conversation>-<task>-<agent>`.
+
+## Safe work in a real folder
+
+Use `--target` when the Agent must create or modify files in an existing directory:
+
+```powershell
+relay run "Review and improve this code" `
+  --worker codex `
+  --target "D:\project" `
+  --artifacts "D:\relay-copies"
+```
+
+Relay:
+
+1. creates an isolated working copy;
+2. runs the Agent inside that workspace;
+3. validates paths and the changed-file set;
+4. applies only verified changes to the requested folder; and
+5. keeps a separate copy of changed or created files in the artifacts location.
+
+`--out` controls the JSON or text result file. `--artifacts` controls generated-file delivery. The GUI exposes the same behavior as **Working folder** and **Files folder**.
+
+## Custom Agent Apps
+
+The built-in Agents cover common workflows, but Relay can manage other local AI CLIs through manifest-backed Agent Apps.
+
+Open **Settings → Agent Apps** to:
+
+- register an executable and argument template;
+- choose request and result modes;
+- declare supported result formats and artifact support;
+- configure model discovery and model arguments;
+- declare required environment variable names and safety capabilities;
+- run a deep test before saving or enabling the Agent;
+- edit, retest, enable, disable, or recoverably delete an Agent App.
+
+Changing a runtime definition invalidates its previous test. The Agent remains unavailable until the changed definition passes another deep test.
+
+CLI inspection and lifecycle commands use the same registry:
+
 ```sh
-relay model-check --worker claude --model sonnet --machine
+relay agent-app list
+relay agent-app show opencode
+relay agent-app test opencode
+relay agent-app enable opencode
 ```
-> ⚠️ **Warning on Claude Probe**: A failed Claude model check (`ok: false`) does not strictly mean the model name is invalid. Authentication expiration, quota exhaustion, rate limits, or network timeouts will currently all return `false`.
 
----
+The original interactive registration flow remains available:
 
-## 📄 JSON Result Contract
+```sh
+relay add-agent opencode
+relay doctor --worker opencode --deep
+relay run --worker opencode "Hello"
+```
 
-When requesting `--format json`, the file written to your `--out` path will follow this structure:
+Run `relay add-agent --help` and `relay agent-app --help` for the complete command set.
+
+## Automation with OpenClaw or Hermes
+
+Register `skills/hermes-relay/SKILL.md` (skill name: `use_relay_agent`) in the calling environment. An always-on agent can then submit long-running work to one or more worker CLIs and collect the final receipts asynchronously.
+
+For independent multi-Agent comparison, submit one job per Agent with a unique request ID and `--no-fallback`:
+
+```sh
+relay submit --task-file task.md --worker claude --request-id arch-claude --caller hermes --no-fallback --machine
+relay submit --task-file task.md --worker codex --request-id arch-codex --caller hermes --no-fallback --machine
+relay submit --task-file task.md --worker antigravity --request-id arch-antigravity --caller hermes --no-fallback --machine
+```
+
+For unattended execution, configure Relay under a dedicated low-privilege account with explicit filesystem allowlists and ACL isolation.
+
+## Results, security, and operations
+
+### JSON result contract
+
+When `--format json` is selected, the delivered result follows this shape:
 
 ```json
 {
@@ -242,109 +297,81 @@ When requesting `--format json`, the file written to your `--out` path will foll
   "status": "complete",
   "answer": "The requested analysis...",
   "sources": ["https://example.com"],
-  "uncertainties": ["Market volatility makes this unpredictable"],
+  "uncertainties": [],
   "missing_items": [],
   "artifacts": [
     {
-      "name": "chart.csv",
-      "relative_path": "path/to/chart.csv",
-      "description": "Generated comparison chart"
+      "name": "report.md",
+      "relative_path": "report.md",
+      "description": "Generated report"
     }
   ]
 }
 ```
-*Important*: The Relay-agent receipt status (e.g., `completed`) indicates successful CLI execution. The internal JSON `status` (e.g., `complete` or `partial`) indicates the AI's self-reported success on the actual task logic.
 
----
+The Relay receipt status reports whether the CLI execution and delivery completed. The `status` inside the result file is the Agent's self-reported task outcome. Check both.
 
-## ➕ Adding New Workers (`relay add-agent`)
-
-The three built-in workers (`claude`, `codex`, `antigravity`) cover most users, but any external AI CLI that follows the standard Relay worker contract can be registered interactively:
+### Model discovery
 
 ```sh
-relay add-agent opencode
+relay models
+relay models --worker codex --refresh
+relay model-check --worker claude --model sonnet --machine
 ```
 
-The wizard prompts for:
+Codex and Antigravity can expose account-aware model catalogs when their CLIs support it. Claude Code does not expose a complete non-interactive account catalog, so Relay may combine configured and known candidates. A failed Claude model probe can also mean expired authentication, quota exhaustion, rate limiting, or a network timeout.
 
-- Worker ID (used as the `relay.toml` key, e.g. `opencode`, `grok-build`)
-- Display name
-- Executable path or name on `PATH`
-- Command template using placeholders such as `{cli}`, `{request_file}`, `{result_file}`, `{artifact_dir}`, `{model}`
-- Default model
-- Optional advanced settings (max turns, extra args, env vars, timeout)
-- Whether to enable the worker after registration
+### Security posture
 
-Once all inputs are collected, Relay runs `doctor --deep` as a health check. If the check fails, **nothing is written to `relay.toml`** — fix the issue and retry, or pass `--skip-health-check` to persist the registration anyway.
+Inspect the current isolation and allowlist state:
 
-```sh
-# Verify after registration
-relay doctor --worker opencode --deep
-relay run --worker opencode "Hello"
-
-# Non-interactive registration (e.g. from a setup script)
-RELAY_ADD_AGENT_ID=opencode \
-RELAY_ADD_AGENT_COMMAND=opencode \
-RELAY_ADD_AGENT_COMMAND_TEMPLATE='{cli} exec --prompt {request_file} --output {result_file}' \
-relay add-agent --yes
-```
-
-See `relay add-agent --help` for all options and the full list of `RELAY_ADD_AGENT_*` environment variables.
-
----
-
-## ⚙️ Configuration & Security
-
-**Security & Unattended Execution:**
-To use `--caller hermes`, the operator must configure a low-privilege account and ACL isolation. After securing the host, acknowledge it:
 ```sh
 relay security --machine
-relay config set service_isolation_acknowledged true
 ```
 
-Full Access Mode is a separate, per-worker switch. It disables the selected AI CLI's permission checks or sandbox restrictions and applies immediately to a running daemon. Inspect the effective state or change it from either GUI Settings > General or the CLI:
+Full Access Mode is a separate per-Agent switch. It disables that Agent CLI's permission checks or sandbox restrictions and applies immediately to the running daemon:
+
 ```sh
 relay security --worker codex --machine
 relay security --enable-full-access codex --machine
 relay security --disable-full-access codex --machine
 ```
-Use it only with a trusted task and a dedicated low-privilege OS account. GUI and CLI changes use the same persisted configuration and daemon API, so their reported state stays consistent.
 
-**Set default workers and fallbacks:**
+The same switches are available in **Settings → General**. Use Full Access Mode only for trusted tasks under a dedicated low-privilege OS account.
+
+Antigravity requires an explicit deep audit and security opt-in:
+
 ```sh
-relay config set default_worker claude
-relay config set fallback_order codex,antigravity
+relay doctor --worker antigravity --deep
+relay config set workers.antigravity.security_verified true
+relay config enable-worker antigravity
 ```
 
----
+### Cleanup
 
-## 🧹 Cleanup and Retention
+Relay automatically expires internal staging and workspace directories while preserving delivered result and artifact files:
 
-Relay-agent automatically deletes expired internal staging and workspace directories according to job status:
-- **Completed**: 7 days
-- **Partial**: 14 days
-- **Failed**: 30 days
-- **Cancelled**: 14 days
-- **Orphan workspaces**: 7 days
-
-*Note: Automated cleanup applies to Relay-agent's internal workspaces. Final result files and artifacts delivered to the configured `--out` and `--artifacts` destinations are not automatically deleted.*
+- completed workspaces: 7 days
+- partial workspaces: 14 days
+- failed workspaces: 30 days
+- cancelled workspaces: 14 days
+- orphan workspaces: 7 days
 
 ```sh
 relay cleanup --status
 ```
 
----
+## Documentation
 
-## 📚 Documentation
-
-For deeper details, consult the `docs/` folder:
-- [Current project memory and navigation](wiki/index.md)
-- [Development Plan](docs/DEVELOPMENT_PLAN.md)
-- [Capability Audit](docs/CAPABILITY_AUDIT.md)
-- [Security Guidelines](docs/SECURITY.md)
-- [Cross-Platform Notes](docs/CROSS_PLATFORM.md)
-- [Automatic Cleanup Policy](docs/AUTOMATIC_CLEANUP.md)
+- [Agent delegation manual](manual.md)
+- [Known limitations](docs/KNOWN_LIMITATIONS.md)
+- [Security guide](docs/SECURITY.md)
+- [Cross-platform notes](docs/CROSS_PLATFORM.md)
+- [Database migration notes](docs/DATABASE_MIGRATION.md)
+- [Automatic cleanup policy](docs/AUTOMATIC_CLEANUP.md)
+- [Release notes](RELEASE_NOTES.md)
+- [Project wiki index](wiki/index.md)
 
 <div align="center">
-  <i>Built with ❤️ for reliable AI delegation.</i>
+  <i>Built for reliable local AI delegation.</i>
 </div>
