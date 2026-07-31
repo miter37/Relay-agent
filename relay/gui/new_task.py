@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QPushButton,
     QSpinBox,
     QTextEdit,
@@ -19,11 +25,57 @@ from PySide6.QtWidgets import (
 )
 
 
+class JobFilePickerDialog(QDialog):
+    def __init__(self, job_id: str, files: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add files from Job")
+        self.resize(620, 360)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Select result or artifact files from Job {job_id}:"))
+        self.file_list = QListWidget()
+        for file in files:
+            path = str(file["path"])
+            kind = str(file.get("kind") or "File")
+            name = str(file.get("name") or Path(path).name)
+            size = self._format_size(file.get("size"))
+            item = QListWidgetItem(f"{kind} — {name}{f' ({size})' if size else ''}")
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            item.setCheckState(Qt.Unchecked)
+            self.file_list.addItem(item)
+        layout.addWidget(self.file_list, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_paths(self) -> list[str]:
+        return [
+            str(item.data(Qt.UserRole))
+            for index in range(self.file_list.count())
+            if (item := self.file_list.item(index)).checkState() == Qt.Checked
+        ]
+
+    @staticmethod
+    def _format_size(value) -> str:
+        if value is None:
+            return ""
+        size = float(value)
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+            size /= 1024
+        return ""
+
+
 class NewTaskView(QWidget):
     create_requested = Signal(dict)
+    job_files_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._job_lookup_allowed = True
+        self._job_lookup_pending = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -41,11 +93,22 @@ class NewTaskView(QWidget):
         self.attachment_list.setMaximumHeight(90)
         attachment_row = QVBoxLayout()
         attachment_row.addWidget(self.attachment_list)
+        attachment_buttons = QHBoxLayout()
         add_attachment = QPushButton("+ Add files")
         add_attachment.clicked.connect(self._choose_attachments)
-        attachment_row.addWidget(add_attachment)
+        attachment_buttons.addWidget(add_attachment)
+        self.add_from_job_button = QPushButton("+ Add from Job ID")
+        self.add_from_job_button.clicked.connect(self._choose_job)
+        attachment_buttons.addWidget(self.add_from_job_button)
+        attachment_buttons.addStretch(1)
+        attachment_row.addLayout(attachment_buttons)
         form.addRow(
-            self._help_label("Files", "Optional files supplied to the Agent as task attachments."), attachment_row
+            self._help_label(
+                "Files",
+                "Optional files supplied to the Agent as task attachments. "
+                "You can also select delivered result or artifact files from an existing Job.",
+            ),
+            attachment_row,
         )
         self.worker_combo = QComboBox()
         self.worker_combo.addItems(["auto", "claude", "codex", "antigravity"])
@@ -179,9 +242,42 @@ class NewTaskView(QWidget):
 
     def _choose_attachments(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Add files")
+        self.add_attachments(paths)
+
+    def _choose_job(self) -> None:
+        job_id, accepted = QInputDialog.getText(
+            self,
+            "Add files from Job",
+            "Job ID:",
+            text="",
+        )
+        job_id = job_id.strip()
+        if accepted and job_id:
+            self.job_files_requested.emit(job_id)
+
+    def choose_job_files(self, job_id: str, files: list[dict]) -> None:
+        dialog = JobFilePickerDialog(job_id, files, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.add_attachments(dialog.selected_paths())
+
+    def add_attachments(self, paths: list[str]) -> None:
+        existing = {self.attachment_list.item(i).text() for i in range(self.attachment_list.count())}
         for path in paths:
-            if not any(self.attachment_list.item(i).text() == path for i in range(self.attachment_list.count())):
+            if path not in existing:
                 self.attachment_list.addItem(path)
+                existing.add(path)
+
+    def set_job_file_lookup_enabled(self, enabled: bool) -> None:
+        self._job_lookup_allowed = enabled
+        self._update_job_lookup_button()
+
+    def set_job_file_lookup_pending(self, pending: bool) -> None:
+        self._job_lookup_pending = pending
+        self._update_job_lookup_button()
+
+    def _update_job_lookup_button(self) -> None:
+        self.add_from_job_button.setEnabled(self._job_lookup_allowed and not self._job_lookup_pending)
+        self.add_from_job_button.setText("Loading Job files…" if self._job_lookup_pending else "+ Add from Job ID")
 
     def _choose_target(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose working folder")

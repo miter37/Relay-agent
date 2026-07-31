@@ -8,6 +8,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 except ModuleNotFoundError as exc:  # GUI extra is installed by the GUI smoke job.
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
@@ -15,7 +16,7 @@ except ModuleNotFoundError as exc:  # GUI extra is installed by the GUI smoke jo
 from relay.config import Config
 from relay.gui.job_detail import JobDetailView
 from relay.gui.main_window import MainWindow
-from relay.gui.new_task import NewTaskView
+from relay.gui.new_task import JobFilePickerDialog, NewTaskView
 
 
 class G2NewTaskGuiTests(unittest.TestCase):
@@ -60,6 +61,54 @@ class G2NewTaskGuiTests(unittest.TestCase):
         self.assertTrue(payload["force_new"])
         self.assertTrue(payload["overwrite"])
         self.assertTrue(view.advanced_toggle.isChecked())
+
+    def test_new_task_adds_job_files_without_duplicate_attachments(self):
+        view = NewTaskView()
+
+        view.add_attachments(["C:/relay/result.json", "C:/relay/report.md"])
+        view.add_attachments(["C:/relay/result.json"])
+
+        self.assertEqual(
+            [view.attachment_list.item(index).text() for index in range(view.attachment_list.count())],
+            ["C:/relay/result.json", "C:/relay/report.md"],
+        )
+        self.assertEqual(view.payload()["attachments"], ["C:/relay/result.json", "C:/relay/report.md"])
+
+    def test_job_file_picker_returns_checked_files(self):
+        dialog = JobFilePickerDialog(
+            "job-123",
+            [
+                {"kind": "Result", "name": "result.json", "path": "C:/relay/result.json", "size": 42},
+                {"kind": "Artifact", "name": "report.md", "path": "C:/relay/report.md", "size": 2048},
+            ],
+        )
+
+        dialog.file_list.item(1).setCheckState(Qt.Checked)
+
+        self.assertEqual(dialog.selected_paths(), ["C:/relay/report.md"])
+        self.assertIn("2.0 KB", dialog.file_list.item(1).text())
+
+    def test_job_input_candidates_keep_existing_unique_files_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = root / "result.json"
+            artifact = root / "report.md"
+            result.write_text("{}", encoding="utf-8")
+            artifact.write_text("# Report", encoding="utf-8")
+
+            candidates = MainWindow._job_input_candidates(
+                {"available": True, "path": str(result), "size": 2},
+                {
+                    "artifacts": [
+                        {"final_path": str(result), "relative_path": "duplicate.json", "size": 2},
+                        {"final_path": str(artifact), "relative_path": "reports/report.md", "size": 8},
+                        {"final_path": str(root / "missing.txt"), "relative_path": "missing.txt"},
+                    ]
+                },
+            )
+
+        self.assertEqual([item["kind"] for item in candidates], ["Result", "Artifact"])
+        self.assertEqual([item["name"] for item in candidates], ["result.json", "reports/report.md"])
 
     def test_job_detail_has_g2_tabs_and_replay_gating(self):
         view = JobDetailView()

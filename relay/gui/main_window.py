@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
 from html import escape
-from urllib.parse import urlencode
+from pathlib import Path
+from urllib.parse import quote, urlencode
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
@@ -47,6 +49,7 @@ class MainWindow(QMainWindow):
         self.client = GuiRpcClient(config)
         self.client.response.connect(self._handle_response)
         self.pending: dict[int, object] = {}
+        self.job_input_lookups: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
         self.agent_definitions: list[dict] = []
         self.custom_agent_apps: list[dict] = []
@@ -171,6 +174,7 @@ class MainWindow(QMainWindow):
         self.detail_stack.addWidget(self.empty_detail)
         self.new_task_view = NewTaskView()
         self.new_task_view.create_requested.connect(self._create_task)
+        self.new_task_view.job_files_requested.connect(self._add_files_from_job)
         self.detail_stack.addWidget(self.new_task_view)
         self.job_detail_view = JobDetailView()
         self.job_detail_view.cancel_requested.connect(self._cancel_job)
@@ -395,6 +399,79 @@ class MainWindow(QMainWindow):
             return
         self._request_post("create", "/v1/jobs", payload)
 
+    def _add_files_from_job(self, job_id: str) -> None:
+        if self.current_mode != "normal" or self.job_input_lookups:
+            return
+        self.job_input_lookups[job_id] = {"responses": {}, "errors": []}
+        self.new_task_view.set_job_file_lookup_pending(True)
+        encoded_job_id = quote(job_id, safe="")
+        self._request(("job_input", job_id, "result"), f"/v1/jobs/{encoded_job_id}/result")
+        self._request(("job_input", job_id, "artifacts"), f"/v1/jobs/{encoded_job_id}/artifacts")
+
+    def _record_job_input_response(self, kind: tuple, payload: dict | None, error=None) -> None:
+        _, job_id, source = kind
+        lookup = self.job_input_lookups.get(job_id)
+        if lookup is None:
+            return
+        lookup["responses"][source] = payload or {}
+        if error:
+            lookup["errors"].append(str(error))
+        if {"result", "artifacts"} - set(lookup["responses"]):
+            return
+
+        self.job_input_lookups.pop(job_id, None)
+        self.new_task_view.set_job_file_lookup_pending(False)
+        responses = lookup["responses"]
+        files = self._job_input_candidates(responses.get("result") or {}, responses.get("artifacts") or {})
+        if not files:
+            self.banner.setText(
+                f"No delivered result or artifact files are available for Job {job_id}. "
+                "Check the Job ID and make sure the Job has finished."
+            )
+            self.banner.show()
+            return
+        if self.detail_view_mode != "new_task":
+            self.banner.setText(f"Job {job_id} files are ready. Return to New Task and add them again.")
+            self.banner.show()
+            return
+        self.banner.hide()
+        self.new_task_view.choose_job_files(job_id, files)
+
+    @staticmethod
+    def _job_input_candidates(result: dict, artifacts: dict) -> list[dict]:
+        candidates: list[dict] = []
+        seen: set[str] = set()
+
+        def append_candidate(kind: str, value: str | None, *, name: str | None = None, size=None) -> None:
+            if not value:
+                return
+            path = Path(value)
+            if not path.is_file():
+                return
+            key = os.path.normcase(str(path.resolve()))
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(
+                {
+                    "kind": kind,
+                    "name": name or path.name,
+                    "path": str(path),
+                    "size": path.stat().st_size if size is None else size,
+                }
+            )
+
+        if result.get("available"):
+            append_candidate("Result", result.get("path"), size=result.get("size"))
+        for artifact in artifacts.get("artifacts") or []:
+            append_candidate(
+                "Artifact",
+                artifact.get("final_path"),
+                name=artifact.get("relative_path"),
+                size=artifact.get("size"),
+            )
+        return candidates
+
     def _cancel_job(self, job_id: str) -> None:
         if self.current_mode == "normal":
             self._request_post("cancel", f"/v1/jobs/{job_id}/cancel", {})
@@ -587,9 +664,14 @@ class MainWindow(QMainWindow):
                         "Logs",
                         f"<pre>{escape('Check failed: ' + str(error or 'Progress diagnosis failed'))}</pre>",
                     )
+            elif isinstance(kind, tuple) and kind[0] == "job_input":
+                self._record_job_input_response(kind, payload if isinstance(payload, dict) else None, error or True)
             else:
                 self.banner.setText("Relay could not complete that action. Please try again.")
                 self.banner.show()
+            return
+        if isinstance(kind, tuple) and kind[0] == "job_input":
+            self._record_job_input_response(kind, payload)
             return
         if kind == "health":
             self.health_check_request_id = None
@@ -871,6 +953,7 @@ class MainWindow(QMainWindow):
             self._set_health_badge("Health: Disconnected", "#FEE2E2", "#991B1B", reason)
         self.new_task_button.setEnabled(mode == "normal")
         self.new_task_view.create_button.setEnabled(mode == "normal")
+        self.new_task_view.set_job_file_lookup_enabled(mode == "normal")
         self.schedule_list.setEnabled(mode == "normal")
         self.settings_button.setEnabled(mode == "normal")
         if mode == "normal":

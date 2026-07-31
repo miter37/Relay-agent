@@ -40,7 +40,7 @@ Relay-agent is a local job broker for AI command-line tools. A person can create
 
 Relay-agent adds a durable control and delivery layer around powerful AI CLIs.
 
-- **Desktop task control:** Create jobs with task text or a Markdown file, attachments, Agent and model selection, profiles, fallback behavior, time limits, result paths, and artifact folders.
+- **Desktop task control:** Create jobs with task text or a Markdown file, local attachments or delivered files selected by Job ID, Agent and model selection, profiles, fallback behavior, time limits, result paths, and artifact folders.
 - **One shared job history:** GUI, CLI, and external-agent jobs appear in the same searchable history with status, source, timestamps, attempts, and output locations.
 - **Detailed inspection:** Review Overview, Task, Progress, Answer, Result, Files, Logs, and Events without digging through Relay's internal database or workspaces.
 - **Non-interrupting progress checks:** Inspect process state, recent activity, stalls, and common error signals without sending another message to the running Agent.
@@ -145,7 +145,7 @@ Select **+ New Task** and provide as much or as little configuration as needed:
 
 - optional task name
 - inline task text or a UTF-8 task file
-- attachments
+- local attachments, or result and artifact files selected from a completed Job ID
 - Agent and model
 - execution profile
 - fallback preference
@@ -160,6 +160,10 @@ Select **+ New Task** and provide as much or as little configuration as needed:
 </p>
 
 <p align="center"><em>The New Task form exposes the same Agent, model, fallback, file, result, and working-folder controls available through the CLI.</em></p>
+
+Use **+ Add from Job ID** under **Files** to reuse work from an earlier Job. Relay shows the result and delivered
+artifacts that still exist on disk; select one or more and they become ordinary attachments to the new task. This
+does not create a dependency on running or queued work, so the source Job must have already delivered its files.
 
 ### 2. Observe the job
 
