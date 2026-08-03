@@ -7,9 +7,9 @@ from pathlib import Path
 from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
-from relay.models import TaskSpec
 from relay.lifecycle.export_service import ExportService
 from relay.lifecycle.import_service import ImportService
+from relay.models import TaskSpec
 
 
 class Phase6eImportTests(unittest.TestCase):

@@ -63,6 +63,9 @@ COMMANDS = {
     "attention",
     "operations",
     "notify",
+    "export",
+    "import",
+    "receipt-schema",
 }
 
 
@@ -835,6 +838,57 @@ def _notify_cli_request(args, config: Config) -> Any:
     raise RelayError("INVALID_REQUEST", f"Unknown notify command: {cmd}")
 
 
+def _add_export_parsers(sub: argparse._SubParsersAction) -> None:
+    exp = sub.add_parser(
+        "export",
+        help="Export Relay definitions and optional Runs to an archive",
+        description="Serialize Tasks, Projects, Routines, and Runs to a deterministic ZIP archive.",
+    )
+    exp.add_argument("--include-runs", action="store_true")
+    exp.add_argument("--out")
+    exp.add_argument("--machine", action="store_true")
+
+
+def _add_import_parsers(sub: argparse._SubParsersAction) -> None:
+    imp = sub.add_parser(
+        "import",
+        help="Import Relay definitions from an archive",
+        description="Restore Tasks, Projects, and Routines from a ZIP archive.",
+    )
+    imp.add_argument("archive")
+    imp.add_argument("--conflict", choices=["skip", "overwrite", "rename"], default="skip")
+    imp.add_argument("--include-runs", action="store_true")
+    imp.add_argument("--machine", action="store_true")
+
+
+def _add_receipt_schema_parsers(sub: argparse._SubParsersAction) -> None:
+    rs = sub.add_parser(
+        "receipt-schema",
+        help="Print current receipt schema version",
+        description="Print current receipt schema version information.",
+    )
+    rs.add_argument("--machine", action="store_true")
+
+
+def _export_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    payload = {"include_runs": args.include_runs}
+    if args.out:
+        payload["out_path"] = args.out
+    return client.request("POST", "/v1/export", payload)
+
+
+def _import_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    payload = {"archive_path": args.archive, "conflict": args.conflict, "include_runs": args.include_runs}
+    return client.request("POST", "/v1/import", payload)
+
+
+def _receipt_schema_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    return client.request("GET", "/v1/receipt-schema")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",
@@ -1213,6 +1267,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_attention_parsers(sub)
     _add_operations_parsers(sub)
     _add_notify_parsers(sub)
+    _add_export_parsers(sub)
+    _add_import_parsers(sub)
+    _add_receipt_schema_parsers(sub)
     project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
     _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
@@ -1903,6 +1960,12 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_operations_cli_request(args, config), machine)
         elif args.command == "notify":
             _emit(_notify_cli_request(args, config), machine)
+        elif args.command == "export":
+            _emit(_export_cli_request(args, config), machine)
+        elif args.command == "import":
+            _emit(_import_cli_request(args, config), machine)
+        elif args.command == "receipt-schema":
+            _emit(_receipt_schema_cli_request(args, config), machine)
         elif args.command == "project-run":
             _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":

@@ -63,7 +63,14 @@ class ImportService:
                             imported_tasks += 1
                         elif conflict == "overwrite":
                             exist_id = existing_tasks_by_name[name]["task_id"]
-                            self.db.update_task(exist_id, **{k: v for k, v in t.items() if k not in {"task_id", "version", "created_at", "updated_at"}})
+                            self.db.update_task(
+                                exist_id,
+                                **{
+                                    k: v
+                                    for k, v in t.items()
+                                    if k not in {"task_id", "version", "created_at", "updated_at"}
+                                },
+                            )
                             imported_tasks += 1
                     else:
                         # Direct import
@@ -72,7 +79,9 @@ class ImportService:
 
                 # 2. Projects
                 project_files = [n for n in names if n.startswith("projects/") and n.endswith(".json")]
-                existing_projects_by_name = {p["name"]: p for p in self.db.list_projects(include_deleted=True, limit=10000)}
+                existing_projects_by_name = {
+                    p["name"]: p for p in self.db.list_projects(include_deleted=True, limit=10000)
+                }
 
                 for pf in project_files:
                     p = json.loads(zf.read(pf).decode("utf-8"))
@@ -88,7 +97,14 @@ class ImportService:
                             imported_projects += 1
                         elif conflict == "overwrite":
                             exist_id = existing_projects_by_name[name]["project_id"]
-                            self.db.update_project(exist_id, **{k: v for k, v in p.items() if k not in {"project_id", "version", "created_at", "updated_at"}})
+                            self.db.update_project(
+                                exist_id,
+                                **{
+                                    k: v
+                                    for k, v in p.items()
+                                    if k not in {"project_id", "version", "created_at", "updated_at"}
+                                },
+                            )
                             imported_projects += 1
                     else:
                         self.db.create_project(p)
@@ -96,7 +112,9 @@ class ImportService:
 
                 # 3. Routines
                 routine_files = [n for n in names if n.startswith("routines/") and n.endswith(".json")]
-                existing_routines_by_name = {r["name"]: r for r in self.db.list_routines(include_deleted=True, limit=10000)}
+                existing_routines_by_name = {
+                    r["name"]: r for r in self.db.list_routines(include_deleted=True, limit=10000)
+                }
 
                 for rf in routine_files:
                     r = json.loads(zf.read(rf).decode("utf-8"))
@@ -112,7 +130,10 @@ class ImportService:
                             imported_routines += 1
                         elif conflict == "overwrite":
                             exist_id = existing_routines_by_name[name]["routine_id"]
-                            self.db.update_routine(exist_id, **{k: v for k, v in r.items() if k not in {"routine_id", "created_at", "updated_at"}})
+                            self.db.update_routine(
+                                exist_id,
+                                **{k: v for k, v in r.items() if k not in {"routine_id", "created_at", "updated_at"}},
+                            )
                             imported_routines += 1
                     else:
                         self.db.create_routine(r)

@@ -875,5 +875,32 @@ def notify_test_api(engine, payload: dict[str, Any]) -> dict[str, Any]:
         res = {"ok": False, "status_code": None, "error": exc.message}
     return {"ok": True, "delivery": res}
 
+
 def get_receipt_schema_version() -> dict[str, Any]:
     return {"ok": True, "receipt_schema_version": RECEIPT_SCHEMA_VERSION}
+
+
+# --- Phase 6e Data Lifecycle ---
+
+
+def export_data_api(engine, payload: dict[str, Any]) -> dict[str, Any]:
+    from .lifecycle.export_service import ExportService
+
+    service = ExportService(engine.db, engine.config)
+    include_runs = bool(payload.get("include_runs", False))
+    out_path = payload.get("out_path")
+    dest = service.export(include_runs=include_runs, out_path=out_path)
+    return {"ok": True, "archive_path": str(dest)}
+
+
+def import_data_api(engine, payload: dict[str, Any]) -> dict[str, Any]:
+    from .lifecycle.import_service import ImportService
+
+    service = ImportService(engine.db, engine.config)
+    archive_path = str(payload.get("archive_path") or "")
+    if not archive_path:
+        raise RelayError("INVALID_REQUEST", "archive_path is required for import")
+    conflict = str(payload.get("conflict") or "skip")
+    include_runs = bool(payload.get("include_runs", False))
+    res = service.import_archive(archive_path, conflict=conflict, include_runs=include_runs)
+    return res

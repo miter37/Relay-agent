@@ -27,11 +27,14 @@ from .api import (
     delete_task,
     diff_artifacts,
     edit_checkpoint,
+    export_data_api,
     get_agent,
     get_approval,
     get_project,
+    get_receipt_schema_version,
     get_routine,
     get_task,
+    import_data_api,
     job_artifacts,
     job_detail,
     job_events,
@@ -378,6 +381,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/operations/projects":
             limit = int((params.get("limit") or ["50"])[0])
             self._json(HTTPStatus.OK, operations_projects_api(self.daemon.engine, limit=limit))
+            return
+        if path == "/v1/receipt-schema":
+            self._json(HTTPStatus.OK, get_receipt_schema_version())
             return
         if path == "/v1/jobs":
             try:
@@ -754,6 +760,12 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/v1/notifications/test":
                 self._json(HTTPStatus.OK, notify_test_api(self.daemon.engine, self._body()))
+                return
+            if path == "/v1/export":
+                self._json(HTTPStatus.OK, export_data_api(self.daemon.engine, self._body()))
+                return
+            if path == "/v1/import":
+                self._json(HTTPStatus.OK, import_data_api(self.daemon.engine, self._body()))
                 return
             if path == "/v1/agent-apps":
                 self._json(

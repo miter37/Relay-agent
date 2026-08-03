@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
 import zipfile
 from pathlib import Path
-from typing import Any
 
 from .. import __version__
 from ..config import Config
 from ..db import Database
-from ..errors import RelayError
 from ..target_workspace import safe_resolve
 from ..util import canonical_json
 
