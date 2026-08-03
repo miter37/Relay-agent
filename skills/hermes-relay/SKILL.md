@@ -352,6 +352,24 @@ relay submit `
 
 Hermes, Telegram gateway, 서비스형 에이전트에서는 이 절차를 기본으로 사용한다.
 
+### Step 0. 검색 우선
+
+유사한 과거 결과가 있을 가능성이 있으면 새 작업을 제출하기 전에 후보 요약을 검색한다.
+
+```sh
+relay search "<topic>" --kind runs --status completed --limit 10 --machine
+relay artifact show <ARTIFACT_UID> --machine
+relay artifact read <ARTIFACT_UID> --max-bytes 65536 --machine
+```
+
+가장 최근 Run과 가장 최근 성공 Run을 구분한다. 이전 결과물을 재사용할 때는 임의의 파일 경로를 `--attach`로 넘기지 말고 immutable Artifact UID를 Phase 1 입력으로 사용한다.
+
+```sh
+relay run "Update the previous report" --input-artifact <ARTIFACT_UID>=A1 --machine
+```
+
+결과에는 source Run ID, Artifact UID, alias를 남긴다. 검색 결과 전체, raw logs, 대형 Artifact를 무조건 context에 넣지 않는다.
+
 ### Step 1. 경로와 request ID 생성
 
 원 요청마다 충돌하지 않는 고유 식별자를 만든다.

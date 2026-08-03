@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .errors import RelayError
+from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -277,6 +278,10 @@ CREATE INDEX IF NOT EXISTS idx_lineage_source_job ON artifact_lineage(source_job
 CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer_job_id);
 """
 
+MIGRATION_4_TO_5 = """
+-- FTS5 tables are created opportunistically after the schema migration.
+"""
+
 LEGACY_JOB_COLUMNS = {
     "job_id",
     "request_id",
@@ -338,6 +343,8 @@ class Database:
             if not tables:
                 conn.executescript(SCHEMA)
                 conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
+                self._ensure_search_tables(conn)
+                self.rebuild_search_index()
                 return
             if version == 0:
                 self._validate_legacy_schema(conn, tables)
@@ -356,6 +363,9 @@ class Database:
                     for statement in MIGRATION_3_TO_4.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for statement in MIGRATION_4_TO_5.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     self._backfill_job_metadata(conn)
@@ -364,7 +374,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3}:
+            elif version in {1, 2, 3, 4}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -376,7 +386,11 @@ class Database:
                         for statement in MIGRATION_2_TO_3.split(";"):
                             if statement.strip():
                                 conn.execute(statement)
-                    for statement in MIGRATION_3_TO_4.split(";"):
+                    if version in {1, 2, 3}:
+                        for statement in MIGRATION_3_TO_4.split(";"):
+                            if statement.strip():
+                                conn.execute(statement)
+                    for statement in MIGRATION_4_TO_5.split(";"):
                         if statement.strip():
                             conn.execute(statement)
                     self._backfill_artifact_uids(conn)
@@ -388,7 +402,262 @@ class Database:
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
             if version == CURRENT_SCHEMA_VERSION:
                 self._backfill_job_metadata(conn)
+                self._ensure_search_tables(conn)
                 return
+
+    @staticmethod
+    def _ensure_search_tables(conn: sqlite3.Connection) -> bool:
+        if not Database._fts_available(conn):
+            return False
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS run_search USING fts5("
+            "run_id UNINDEXED,title,task_text,summary,worker,profile,trigger_type)"
+        )
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS artifact_search USING fts5("
+            "artifact_uid UNINDEXED,run_id UNINDEXED,name,role,mime_type,content_text)"
+        )
+        return True
+
+    @staticmethod
+    def _fts_available(conn: sqlite3.Connection) -> bool:
+        try:
+            conn.execute("CREATE VIRTUAL TABLE temp.relay_fts_probe USING fts5(value)")
+            conn.execute("DROP TABLE temp.relay_fts_probe")
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    def search_capabilities(self) -> dict[str, bool]:
+        with self.connect() as conn:
+            return {"fts5_available": self._fts_available(conn)}
+
+    def _run_index_values(self, conn: sqlite3.Connection, job_id: str) -> tuple[Any, ...] | None:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        job = dict(row)
+        summary = result_summary(job)
+        task_text = job.get("task_text") or job.get("task_preview") or ""
+        if not task_text and bool(job.get("replayable", 1)):
+            try:
+                request = json.loads(job.get("request_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                request = {}
+            if isinstance(request, dict):
+                task_text = str(request.get("task") or "")
+        return (
+            job_id,
+            job.get("title") or "" if bool(job.get("replayable", 1)) else "",
+            task_text,
+            summary or "",
+            job.get("requested_worker") or "",
+            job.get("profile") or "",
+            job.get("trigger_type") or "manual",
+        )
+
+    def index_run(self, job_id: str) -> bool:
+        with self.connect() as conn:
+            if not self._ensure_search_tables(conn):
+                return False
+            values = self._run_index_values(conn, job_id)
+            if values is None:
+                return False
+            conn.execute("DELETE FROM run_search WHERE run_id=?", (job_id,))
+            conn.execute(
+                "INSERT INTO run_search(run_id,title,task_text,summary,worker,profile,trigger_type) VALUES(?,?,?,?,?,?,?)",
+                values,
+            )
+            return True
+
+    def index_artifact(self, artifact_uid: str) -> bool:
+        with self.connect() as conn:
+            if not self._ensure_search_tables(conn):
+                return False
+            row = conn.execute("SELECT * FROM artifacts WHERE artifact_uid=?", (artifact_uid,)).fetchone()
+            if not row:
+                return False
+            artifact = dict(row)
+            content, _available = artifact_search_content(artifact, max_bytes=1024 * 1024)
+            conn.execute("DELETE FROM artifact_search WHERE artifact_uid=?", (artifact_uid,))
+            conn.execute(
+                "INSERT INTO artifact_search(artifact_uid,run_id,name,role,mime_type,content_text) VALUES(?,?,?,?,?,?)",
+                (
+                    artifact_uid,
+                    artifact["job_id"],
+                    artifact.get("relative_path") or "",
+                    artifact.get("role") or "output",
+                    artifact_mime(artifact) or "",
+                    content or "",
+                ),
+            )
+            return True
+
+    def rebuild_search_index(self) -> bool:
+        with self.connect() as conn:
+            if not self._ensure_search_tables(conn):
+                return False
+            conn.execute("DELETE FROM run_search")
+            conn.execute("DELETE FROM artifact_search")
+            for row in conn.execute("SELECT job_id FROM jobs ORDER BY job_id").fetchall():
+                values = self._run_index_values(conn, row[0])
+                if values:
+                    conn.execute(
+                        "INSERT INTO run_search(run_id,title,task_text,summary,worker,profile,trigger_type) VALUES(?,?,?,?,?,?,?)",
+                        values,
+                    )
+            for row in conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_uid IS NOT NULL ORDER BY artifact_id"
+            ).fetchall():
+                artifact = dict(row)
+                content, _available = artifact_search_content(artifact, max_bytes=1024 * 1024)
+                conn.execute(
+                    "INSERT INTO artifact_search(artifact_uid,run_id,name,role,mime_type,content_text) VALUES(?,?,?,?,?,?)",
+                    (
+                        artifact["artifact_uid"],
+                        artifact["job_id"],
+                        artifact.get("relative_path") or "",
+                        artifact.get("role") or "output",
+                        artifact_mime(artifact) or "",
+                        content or "",
+                    ),
+                )
+            return True
+
+    def search_runs(
+        self,
+        query: str | None = None,
+        *,
+        status: str | None = None,
+        worker: str | None = None,
+        submitted_via: str | None = None,
+        trigger_type: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        role: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        from .search import normalize_limit
+
+        limit = normalize_limit(limit)
+        with self.connect() as conn:
+            if not self._fts_available(conn):
+                raise RelayError("SEARCH_UNAVAILABLE", "SQLite FTS5 is not available.")
+            where = ["1=1"]
+            params: list[Any] = []
+            join = ""
+            if query:
+                where.append("run_search MATCH ?")
+                params.append(fts_query(query))
+            if status:
+                where.append("j.status=?")
+                params.append(status.upper())
+            if worker:
+                where.append("(j.requested_worker=? OR j.actual_worker=?)")
+                params.extend([worker, worker])
+            if submitted_via:
+                where.append("j.submitted_via=?")
+                params.append(submitted_via)
+            if trigger_type:
+                where.append("j.trigger_type=?")
+                params.append(trigger_type)
+            if date_from:
+                where.append("COALESCE(j.completed_at,j.created_at)>=?")
+                params.append(date_from)
+            if date_to:
+                where.append("COALESCE(j.completed_at,j.created_at)<=?")
+                params.append(date_to)
+            if role:
+                where.append("EXISTS (SELECT 1 FROM artifacts ar WHERE ar.job_id=j.job_id AND ar.role=?)")
+                params.append(role)
+            if query:
+                select_rank = "bm25(run_search) AS relevance"
+                join = "JOIN run_search ON run_search.run_id=j.job_id"
+            else:
+                select_rank = "0.0 AS relevance"
+            sql = (
+                f"SELECT j.*, {select_rank} FROM jobs j {join} WHERE {' AND '.join(where)} "
+                "ORDER BY relevance ASC, COALESCE(j.completed_at,j.created_at) DESC, j.job_id DESC LIMIT ? OFFSET ?"
+            )
+            params.extend([limit, max(0, int(offset))])
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def search_artifacts(
+        self,
+        query: str | None = None,
+        *,
+        role: str | None = None,
+        mime_type: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        from .search import normalize_limit
+
+        limit = normalize_limit(limit)
+        with self.connect() as conn:
+            if not self._fts_available(conn):
+                raise RelayError("SEARCH_UNAVAILABLE", "SQLite FTS5 is not available.")
+            where = ["1=1"]
+            params: list[Any] = []
+            join = ""
+            if query:
+                where.append("artifact_search MATCH ?")
+                params.append(fts_query(query))
+                join = "JOIN artifact_search ON artifact_search.artifact_uid=ar.artifact_uid"
+            if role:
+                where.append("ar.role=?")
+                params.append(role)
+            if mime_type:
+                where.append("ar.mime_type=?")
+                params.append(mime_type)
+            if date_from:
+                where.append("ar.created_at>=?")
+                params.append(date_from)
+            if date_to:
+                where.append("ar.created_at<=?")
+                params.append(date_to)
+            select_rank = "bm25(artifact_search) AS relevance" if query else "0.0 AS relevance"
+            sql = (
+                f"SELECT ar.*, {select_rank} FROM artifacts ar {join} WHERE {' AND '.join(where)} "
+                "ORDER BY relevance ASC, ar.created_at DESC, ar.artifact_id DESC LIMIT ? OFFSET ?"
+            )
+            params.extend([limit, max(0, int(offset))])
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def search_has_more(self, kind: str, query: str | None, offset: int, **filters: Any) -> bool:
+        rows = (
+            self.search_runs(query, limit=1, offset=offset + 1, **filters)
+            if kind == "runs"
+            else self.search_artifacts(query, limit=1, offset=offset + 1, **filters)
+        )
+        return bool(rows)
+
+    def artifact_content(self, artifact_uid: str, max_bytes: int) -> dict[str, Any]:
+        from .search import normalize_max_bytes
+
+        max_bytes = normalize_max_bytes(max_bytes)
+        artifact = self.artifact_by_uid(artifact_uid)
+        if not artifact:
+            raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
+        path = Path(str(artifact["final_path"]))
+        if not path.is_file():
+            return {"ok": True, "artifact_uid": artifact_uid, "available": False, "text": ""}
+        content, available = artifact_search_content(artifact, max_bytes=max_bytes)
+        if not available:
+            return {"ok": True, "artifact_uid": artifact_uid, "available": False, "text": ""}
+        raw = path.read_bytes()[:max_bytes]
+        return {
+            "ok": True,
+            "artifact_uid": artifact_uid,
+            "available": True,
+            "text": content,
+            "size": path.stat().st_size,
+            "truncated": path.stat().st_size > len(raw),
+            "mime_type": artifact_mime(artifact),
+        }
 
     def _validate_legacy_schema(self, conn: sqlite3.Connection, tables: set[str]) -> None:
         required_tables = {"jobs", "attempts", "artifacts", "events", "capability_audits"}

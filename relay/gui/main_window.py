@@ -634,6 +634,8 @@ class MainWindow(QMainWindow):
         query: dict[str, str] = {"bucket": "finished", "limit": "50"}
         if self.search.text().strip():
             query["q"] = self.search.text().strip()
+            query["search_backend"] = "fts"
+            return "/v1/search/runs?" + urlencode({"q": self.search.text().strip(), "limit": "50"})
         if self.result_filter.currentIndex():
             query["result"] = self.result_filter.currentText().lower()
         if self.agent_filter.currentIndex():
@@ -942,9 +944,10 @@ class MainWindow(QMainWindow):
                     "CANCEL_REQUESTED",
                 }
             )
-        for job in payload.get("jobs", []):
-            if job.get("job_id"):
-                self.jobs[job["job_id"]] = job
+        for job in payload.get("jobs", payload.get("items", [])):
+            if job.get("job_id") or job.get("run_id"):
+                job_id = job.get("job_id") or job.get("run_id")
+                self.jobs[job_id] = job
         if kind in {"finished", "finished_more"}:
             self.finished_cursor = payload.get("next_cursor")
             self.load_more.setEnabled(bool(payload.get("has_more")))

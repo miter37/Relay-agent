@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .agent_apps import AgentAppService
 from .api import (
+    artifact_content,
     artifact_detail,
     artifact_lineage,
     check_job_progress,
@@ -31,6 +32,8 @@ from .api import (
     run_logs,
     run_progress,
     run_result,
+    search_artifacts,
+    search_runs,
 )
 from .autostart import AutoStartManager
 from .cleanup import CleanupManager
@@ -222,6 +225,10 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         "task-snapshot",
                         "artifact-lineage",
                         "artifact-input-snapshot",
+                        "fts5-search",
+                        "run-search",
+                        "artifact-search",
+                        "artifact-content-read",
                     ],
                     "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
@@ -259,6 +266,51 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 self._api_error(HTTPStatus.BAD_REQUEST, code, message)
             except Exception as exc:
                 self._api_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", str(exc))
+            return
+        if path == "/v1/search/runs":
+            try:
+                values = {key: (items[0] if items else None) for key, items in params.items()}
+                self._json(
+                    HTTPStatus.OK,
+                    search_runs(
+                        self.daemon.db,
+                        query=values.get("q"),
+                        status=values.get("status"),
+                        worker=values.get("worker"),
+                        submitted_via=values.get("source"),
+                        trigger_type=values.get("trigger_type"),
+                        date_from=values.get("date_from"),
+                        date_to=values.get("date_to"),
+                        role=values.get("role"),
+                        limit=int(values.get("limit") or "20"),
+                        offset=int(values.get("offset") or "0"),
+                    ),
+                )
+            except (ValueError, RelayError) as err:
+                code = err.code if isinstance(err, RelayError) else "INVALID_REQUEST"
+                message = err.message if isinstance(err, RelayError) else str(err)
+                self._api_error(HTTPStatus.BAD_REQUEST, code, message)
+            return
+        if path == "/v1/search/artifacts":
+            try:
+                values = {key: (items[0] if items else None) for key, items in params.items()}
+                self._json(
+                    HTTPStatus.OK,
+                    search_artifacts(
+                        self.daemon.db,
+                        query=values.get("q"),
+                        role=values.get("role"),
+                        mime_type=values.get("mime_type"),
+                        date_from=values.get("date_from"),
+                        date_to=values.get("date_to"),
+                        limit=int(values.get("limit") or "20"),
+                        offset=int(values.get("offset") or "0"),
+                    ),
+                )
+            except (ValueError, RelayError) as err:
+                code = err.code if isinstance(err, RelayError) else "INVALID_REQUEST"
+                message = err.message if isinstance(err, RelayError) else str(err)
+                self._api_error(HTTPStatus.BAD_REQUEST, code, message)
             return
         if path == "/v1/runs":
             try:
@@ -348,6 +400,11 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             try:
                 if suffix.endswith("/lineage"):
                     self._json(HTTPStatus.OK, artifact_lineage(self.daemon.db, suffix[: -len("/lineage")]))
+                elif suffix.endswith("/content"):
+                    limit = int(params.get("max_bytes", ["65536"])[0])
+                    self._json(
+                        HTTPStatus.OK, artifact_content(self.daemon.db, suffix[: -len("/content")], max_bytes=limit)
+                    )
                 else:
                     self._json(HTTPStatus.OK, artifact_detail(self.daemon.db, suffix))
             except RelayError as err:

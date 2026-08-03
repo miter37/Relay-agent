@@ -49,6 +49,9 @@ COMMANDS = {
     "add-agent",
     "agent-app",
     "schedule",
+    "search",
+    "artifact",
+    "run-lineage",
 }
 
 
@@ -544,6 +547,33 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("agent_id")
 
     _add_schedule_parsers(sub)
+    search = sub.add_parser("search", help="Search previous Runs or Artifacts")
+    search.add_argument("query", nargs="?", default="")
+    search.add_argument("--kind", choices=["runs", "artifacts"], default="runs")
+    search.add_argument("--status")
+    search.add_argument("--worker")
+    search.add_argument("--source")
+    search.add_argument("--trigger-type")
+    search.add_argument("--role")
+    search.add_argument("--mime-type")
+    search.add_argument("--from", dest="date_from")
+    search.add_argument("--to", dest="date_to")
+    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--offset", type=int, default=0)
+    search.add_argument("--machine", action="store_true")
+
+    artifact = sub.add_parser("artifact", help="Inspect an Artifact")
+    artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
+    for name in ("show", "read", "lineage"):
+        command_parser = artifact_sub.add_parser(name)
+        command_parser.add_argument("artifact_uid")
+        if name == "read":
+            command_parser.add_argument("--max-bytes", type=int, default=65536)
+        command_parser.add_argument("--machine", action="store_true")
+
+    run_lineage = sub.add_parser("run-lineage", help="Inspect Run Artifact lineage")
+    run_lineage.add_argument("run_id")
+    run_lineage.add_argument("--machine", action="store_true")
     sub.add_parser("version", help="Print the local Relay version")
     return parser
 
@@ -1104,6 +1134,50 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_logs(engine, args.job_id), machine)
         elif args.command == "history":
             _emit({"ok": True, "jobs": db.list_jobs(args.status, args.limit)}, machine)
+        elif args.command == "search":
+            from .api import search_artifacts, search_runs
+
+            options = {
+                "query": args.query,
+                "status": args.status,
+                "worker": args.worker,
+                "submitted_via": args.source,
+                "trigger_type": args.trigger_type,
+                "role": args.role,
+                "mime_type": args.mime_type,
+                "date_from": args.date_from,
+                "date_to": args.date_to,
+                "limit": args.limit,
+                "offset": args.offset,
+            }
+            if args.kind == "runs":
+                value = search_runs(
+                    db, **{key: item for key, item in options.items() if item is not None and key != "mime_type"}
+                )
+            else:
+                value = search_artifacts(
+                    db,
+                    **{
+                        key: item
+                        for key, item in options.items()
+                        if item is not None and key not in {"status", "worker", "submitted_via", "trigger_type"}
+                    },
+                )
+            _emit(value, machine)
+        elif args.command == "artifact":
+            from .api import artifact_content, artifact_detail, artifact_lineage
+
+            if args.artifact_command == "show":
+                value = artifact_detail(db, args.artifact_uid)
+            elif args.artifact_command == "read":
+                value = artifact_content(db, args.artifact_uid, max_bytes=args.max_bytes)
+            else:
+                value = artifact_lineage(db, args.artifact_uid)
+            _emit(value, machine)
+        elif args.command == "run-lineage":
+            from .api import run_lineage
+
+            _emit(run_lineage(db, args.run_id), machine)
         elif args.command == "rerun":
             _emit(engine.rerun(args.job_id), machine)
         elif args.command == "doctor":

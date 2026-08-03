@@ -10,6 +10,7 @@ from .db import Database
 from .errors import RelayError
 from .progress import diagnose_progress
 from .schedules.snapshots import validate_source_job
+from .search import normalize_limit, normalize_max_bytes, result_summary, snippet
 
 RESULT_STATUS = {
     "completed": "COMPLETED",
@@ -370,6 +371,68 @@ def artifact_lineage(db: Database, artifact_uid: str) -> dict[str, Any]:
     if not artifact:
         raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
     return {"ok": True, "artifact": artifact, "consumers": db.lineage_for_artifact(artifact_uid)}
+
+
+def search_runs(db: Database, **kwargs: Any) -> dict[str, Any]:
+    limit = normalize_limit(kwargs.pop("limit", 20))
+    offset = int(kwargs.pop("offset", 0) or 0)
+    rows = db.search_runs(limit=limit, offset=offset, **kwargs)
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        artifacts = db.artifacts_for_job(row["job_id"])
+        summary = result_summary(row) if "result_summary" not in row else row.get("result_summary")
+        items.append(
+            {
+                "run_id": row["job_id"],
+                "job_id": row["job_id"],
+                "title": row.get("title"),
+                "status": row.get("status"),
+                "result_status": row.get("result_status"),
+                "executed_at": row.get("completed_at") or row.get("created_at"),
+                "worker": row.get("actual_worker") or row.get("requested_worker"),
+                "trigger_type": row.get("trigger_type") or "manual",
+                "summary": summary,
+                "artifact_count": len(artifacts),
+                "artifact_roles": sorted({item.get("role") or "output" for item in artifacts}),
+                "artifacts_available": all(Path(str(item.get("final_path") or "")).is_file() for item in artifacts),
+                "relevance": float(row.get("relevance") or 0.0),
+            }
+        )
+    return {"ok": True, "kind": "runs", "items": items, "next_cursor": None, "has_more": len(items) == limit}
+
+
+def search_artifacts(db: Database, **kwargs: Any) -> dict[str, Any]:
+    limit = normalize_limit(kwargs.pop("limit", 20))
+    offset = int(kwargs.pop("offset", 0) or 0)
+    rows = db.search_artifacts(limit=limit, offset=offset, **kwargs)
+    items = []
+    for row in rows:
+        path = Path(str(row.get("final_path") or ""))
+        content = None
+        if path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                pass
+        items.append(
+            {
+                "artifact_uid": row.get("artifact_uid"),
+                "run_id": row.get("job_id"),
+                "name": row.get("relative_path"),
+                "role": row.get("role") or "output",
+                "mime_type": row.get("mime_type"),
+                "size": row.get("size"),
+                "sha256": row.get("sha256"),
+                "available": path.is_file(),
+                "snippet": snippet(content),
+                "relevance": float(row.get("relevance") or 0.0),
+            }
+        )
+    return {"ok": True, "kind": "artifacts", "items": items, "next_cursor": None, "has_more": len(items) == limit}
+
+
+def artifact_content(db: Database, artifact_uid: str, *, max_bytes: int = 65536) -> dict[str, Any]:
+    return db.artifact_content(artifact_uid, normalize_max_bytes(max_bytes))
 
 
 def run_logs(

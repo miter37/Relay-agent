@@ -47,6 +47,10 @@ result and artifact validation → SQLite history and delivered outputs
 
 Phase 1 Artifact inputs are selected by immutable Artifact UID and copied into a Relay Home snapshot before execution. A consumer Run stores its canonical input manifest and `artifact_lineage` rows; the worker receives only the snapshot copy, not an arbitrary source path.
 
+Phase 2 adds a derived SQLite FTS5 index for Run summaries and eligible text Artifact content. The existing Jobs and Artifacts tables remain authoritative; the index can be rebuilt and never determines whether execution or delivery succeeds. Search returns candidate summaries and IDs first, while Artifact content is read explicitly by UID with byte limits. Raw logs and scrubbed non-replayable task text are not indexed.
+
+Registered Task definitions do not exist yet. Phase 2 searches ad-hoc Runs (`task_id` may remain NULL); Task CRUD and versioning remain Phase 3 work.
+
 The synchronous CLI path uses the same engine and validation contracts without requiring the daemon.
 
 For interactive file-writing Jobs, `target_path` identifies the real Working folder while `artifact_path` remains
