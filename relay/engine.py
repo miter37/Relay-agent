@@ -75,7 +75,7 @@ TECHNICAL_FALLBACK_CODES = {
 
 VALID_CALLERS = {"human", "hermes", "service", "schedule"}
 VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy"}
-VALID_TRIGGER_TYPES = {"manual", "api", "schedule", "rerun"}
+VALID_TRIGGER_TYPES = {"manual", "api", "schedule", "rerun", "project"}
 
 
 class RelayEngine:
@@ -1121,6 +1121,83 @@ class RelayEngine:
             task_definition=definition,
         )
         return job, reused, task
+
+    def load_task_for_snapshot(self, task_id: str) -> dict[str, Any]:
+        task = self.db.get_task(task_id)
+        if not task:
+            raise RelayError("PROJECT_TASK_MISSING", f"Task not found: {task_id}")
+        return {
+            "task_id": task["task_id"],
+            "name": task["name"],
+            "version": task["version"],
+            "instructions": task.get("instructions") or "",
+            "description": task.get("description"),
+            "default_worker": task.get("default_worker"),
+            "fallback_enabled": task.get("fallback_enabled"),
+            "timeout_seconds": task.get("timeout_seconds"),
+            "profile": task.get("profile"),
+            "result_format": task.get("result_format"),
+            "input_schema": task.get("input_schema"),
+            "output_contract": task.get("output_contract"),
+            "validation_policy": task.get("validation_policy"),
+        }
+
+    def run_task_from_snapshot(
+        self,
+        task_snapshot: dict[str, Any],
+        *,
+        request: JobRequest | None = None,
+        queued: bool = False,
+        submitted_via: str | None = None,
+        caller: str = "service",
+    ) -> tuple[dict[str, Any], bool]:
+        instructions = task_snapshot.get("instructions") or ""
+        base = JobRequest(
+            task=instructions,
+            worker=task_snapshot.get("default_worker") or "auto",
+            fallback=bool(task_snapshot.get("fallback_enabled", 1))
+            if task_snapshot.get("fallback_enabled") is not None
+            else None,
+            timeout_seconds=task_snapshot.get("timeout_seconds"),
+            profile=task_snapshot.get("profile") or "web-research",
+            result_format=task_snapshot.get("result_format") or "json",
+        )
+        if request:
+            base.task = request.task or instructions
+            base.worker = request.worker or base.worker
+            base.result_format = request.result_format or base.result_format
+            base.profile = request.profile or base.profile
+            base.timeout_seconds = request.timeout_seconds or base.timeout_seconds
+            base.fallback = request.fallback if request.fallback is not None else base.fallback
+            base.attachments = list(request.attachments)
+            base.artifact_inputs = list(request.artifact_inputs)
+            base.request_id = request.request_id
+            base.output_path = request.output_path
+            base.artifact_path = request.artifact_path
+            base.caller = request.caller
+            base.model = request.model
+        definition = {
+            "task_id": task_snapshot["task_id"],
+            "name": task_snapshot.get("name"),
+            "version": task_snapshot.get("version"),
+            "instructions": instructions,
+            "default_worker": task_snapshot.get("default_worker"),
+            "fallback_enabled": task_snapshot.get("fallback_enabled"),
+            "timeout_seconds": task_snapshot.get("timeout_seconds"),
+            "profile": task_snapshot.get("profile"),
+            "result_format": task_snapshot.get("result_format"),
+            "input_schema": task_snapshot.get("input_schema"),
+            "output_contract": task_snapshot.get("output_contract"),
+            "validation_policy": task_snapshot.get("validation_policy"),
+        }
+        return self.create_job(
+            base,
+            queued=queued,
+            submitted_via=submitted_via,
+            task_id=task_snapshot["task_id"],
+            task_definition=definition,
+            trigger_type="project" if caller == "service" else None,
+        )
 
     def save_run_as_task(self, run_id: str, *, name: str, description: str | None = None) -> dict[str, Any]:
         job = self.db.get_job(run_id)
