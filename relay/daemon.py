@@ -12,6 +12,14 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .agent_apps import AgentAppService
 from .api import (
+    create_task,
+    delete_task,
+    get_task,
+    list_tasks,
+    run_task,
+    runs_for_task,
+    save_run_as_task,
+    update_task,
     artifact_content,
     artifact_detail,
     artifact_lineage,
@@ -229,11 +237,27 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         "run-search",
                         "artifact-search",
                         "artifact-content-read",
+                        "task-registry",
+                        "task-run",
                     ],
                     "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
                 },
             )
+            return
+        if path == "/v1/tasks":
+            self._json(HTTPStatus.OK, list_tasks(self.daemon.engine))
+            return
+        if path.startswith("/v1/tasks/"):
+            suffix = path[len("/v1/tasks/") :]
+            try:
+                if suffix.endswith("/runs"):
+                    limit = int(params.get("limit", ["50"])[0])
+                    self._json(HTTPStatus.OK, runs_for_task(self.daemon.engine, suffix[: -len("/runs")], limit=limit))
+                else:
+                    self._json(HTTPStatus.OK, get_task(self.daemon.engine, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
         if path == "/v1/jobs":
             try:
@@ -377,6 +401,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/schedules":
             self._json(HTTPStatus.OK, {"ok": True, "schedules": self.daemon.schedule_service.list()})
             return
+
         if path.startswith("/v1/schedules/"):
             suffix = path[len("/v1/schedules/") :]
             try:
@@ -503,6 +528,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 return
         self._json(404, {"ok": False, "error": "not found"})
 
+
     def do_POST(self) -> None:
         if not self._authorized():
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
@@ -520,6 +546,21 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         isolation_acknowledged=self._body().get("isolation_acknowledged"),
                     ),
                 )
+                return
+            if path == "/v1/tasks":
+                self._json(HTTPStatus.OK, create_task(self.daemon.engine, self._body()))
+                return
+            if path == "/v1/runs/save-as-task":
+                run_id = self._body().get("run_id")
+                self._json(HTTPStatus.OK, save_run_as_task(self.daemon.engine, run_id, self._body()))
+                return
+            if path.startswith("/v1/tasks/") and path.endswith("/run"):
+                task_id = path[len("/v1/tasks/") : -len("/run")]
+                self._json(HTTPStatus.OK, run_task(self.daemon.engine, task_id, self._body()))
+                return
+            if path.startswith("/v1/tasks/"):
+                task_id = path[len("/v1/tasks/") :]
+                self._json(HTTPStatus.OK, update_task(self.daemon.engine, task_id, self._body()))
                 return
             if path == "/v1/agent-apps":
                 self._json(
@@ -550,6 +591,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     {"ok": True, "schedule": self.daemon.schedule_service.create_from_job(source_job_id, self._body())},
                 )
                 return
+
             if path.startswith("/v1/schedules/"):
                 suffix = path[len("/v1/schedules/") :]
                 if suffix.endswith("/copy"):
@@ -655,6 +697,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             except RelayError as err:
                 self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
             return
+
         if path.startswith("/v1/schedules/"):
             try:
                 schedule_id = path[len("/v1/schedules/") :]
@@ -672,6 +715,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         path = urlsplit(self.path).path
+        if path.startswith("/v1/tasks/"):
+            try:
+                task_id = path[len("/v1/tasks/") :]
+                self._json(HTTPStatus.OK, delete_task(self.daemon.engine, task_id))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/agent-apps/"):
             try:
                 agent_id = path[len("/v1/agent-apps/") :]
@@ -682,6 +732,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             except RelayError as err:
                 self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
             return
+
         if path.startswith("/v1/schedules/"):
             try:
                 schedule_id = path[len("/v1/schedules/") :]

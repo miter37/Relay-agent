@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +21,8 @@ from relay.db import Database
 from relay.engine import RelayEngine
 from relay.errors import RelayError
 from relay.models import JobRequest
+from relay.daemon import RelayDaemon
+from relay.rpc import RPCClient
 
 
 class TaskAPITests(unittest.TestCase):
@@ -71,6 +75,62 @@ class TaskAPITests(unittest.TestCase):
         promoted = save_run_as_task(self.engine, job["job_id"], {"name": "Promoted Task"})
         self.assertTrue(promoted["ok"])
         self.assertEqual(promoted["task"]["instructions"], "Ad-hoc request")
+
+
+class DaemonTaskRouteTests(unittest.TestCase):
+    @staticmethod
+    def _free_port() -> int:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        return port
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name) / "home"
+        self.config = Config(self.home)
+        self.config.init()
+        self.config.set("daemon_port", self._free_port())
+        self.daemon = RelayDaemon(self.config)
+        self.thread = threading.Thread(target=self.daemon.serve, daemon=True)
+        self.thread.start()
+        self.client = RPCClient(self.config)
+        self.assertTrue(self.client.wait_until_healthy(5.0))
+
+    def tearDown(self):
+        if self.thread.is_alive():
+            try:
+                self.client.request("POST", "/shutdown")
+            except RelayError:
+                pass
+            self.thread.join(timeout=5)
+        self.temp.cleanup()
+
+    def test_daemon_task_routes(self):
+        health = self.client.request("GET", "/health")
+        self.assertIn("task-registry", health["capabilities"])
+        self.assertIn("task-run", health["capabilities"])
+
+        created = self.client.request("POST", "/v1/tasks", {"name": "Daemon Task", "instructions": "Run via daemon"})
+        self.assertTrue(created["ok"])
+        task_id = created["task"]["task_id"]
+
+        listed = self.client.request("GET", "/v1/tasks")
+        self.assertEqual(len(listed["tasks"]), 1)
+
+        fetched = self.client.request("GET", f"/v1/tasks/{task_id}")
+        self.assertEqual(fetched["task"]["name"], "Daemon Task")
+
+        run = self.client.request("POST", f"/v1/tasks/{task_id}/run", {"queued": True})
+        self.assertTrue(run["ok"])
+        self.assertEqual(run["run"]["task_id"], task_id)
+
+        task_runs = self.client.request("GET", f"/v1/tasks/{task_id}/runs")
+        self.assertEqual(len(task_runs["runs"]), 1)
+
+        deleted = self.client.request("DELETE", f"/v1/tasks/{task_id}")
+        self.assertTrue(deleted["deleted"])
 
 
 if __name__ == "__main__":
