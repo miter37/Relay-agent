@@ -93,9 +93,14 @@ def list_jobs(
             "all": rows[-1]["created_at"],
         }[bucket]
         next_cursor = _encode_cursor((sort_value, rows[-1]["job_id"]))
+    summaries = [_summary(row, hide_task=hide_task) for row in rows]
+    for row in summaries:
+        row["run_id"] = row["job_id"]
+        row.setdefault("trigger_type", "manual")
     return {
         "ok": True,
-        "jobs": [_summary(row, hide_task=hide_task) for row in rows],
+        "jobs": summaries,
+        "runs": summaries,
         "next_cursor": next_cursor,
         "has_more": has_more,
     }
@@ -314,6 +319,92 @@ def job_logs(
 
 def list_agents(engine) -> dict[str, Any]:
     return {"ok": True, "agents": engine.agent_registry.list_agents()}
+
+
+def run_detail(engine, run_id: str) -> dict[str, Any]:
+    detail = job_detail(engine, run_id)
+    detail["run_id"] = detail["job_id"]
+    return detail
+
+
+def run_result(db: Database, run_id: str, *, max_bytes: int = 1024 * 1024) -> dict[str, Any]:
+    payload = job_result(db, run_id, max_bytes=max_bytes)
+    payload["run_id"] = run_id
+    return payload
+
+
+def run_artifacts(db: Database, run_id: str) -> dict[str, Any]:
+    payload = job_artifacts(db, run_id)
+    payload["run_id"] = run_id
+    return payload
+
+
+def run_events(db: Database, run_id: str) -> dict[str, Any]:
+    payload = job_events(db, run_id)
+    payload["run_id"] = run_id
+    return payload
+
+
+def run_lineage(db: Database, run_id: str) -> dict[str, Any]:
+    job = db.get_job(run_id)
+    if not job:
+        raise RelayError("JOB_NOT_FOUND", f"Job not found: {run_id}")
+    return {
+        "ok": True,
+        "job_id": run_id,
+        "run_id": run_id,
+        "inputs": db.lineage_for_job(run_id),
+        "outputs": db.artifacts_for_job(run_id),
+    }
+
+
+def artifact_detail(db: Database, artifact_uid: str) -> dict[str, Any]:
+    artifact = db.artifact_by_uid(artifact_uid)
+    if not artifact:
+        raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
+    return {"ok": True, "artifact": artifact}
+
+
+def artifact_lineage(db: Database, artifact_uid: str) -> dict[str, Any]:
+    artifact = db.artifact_by_uid(artifact_uid)
+    if not artifact:
+        raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
+    return {"ok": True, "artifact": artifact, "consumers": db.lineage_for_artifact(artifact_uid)}
+
+
+def run_logs(
+    db: Database,
+    run_id: str,
+    *,
+    attempt_id: int,
+    stream: str,
+    offset: int | None = None,
+    limit: int = 16000,
+    errors_only: bool = False,
+) -> dict[str, Any]:
+    payload = job_logs(
+        db,
+        run_id,
+        attempt_id=attempt_id,
+        stream=stream,
+        offset=offset,
+        limit=limit,
+        errors_only=errors_only,
+    )
+    payload["run_id"] = run_id
+    return payload
+
+
+def list_runs(db: Database, **kwargs: Any) -> dict[str, Any]:
+    payload = list_jobs(db, **kwargs)
+    payload["runs"] = payload["jobs"]
+    return payload
+
+
+def run_progress(engine, run_id: str) -> dict[str, Any]:
+    payload = check_job_progress(engine, run_id)
+    payload["run_id"] = run_id
+    return payload
 
 
 def get_agent(engine, agent_id: str) -> dict[str, Any]:

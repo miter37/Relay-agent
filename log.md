@@ -1,3 +1,6 @@
+- 2026-08-03 18:14 | Clarified product direction: any human, Agent, or service may call Relay; any enabled, currently health-verified backend may be a Worker.
+- 2026-08-03 19:30 | Implemented Phase 0 domain compatibility: schema v3 metadata, artifact identity, Run API aliases, and additive compatibility capabilities.
+- 2026-08-03 20:30 | Implemented Phase 1 Artifact snapshots and lineage: UID-selected inputs, immutable manifests, source/consumer queries, CLI option, and GUI selection flow.
 - 2026-07-24 16:00 | Fixed bare POSIX Working folder inference for Linux release checks and excluded URL paths; 248 tests, Ruff, and release build passed.
 - 2026-07-24 15:45 | Prepared the complete G5 feature set and release notes for the Relay v1.1.0 GitHub release.
 - 2026-07-24 15:42 | Added manual non-interrupting Job diagnostics with persistent Check results in Logs; 247 tests, Ruff, and release build passed.

@@ -123,7 +123,9 @@ class G2NewTaskGuiTests(unittest.TestCase):
 
         labels = [view.tabs.tabText(index) for index in range(view.tabs.count())]
 
-        self.assertEqual(labels, ["Overview", "Task", "Progress", "Answer", "Result", "Files", "Logs", "Events"])
+        self.assertEqual(
+            labels, ["Overview", "Task", "Inputs", "Progress", "Answer", "Result", "Files", "Logs", "Events"]
+        )
         self.assertFalse(view.cancel_button.isEnabled())
         self.assertTrue(view.rerun_button.isEnabled())
         self.assertFalse(view.copy_task_button.isEnabled())

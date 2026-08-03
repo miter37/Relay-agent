@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -36,6 +37,7 @@ from .util import (
     is_within,
     json_dump,
     local_date,
+    new_artifact_uid,
     new_job_id,
     safe_resolve,
     sha256_bytes,
@@ -73,6 +75,7 @@ TECHNICAL_FALLBACK_CODES = {
 
 VALID_CALLERS = {"human", "hermes", "service", "schedule"}
 VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy"}
+VALID_TRIGGER_TYPES = {"manual", "api", "schedule", "rerun"}
 
 
 class RelayEngine:
@@ -163,6 +166,106 @@ class RelayEngine:
             raise RelayError("INVALID_REQUEST", f"Unsupported submitted_via: {submitted_via}")
         return value
 
+    @staticmethod
+    def _trigger_type(request: JobRequest, submitted_via: str | None, *, schedule_id: str | None) -> str:
+        if schedule_id or request.caller == "schedule" or submitted_via == "schedule":
+            return "schedule"
+        if submitted_via in {"cli", "gui", "hermes"}:
+            return "api" if request.caller in {"hermes", "service"} else "manual"
+        return "manual"
+
+    @staticmethod
+    def _task_snapshot(
+        request: JobRequest,
+        *,
+        trigger_type: str,
+        artifact_inputs: list[dict[str, Any]] | None = None,
+    ) -> str:
+        snapshot = {
+            "task": request.task,
+            "task_file": request.task_file,
+            "attachments": list(request.attachments),
+            "artifact_inputs": artifact_inputs or [],
+            "worker": request.worker,
+            "fallback": request.fallback,
+            "fallback_agents": list(request.fallback_agents) if request.fallback_agents else None,
+            "result_format": request.result_format,
+            "profile": request.profile,
+            "timeout_seconds": request.timeout_seconds,
+            "model": request.model,
+            "trigger_type": trigger_type,
+        }
+        return canonical_json(snapshot)
+
+    def _resolve_artifact_inputs(self, request: JobRequest) -> list[dict[str, Any]]:
+        if not request.artifact_inputs:
+            return []
+        resolved: list[dict[str, Any]] = []
+        aliases: set[str] = set()
+        for item in request.artifact_inputs:
+            if not isinstance(item, dict):
+                raise RelayError("INVALID_REQUEST", "Each artifact input must be an object.")
+            uid = str(item.get("artifact_uid") or "").strip()
+            alias = str(item.get("alias") or "").strip().upper()
+            if not uid or not alias or not re.fullmatch(r"A[1-9][0-9]*", alias):
+                raise RelayError(
+                    "INVALID_REQUEST", "Artifact inputs require a valid artifact_uid and alias such as A1."
+                )
+            if alias in aliases:
+                raise RelayError("INVALID_REQUEST", f"Artifact alias is duplicated: {alias}")
+            aliases.add(alias)
+            artifact = self.db.artifact_by_uid(uid)
+            if not artifact:
+                raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {uid}")
+            source = safe_resolve(Path(str(artifact["final_path"])))
+            if not source.is_file():
+                raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact file is not available: {source}")
+            if not is_within(source, self.config.path_value("artifact_root")):
+                raise RelayError("ARTIFACT_PATH_VIOLATION", f"Artifact is outside Relay artifact storage: {source}")
+            size = source.stat().st_size
+            digest = sha256_file(source)
+            if size != int(artifact["size"]) or digest != artifact["sha256"]:
+                raise RelayError("ARTIFACT_CHANGED", f"Artifact content changed: {uid}")
+            resolved.append(
+                {
+                    "artifact_uid": uid,
+                    "alias": alias,
+                    "source_job_id": artifact["job_id"],
+                    "source_relative_path": artifact["relative_path"],
+                    "source_final_path": str(source),
+                    "source_sha256": digest,
+                    "source_size": size,
+                    "role": artifact.get("role") or "output",
+                    "mime_type": artifact.get("mime_type"),
+                }
+            )
+        return resolved
+
+    def _stage_artifact_inputs(self, job_id: str, resolved: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not resolved:
+            return []
+        snapshot_root = ensure_dir(self.config.path_value("input_snapshot_root") / job_id)
+        manifest: list[dict[str, Any]] = []
+        for item in resolved:
+            source = Path(item["source_final_path"])
+            name = Path(item["source_relative_path"]).name or f"artifact-{item['artifact_uid']}"
+            destination = snapshot_root / f"{item['alias']}-{name}"
+            shutil.copy2(source, destination)
+            digest = sha256_file(destination)
+            size = destination.stat().st_size
+            if digest != item["source_sha256"] or size != item["source_size"]:
+                raise RelayError("ARTIFACT_CHANGED", f"Artifact snapshot verification failed: {item['artifact_uid']}")
+            item = {
+                **item,
+                "snapshot_relative_path": str(destination.relative_to(self.config.home)),
+                "snapshot_path": str(destination),
+                "snapshot_sha256": digest,
+                "snapshot_size": size,
+                "binding_mode": "snapshot",
+            }
+            manifest.append(item)
+        return manifest
+
     def _default_paths(self, job_id: str, request: JobRequest) -> tuple[Path, Path]:
         ext = ".json" if request.result_format == "json" else ".txt"
         output = (
@@ -186,9 +289,11 @@ class RelayEngine:
         schedule_id: str | None = None,
         scheduled_for: str | None = None,
         schedule_output_root: Path | None = None,
+        trigger_type: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         self._resolve_request_task(request)
         self.config.reload()
+        resolved_inputs = self._resolve_artifact_inputs(request)
         requested_target = request.target_path or infer_target_path(request.task)
         target = resolve_target_path(requested_target) if requested_target else None
         request.target_path = str(target) if target else None
@@ -249,6 +354,7 @@ class RelayEngine:
             if existing and action == "reuse":
                 return existing, True
         job_id = new_job_id()
+        resolved_inputs = self._stage_artifact_inputs(job_id, resolved_inputs)
         output, artifacts = self._default_paths(job_id, request)
         validate_requested_paths(
             self.config,
@@ -263,11 +369,46 @@ class RelayEngine:
         title, task_preview = self._job_title_and_preview(request, job_id)
         replayable = bool(self.config.get("store_replayable_requests", True))
         task_text = request.task if self._history_display_mode() == "full" else None
+        submitted_source = self._submitted_via(request, submitted_via)
+        resolved_trigger = trigger_type or self._trigger_type(request, submitted_source, schedule_id=schedule_id)
+        if resolved_trigger not in VALID_TRIGGER_TYPES:
+            raise RelayError("INVALID_REQUEST", f"Unsupported trigger_type: {resolved_trigger}")
         row = {
             "job_id": job_id,
             "request_id": request.request_id,
             "caller": request.caller,
-            "submitted_via": self._submitted_via(request, submitted_via),
+            "submitted_via": submitted_source,
+            "trigger_type": resolved_trigger,
+            "task_id": None,
+            "task_snapshot_json": self._task_snapshot(
+                request, trigger_type=resolved_trigger, artifact_inputs=resolved_inputs
+            ),
+            "input_manifest_json": canonical_json(
+                [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key
+                        in {
+                            "alias",
+                            "artifact_uid",
+                            "source_job_id",
+                            "source_relative_path",
+                            "source_sha256",
+                            "source_size",
+                            "snapshot_relative_path",
+                            "snapshot_sha256",
+                            "snapshot_size",
+                            "binding_mode",
+                            "role",
+                            "mime_type",
+                        }
+                    }
+                    for item in resolved_inputs
+                ]
+            )
+            if resolved_inputs
+            else None,
             "task_hash": computed_hash,
             "task_text": task_text,
             "task_preview": task_preview,
@@ -299,6 +440,22 @@ class RelayEngine:
                     f"request_id is already associated with a different task: {request.request_id}",
                 ) from exc
             return existing, True
+        for item in resolved_inputs:
+            self.db.add_lineage(
+                {
+                    "consumer_job_id": job_id,
+                    "source_artifact_uid": item["artifact_uid"],
+                    "source_job_id": item["source_job_id"],
+                    "alias": item["alias"],
+                    "binding_mode": item["binding_mode"],
+                    "source_relative_path": item["source_relative_path"],
+                    "source_sha256": item["source_sha256"],
+                    "source_size": item["source_size"],
+                    "snapshot_relative_path": item["snapshot_relative_path"],
+                    "snapshot_sha256": item["snapshot_sha256"],
+                    "snapshot_size": item["snapshot_size"],
+                }
+            )
         self.db.add_event(job_id, "JOB_CREATED", {"queued": queued, "request_id": request.request_id})
         return self.db.get_job(job_id) or row, False
 
@@ -334,7 +491,13 @@ class RelayEngine:
         self.db.add_event(job_id, event)
         return {"ok": True, "job_id": job_id, "status": updated["status"], "changed": True}
 
-    def _prepare_workspace(self, job_id: str, worker: str, request: JobRequest) -> dict[str, Any]:
+    def _prepare_workspace(
+        self,
+        job_id: str,
+        worker: str,
+        request: JobRequest,
+        artifact_inputs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         workspace_root = (
             safe_resolve(Path(request.workspace)) if request.workspace else self.config.path_value("workspace_root")
         )
@@ -355,13 +518,22 @@ class RelayEngine:
         schema_file = workspace / "schema.json"
         write_schema(schema_file)
         attachments = copy_attachments(request, input_dir)
+        artifact_input_files: list[dict[str, Any]] = []
+        for item in artifact_inputs or []:
+            source = Path(item["snapshot_path"])
+            destination = input_dir / Path(item["snapshot_relative_path"]).name
+            shutil.copy2(source, destination)
+            artifact_input_files.append({**item, "workspace_path": str(destination)})
         request_md = build_request_markdown(
             request,
             result_file,
             artifact_dir,
             attachments,
             target_workspace.working_copy if target_workspace else None,
+            artifact_input_files,
         )
+        request.resolved_artifact_inputs = artifact_input_files
+
         request_file = workspace / "request.md"
         request_file.write_text(request_md, encoding="utf-8", newline="\n")
         json_dump(
@@ -396,6 +568,14 @@ class RelayEngine:
             raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
         request = JobRequest.from_dict(json.loads(job["request_json"]))
         self._resolve_request_task(request)
+        input_manifest = json.loads(job.get("input_manifest_json") or "[]")
+        if not isinstance(input_manifest, list):
+            input_manifest = []
+        input_manifest = [
+            {**item, "snapshot_path": str(self.config.home / item["snapshot_relative_path"])}
+            for item in input_manifest
+            if isinstance(item, dict) and item.get("snapshot_relative_path")
+        ]
         self._set_progress(job_id, stage="preparing", process_alive=None)
         self.db.update_job(job_id, status="PREPARING", started_at=utc_now())
         self.db.add_event(job_id, "JOB_PREPARING")
@@ -417,7 +597,7 @@ class RelayEngine:
                     return self._fail_job(job_id, err.code, err.message, errors)
                 continue
             try:
-                paths = self._prepare_workspace(job_id, worker, request)
+                paths = self._prepare_workspace(job_id, worker, request, input_manifest)
             except RelayError as err:
                 errors.append({"worker": worker, "code": err.code, "message": err.message})
                 return self._fail_job(job_id, err.code, err.message, errors)
@@ -595,6 +775,17 @@ class RelayEngine:
                 )
                 if target_workspace and target_delta and (target_delta.changed or target_delta.deleted):
                     apply_delta(target_workspace, target_delta)
+                self.db.add_artifact(
+                    job_id,
+                    relative_path=output_path.name,
+                    final_path=str(output_path),
+                    mime_type="application/json" if request.result_format == "json" else "text/plain",
+                    size=output_path.stat().st_size,
+                    sha256=sha256_file(output_path),
+                    artifact_uid=new_artifact_uid(),
+                    role="result",
+                    producer_attempt_id=attempt_id,
+                )
                 for item in artifact_records:
                     self.db.add_artifact(
                         job_id,
@@ -603,11 +794,17 @@ class RelayEngine:
                         mime_type=item["mime_type"],
                         size=item["size"],
                         sha256=item["sha256"],
+                        artifact_uid=new_artifact_uid(),
+                        role="output",
+                        producer_attempt_id=attempt_id,
                     )
                 receipt = {
                     "ok": True,
                     "status": "partial" if result_status == "partial" else "completed",
                     "job_id": job_id,
+                    "run_id": job_id,
+                    "trigger_type": job.get("trigger_type", "manual"),
+                    "task_snapshot": json.loads(job["task_snapshot_json"]) if job.get("task_snapshot_json") else None,
                     "worker": worker,
                     "result_path": str(output_path),
                     "artifact_path": str(artifact_path),
@@ -642,7 +839,23 @@ class RelayEngine:
                 )
                 self.db.add_event(job_id, "JOB_COMPLETED", receipt)
                 json_dump(output_path.parent / "relay-receipt.json", receipt)
-                json_dump(artifact_path / "manifest.json", {"job_id": job_id, "artifacts": artifact_records})
+                json_dump(
+                    artifact_path / "manifest.json",
+                    {
+                        "job_id": job_id,
+                        "run_id": job_id,
+                        "artifacts": [
+                            {
+                                **item,
+                                "job_id": job_id,
+                                "run_id": job_id,
+                                "role": "output",
+                            }
+                            for item in artifact_records
+                        ],
+                        "inputs": input_manifest,
+                    },
+                )
                 self.db.scrub_non_replayable(job_id)
                 self._clear_progress(job_id)
                 return receipt
@@ -692,16 +905,38 @@ class RelayEngine:
         self._clear_progress(job_id)
         return receipt
 
-    def run(self, request: JobRequest, submitted_via: str | None = None) -> dict[str, Any]:
-        job, reused = self.create_job(request, queued=False, submitted_via=submitted_via)
+    def run(
+        self,
+        request: JobRequest,
+        submitted_via: str | None = None,
+        *,
+        trigger_type: str | None = None,
+    ) -> dict[str, Any]:
+        job, reused = self.create_job(
+            request,
+            queued=False,
+            submitted_via=submitted_via,
+            trigger_type=trigger_type,
+        )
         if reused:
             receipt = self.receipt(job["job_id"])
             receipt["deduplicated"] = True
             return receipt
         return self.execute_job(job["job_id"])
 
-    def queue(self, request: JobRequest, submitted_via: str | None = None) -> dict[str, Any]:
-        job, reused = self.create_job(request, queued=True, submitted_via=submitted_via)
+    def queue(
+        self,
+        request: JobRequest,
+        submitted_via: str | None = None,
+        *,
+        trigger_type: str | None = None,
+    ) -> dict[str, Any]:
+        job, reused = self.create_job(
+            request,
+            queued=True,
+            submitted_via=submitted_via,
+            trigger_type=trigger_type,
+        )
         return {
             "ok": True,
             "status": "reused" if reused else "queued",
@@ -751,6 +986,8 @@ class RelayEngine:
             "ok": job["status"] not in {"FAILED", "CANCELLED"},
             "status": job["status"].lower(),
             "job_id": job_id,
+            "run_id": job_id,
+            "trigger_type": job.get("trigger_type", "manual"),
             "worker": job.get("actual_worker"),
             "result_path": job.get("output_path"),
             "artifact_path": job.get("artifact_path"),
@@ -782,7 +1019,7 @@ class RelayEngine:
         request.force_new = force_new
         request.output_path = None
         request.artifact_path = None
-        return self.run(request)
+        return self.run(request, submitted_via="gui", trigger_type="rerun")
 
     def queue_rerun(self, job_id: str, submitted_via: str = "gui") -> dict[str, Any]:
         job = self.db.get_job(job_id)
@@ -796,6 +1033,6 @@ class RelayEngine:
         request.output_path = None
         request.artifact_path = None
         request.caller = "human"
-        result = self.queue(request, submitted_via=submitted_via)
+        result = self.queue(request, submitted_via=submitted_via, trigger_type="rerun")
         result["source_job_id"] = job_id
         return result

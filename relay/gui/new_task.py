@@ -40,6 +40,7 @@ class JobFilePickerDialog(QDialog):
             size = self._format_size(file.get("size"))
             item = QListWidgetItem(f"{kind} — {name}{f' ({size})' if size else ''}")
             item.setData(Qt.UserRole, path)
+            item.setData(Qt.UserRole + 1, file)
             item.setToolTip(path)
             item.setCheckState(Qt.Unchecked)
             self.file_list.addItem(item)
@@ -55,6 +56,22 @@ class JobFilePickerDialog(QDialog):
             for index in range(self.file_list.count())
             if (item := self.file_list.item(index)).checkState() == Qt.Checked
         ]
+
+    def selected_files(self) -> list[dict]:
+        return [
+            dict(item.data(Qt.UserRole + 1) or {})
+            for index in range(self.file_list.count())
+            if (item := self.file_list.item(index)).checkState() == Qt.Checked
+        ]
+
+    def selected_artifact_inputs(self) -> list[dict]:
+        selected: list[dict] = []
+        alias_index = 1
+        for item in self.selected_files():
+            if item.get("artifact_uid"):
+                selected.append({"artifact_uid": item["artifact_uid"], "alias": f"A{alias_index}"})
+                alias_index += 1
+        return selected
 
     @staticmethod
     def _format_size(value) -> str:
@@ -76,6 +93,7 @@ class NewTaskView(QWidget):
         super().__init__(parent)
         self._job_lookup_allowed = True
         self._job_lookup_pending = False
+        self._selected_artifact_inputs: list[dict] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -258,7 +276,12 @@ class NewTaskView(QWidget):
     def choose_job_files(self, job_id: str, files: list[dict]) -> None:
         dialog = JobFilePickerDialog(job_id, files, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.add_attachments(dialog.selected_paths())
+            selected = dialog.selected_files()
+            self.add_attachments([item["path"] for item in selected if not item.get("artifact_uid")])
+            self._selected_artifact_inputs = dialog.selected_artifact_inputs()
+
+    def _artifact_inputs(self) -> list[dict]:
+        return list(getattr(self, "_selected_artifact_inputs", []))
 
     def add_attachments(self, paths: list[str]) -> None:
         existing = {self.attachment_list.item(i).text() for i in range(self.attachment_list.count())}
@@ -299,6 +322,7 @@ class NewTaskView(QWidget):
             "timeout_seconds": self.timeout_spin.value(),
             "request_id": self.request_id_edit.text().strip() or None,
             "attachments": [self.attachment_list.item(i).text() for i in range(self.attachment_list.count())],
+            "artifact_inputs": self._artifact_inputs(),
             "overwrite": self.overwrite_check.isChecked(),
             "force_new": self.force_new_check.isChecked(),
             "model": self.model_edit.text().strip() or None,
@@ -318,6 +342,7 @@ class NewTaskView(QWidget):
         ):
             field.clear()
         self.attachment_list.clear()
+        self._selected_artifact_inputs.clear()
         self.worker_combo.setCurrentText("auto")
         self.profile_combo.setCurrentText("web-research")
         self.fallback_check.setChecked(True)

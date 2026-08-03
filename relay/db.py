@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from .errors import RelayError
-from .util import utc_now
+from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 4
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     schedule_id TEXT,
     scheduled_for TEXT,
     replayable INTEGER NOT NULL DEFAULT 1,
+    trigger_type TEXT NOT NULL DEFAULT 'manual',
+    task_id TEXT,
+    task_snapshot_json TEXT,
+    input_manifest_json TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_request_id
@@ -53,6 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_completed_at ON jobs(completed_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_submitted_via ON jobs(submitted_via);
 CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_trigger ON jobs(trigger_type, created_at);
 
 CREATE TABLE IF NOT EXISTS schedules (
     schedule_id TEXT PRIMARY KEY,
@@ -128,8 +133,34 @@ CREATE TABLE IF NOT EXISTS artifacts (
     mime_type TEXT,
     size INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
+    artifact_uid TEXT,
+    role TEXT NOT NULL DEFAULT 'output',
+    producer_attempt_id INTEGER,
     created_at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_uid
+    ON artifacts(artifact_uid) WHERE artifact_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artifacts_job_role ON artifacts(job_id, role);
+
+CREATE TABLE IF NOT EXISTS artifact_lineage (
+    lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumer_job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    source_artifact_uid TEXT NOT NULL,
+    source_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    alias TEXT NOT NULL,
+    binding_mode TEXT NOT NULL DEFAULT 'snapshot',
+    source_relative_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    source_size INTEGER NOT NULL,
+    snapshot_relative_path TEXT NOT NULL,
+    snapshot_sha256 TEXT NOT NULL,
+    snapshot_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(consumer_job_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_artifact ON artifact_lineage(source_artifact_uid);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_job ON artifact_lineage(source_job_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer_job_id);
 
 CREATE TABLE IF NOT EXISTS events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +241,42 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs(schedule_
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_job ON schedule_runs(job_id);
 """
 
+MIGRATION_2_TO_3 = """
+ALTER TABLE jobs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE jobs ADD COLUMN task_id TEXT;
+ALTER TABLE jobs ADD COLUMN task_snapshot_json TEXT;
+ALTER TABLE artifacts ADD COLUMN artifact_uid TEXT;
+ALTER TABLE artifacts ADD COLUMN role TEXT NOT NULL DEFAULT 'output';
+ALTER TABLE artifacts ADD COLUMN producer_attempt_id INTEGER;
+CREATE INDEX IF NOT EXISTS idx_jobs_trigger ON jobs(trigger_type, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_uid
+    ON artifacts(artifact_uid) WHERE artifact_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artifacts_job_role ON artifacts(job_id, role);
+"""
+
+MIGRATION_3_TO_4 = """
+ALTER TABLE jobs ADD COLUMN input_manifest_json TEXT;
+CREATE TABLE IF NOT EXISTS artifact_lineage (
+    lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumer_job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    source_artifact_uid TEXT NOT NULL,
+    source_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    alias TEXT NOT NULL,
+    binding_mode TEXT NOT NULL DEFAULT 'snapshot',
+    source_relative_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    source_size INTEGER NOT NULL,
+    snapshot_relative_path TEXT NOT NULL,
+    snapshot_sha256 TEXT NOT NULL,
+    snapshot_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(consumer_job_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_artifact ON artifact_lineage(source_artifact_uid);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_job ON artifact_lineage(source_job_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer_job_id);
+"""
+
 LEGACY_JOB_COLUMNS = {
     "job_id",
     "request_id",
@@ -283,6 +350,13 @@ class Database:
                     for statement in MIGRATION_1_TO_2.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for statement in MIGRATION_2_TO_3.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_3_TO_4.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     self._backfill_job_metadata(conn)
                     conn.execute("COMMIT")
@@ -290,13 +364,22 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version == 1:
+            elif version in {1, 2, 3}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
-                    for statement in MIGRATION_1_TO_2.split(";"):
+                    if version == 1:
+                        for statement in MIGRATION_1_TO_2.split(";"):
+                            if statement.strip():
+                                conn.execute(statement)
+                    if version in {1, 2}:
+                        for statement in MIGRATION_2_TO_3.split(";"):
+                            if statement.strip():
+                                conn.execute(statement)
+                    for statement in MIGRATION_3_TO_4.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
                 except Exception as exc:
@@ -346,6 +429,13 @@ class Database:
         first_line = next((line.strip() for line in task.splitlines() if line.strip()), "")
         value = " ".join((first_line or f"Job {job_id[:8]}").split())
         return value if len(value) <= 60 else value[:59].rstrip() + "…"
+
+    def _backfill_artifact_uids(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT artifact_id FROM artifacts WHERE artifact_uid IS NULL ORDER BY artifact_id"
+        ).fetchall()
+        for row in rows:
+            conn.execute("UPDATE artifacts SET artifact_uid=? WHERE artifact_id=?", (new_artifact_uid(), row[0]))
 
     def _backfill_job_metadata(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(
@@ -682,6 +772,35 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY artifact_id", (job_id,)).fetchall()
             return [dict(r) for r in rows]
+
+    def artifact_by_uid(self, artifact_uid: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM artifacts WHERE artifact_uid=?", (artifact_uid,)).fetchone()
+            return dict(row) if row else None
+
+    def add_lineage(self, row: dict[str, Any]) -> int:
+        values = {"created_at": utc_now(), "binding_mode": "snapshot", **row}
+        keys = list(values)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"INSERT INTO artifact_lineage ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+            return int(cursor.lastrowid)
+
+    def lineage_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM artifact_lineage WHERE consumer_job_id=? ORDER BY lineage_id", (job_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def lineage_for_artifact(self, artifact_uid: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM artifact_lineage WHERE source_artifact_uid=? ORDER BY lineage_id", (artifact_uid,)
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def add_audit(
         self,

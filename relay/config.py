@@ -175,6 +175,8 @@ class Config:
             "adapter_spec_root": str(self.home / "adapter-specs"),
             "runtime_root": str(self.home / "runtime"),
             "database_path": str(self.home / "relay.db"),
+            "input_snapshot_root": str(self.home / "input-snapshots"),
+            "artifact_input_max_bytes": 1024 * 1024 * 1024,
             "allowed_input_roots": [str(self.home / "input"), str(self.home / "requests")],
             "allowed_output_roots": [str(self.home / "results")],
             "allowed_artifact_roots": [str(self.home / "artifacts")],

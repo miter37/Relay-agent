@@ -35,6 +35,10 @@ def new_job_id() -> str:
     return "".join(reversed(out))
 
 
+def new_artifact_uid() -> str:
+    return new_job_id()
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

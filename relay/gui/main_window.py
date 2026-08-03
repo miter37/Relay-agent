@@ -442,7 +442,14 @@ class MainWindow(QMainWindow):
         candidates: list[dict] = []
         seen: set[str] = set()
 
-        def append_candidate(kind: str, value: str | None, *, name: str | None = None, size=None) -> None:
+        def append_candidate(
+            kind: str,
+            value: str | None,
+            *,
+            name: str | None = None,
+            size=None,
+            artifact: dict | None = None,
+        ) -> None:
             if not value:
                 return
             path = Path(value)
@@ -458,6 +465,16 @@ class MainWindow(QMainWindow):
                     "name": name or path.name,
                     "path": str(path),
                     "size": path.stat().st_size if size is None else size,
+                    **(
+                        {
+                            "artifact_uid": artifact.get("artifact_uid"),
+                            "role": artifact.get("role"),
+                            "sha256": artifact.get("sha256"),
+                            "source_job_id": artifact.get("job_id"),
+                        }
+                        if artifact
+                        else {}
+                    ),
                 }
             )
 
@@ -469,8 +486,21 @@ class MainWindow(QMainWindow):
                 artifact.get("final_path"),
                 name=artifact.get("relative_path"),
                 size=artifact.get("size"),
+                artifact=artifact,
             )
         return candidates
+
+    @staticmethod
+    def _job_artifact_candidates(artifacts: dict) -> list[dict]:
+        return [item for item in MainWindow._job_input_candidates({}, artifacts) if item.get("artifact_uid")]
+
+    @staticmethod
+    def _artifact_inputs_from_candidates(candidates: list[dict]) -> list[dict]:
+        return [
+            {"artifact_uid": item["artifact_uid"], "alias": f"A{index}"}
+            for index, item in enumerate(candidates, start=1)
+            if item.get("artifact_uid")
+        ]
 
     def _cancel_job(self, job_id: str) -> None:
         if self.current_mode == "normal":
@@ -762,6 +792,9 @@ class MainWindow(QMainWindow):
                 self.job_detail_view.set_check_pending(False)
                 self.job_detail_view.select_check_results()
                 self._request(("check_events", kind[1]), f"/v1/jobs/{kind[1]}/events")
+            return
+        if kind == "lineage":
+            self.job_detail_view.set_content("Inputs", self._format_payload(payload.get("inputs", [])))
             return
         if isinstance(kind, tuple) and kind[0] == "check_events":
             if self.selected_job_id == kind[1] and self.detail_view_mode == "job":
@@ -1209,7 +1242,11 @@ class MainWindow(QMainWindow):
         if tab_name in {"Answer", "Result"}:
             self._request(("result", job_id), f"/v1/jobs/{job_id}/result")
             return
-        paths = {"Files": ("artifacts", "artifacts"), "Events": ("events", "events")}
+        paths = {
+            "Files": ("artifacts", "artifacts"),
+            "Events": ("events", "events"),
+            "Inputs": ("lineage", "lineage"),
+        }
         if tab_name in paths:
             kind, path = paths[tab_name]
             self._request(kind, f"/v1/jobs/{job_id}/{path}")

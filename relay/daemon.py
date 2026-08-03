@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .agent_apps import AgentAppService
 from .api import (
+    artifact_detail,
+    artifact_lineage,
     check_job_progress,
     get_agent,
     job_artifacts,
@@ -21,6 +23,14 @@ from .api import (
     job_result,
     list_agents,
     list_jobs,
+    list_runs,
+    run_artifacts,
+    run_detail,
+    run_events,
+    run_lineage,
+    run_logs,
+    run_progress,
+    run_result,
 )
 from .autostart import AutoStartManager
 from .cleanup import CleanupManager
@@ -205,6 +215,14 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     "daemon_version": __version__,
                     "api_versions": ["v1"],
                     "api_schema_revision": 5,
+                    "capabilities": [
+                        "runs-alias",
+                        "artifact-uid",
+                        "run-trigger",
+                        "task-snapshot",
+                        "artifact-lineage",
+                        "artifact-input-snapshot",
+                    ],
                     "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
                 },
@@ -229,6 +247,36 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     date_from=value("from"),
                     date_to=value("to"),
                     limit=limit,
+                    cursor=value("cursor"),
+                    hide_task=self.daemon.engine._history_display_mode() != "full",
+                )
+                self._json(HTTPStatus.OK, payload)
+            except (ValueError, RelayError) as err:
+                if isinstance(err, RelayError):
+                    code, message = err.code, err.message
+                else:
+                    code, message = "INVALID_REQUEST", str(err)
+                self._api_error(HTTPStatus.BAD_REQUEST, code, message)
+            except Exception as exc:
+                self._api_error(HTTPStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", str(exc))
+            return
+        if path == "/v1/runs":
+            try:
+
+                def value(name: str) -> str | None:
+                    values = params.get(name, [])
+                    return values[0] if values else None
+
+                payload = list_runs(
+                    self.daemon.db,
+                    bucket=value("bucket") or "all",
+                    status=value("status") or value("result"),
+                    agent=value("agent"),
+                    submitted_via=value("source"),
+                    query=value("q"),
+                    date_from=value("from"),
+                    date_to=value("to"),
+                    limit=int(value("limit") or "50"),
                     cursor=value("cursor"),
                     hide_task=self.daemon.engine._history_display_mode() != "full",
                 )
@@ -294,6 +342,56 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, {"ok": True, "schedule": self.daemon.schedule_service.show(suffix)})
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path.startswith("/v1/artifacts/"):
+            suffix = path[len("/v1/artifacts/") :]
+            try:
+                if suffix.endswith("/lineage"):
+                    self._json(HTTPStatus.OK, artifact_lineage(self.daemon.db, suffix[: -len("/lineage")]))
+                else:
+                    self._json(HTTPStatus.OK, artifact_detail(self.daemon.db, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path.startswith("/v1/runs/"):
+            suffix = path[len("/v1/runs/") :]
+            try:
+                if suffix.endswith("/lineage"):
+                    self._json(HTTPStatus.OK, run_lineage(self.daemon.db, suffix[: -len("/lineage")]))
+                elif suffix.endswith("/result"):
+                    self._json(HTTPStatus.OK, run_result(self.daemon.db, suffix[: -len("/result")]))
+                elif suffix.endswith("/artifacts"):
+                    self._json(HTTPStatus.OK, run_artifacts(self.daemon.db, suffix[: -len("/artifacts")]))
+                elif suffix.endswith("/events"):
+                    self._json(HTTPStatus.OK, run_events(self.daemon.db, suffix[: -len("/events")]))
+                elif suffix.endswith("/logs"):
+                    values = parse_qs(parsed.query, keep_blank_values=True)
+                    attempt_values = values.get("attempt_id", [])
+                    stream_values = values.get("stream", [])
+                    if not attempt_values or not stream_values:
+                        raise RelayError("INVALID_REQUEST", "attempt_id and stream are required.")
+                    self._json(
+                        HTTPStatus.OK,
+                        run_logs(
+                            self.daemon.db,
+                            suffix[: -len("/logs")],
+                            attempt_id=int(attempt_values[0]),
+                            stream=stream_values[0],
+                            offset=int(values["offset"][0]) if values.get("offset") and values["offset"][0] else None,
+                            limit=int(values["limit"][0]) if values.get("limit") and values["limit"][0] else 16000,
+                            errors_only=bool(
+                                values.get("errors_only") and values["errors_only"][0].lower() in {"1", "true", "yes"}
+                            ),
+                        ),
+                    )
+                elif suffix.endswith("/check"):
+                    self._json(HTTPStatus.OK, run_progress(self.daemon.engine, suffix[: -len("/check")]))
+                else:
+                    self._json(HTTPStatus.OK, run_detail(self.daemon.engine, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            except (TypeError, ValueError) as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(err))
             return
         if path.startswith("/v1/jobs/"):
             suffix = path[len("/v1/jobs/") :]

@@ -71,6 +71,7 @@ def build_request_markdown(
     artifact_dir: Path,
     attachments: list[dict],
     target_working_copy: Path | None = None,
+    artifact_inputs: list[dict] | None = None,
 ) -> str:
     format_rules = (
         "Return a UTF-8 JSON object matching schema.json exactly. Do not wrap it in Markdown fences.\n"
@@ -83,6 +84,14 @@ def build_request_markdown(
         else "Return a non-empty UTF-8 plain-text result."
     )
     attachment_lines = "\n".join(f"- `{item['name']}` at `input/{item['name']}`" for item in attachments) or "- None"
+    artifact_input_lines = (
+        "\n".join(
+            f"- `{item['alias']}` at `{item['snapshot_relative_path']}` "
+            f"(source {item['source_job_id']}/{item['source_relative_path']}, sha256={item['snapshot_sha256']})"
+            for item in artifact_inputs or []
+        )
+        or "- None"
+    )
     profile_rules = {
         "web-research": (
             "- Use current web sources where available.\n"
@@ -123,6 +132,9 @@ def build_request_markdown(
 
 ## Input Attachments
 {attachment_lines}
+
+## Artifact Inputs (immutable snapshots)
+{artifact_input_lines}
 
 ## User Task
 {task_text}

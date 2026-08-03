@@ -27,6 +27,8 @@ class JobRequest:
     machine: bool = False
     force_new: bool = False
     model: str | None = None
+    artifact_inputs: list[dict[str, str]] = field(default_factory=list)
+    resolved_artifact_inputs: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

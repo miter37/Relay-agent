@@ -76,6 +76,14 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("--caller", default="human")
     parser.add_argument("--request-id")
     parser.add_argument("--attach", action="append", default=[], dest="attachments")
+    parser.add_argument(
+        "--input-artifact",
+        action="append",
+        default=[],
+        dest="artifact_inputs",
+        metavar="UID[=ALIAS]",
+        help="Use a delivered Artifact by UID, optionally assigning an alias such as A1.",
+    )
     parser.add_argument("--workspace")
     parser.add_argument(
         "--target",
@@ -540,6 +548,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _artifact_inputs_from_args(values: list[str]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for index, value in enumerate(values, start=1):
+        raw = str(value).strip()
+        if not raw:
+            continue
+        uid, separator, alias = raw.partition("=")
+        result.append({"artifact_uid": uid.strip(), "alias": alias.strip() if separator else f"A{index}"})
+    return result
+
+
 def _request_from_args(args, config: Config) -> JobRequest:
     return JobRequest(
         task=args.task or "",
@@ -556,6 +575,7 @@ def _request_from_args(args, config: Config) -> JobRequest:
         caller=args.caller,
         request_id=args.request_id,
         attachments=args.attachments,
+        artifact_inputs=_artifact_inputs_from_args(args.artifact_inputs),
         workspace=args.workspace,
         target_path=args.target_path,
         overwrite=args.overwrite,

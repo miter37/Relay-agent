@@ -32,7 +32,18 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
             columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
             self.assertTrue(
-                {"title", "submitted_via", "task_preview", "schedule_id", "scheduled_for", "replayable"} <= columns
+                {
+                    "title",
+                    "submitted_via",
+                    "task_preview",
+                    "schedule_id",
+                    "scheduled_for",
+                    "replayable",
+                    "trigger_type",
+                    "task_id",
+                    "task_snapshot_json",
+                }
+                <= columns
             )
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             self.assertTrue({"schedules", "schedule_runs"} <= tables)
@@ -52,6 +63,17 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 3)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 4)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0], 1)
+            artifact_columns = {row[1] for row in conn.execute("PRAGMA table_info(artifacts)")}
+            self.assertTrue({"artifact_uid", "role", "producer_attempt_id"} <= artifact_columns)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT trigger_type,task_id,task_snapshot_json FROM jobs WHERE job_id='fixture-completed'"
+                ).fetchone(),
+                ("manual", None, None),
+            )
+            self.assertTrue(conn.execute("SELECT artifact_uid FROM artifacts").fetchone()[0])
+            self.assertEqual(conn.execute("SELECT role FROM artifacts").fetchone()[0], "output")
+            self.assertIsNone(conn.execute("SELECT producer_attempt_id FROM artifacts").fetchone()[0])
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM capability_audits").fetchone()[0], 1)
             row = conn.execute(
                 "SELECT job_id,status,request_id,output_path,submitted_via,replayable FROM jobs "

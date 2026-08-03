@@ -29,7 +29,7 @@ class JobDetailView(QWidget):
     open_log_requested = Signal(str)
     log_options_changed = Signal()
 
-    TAB_NAMES = ("Overview", "Task", "Progress", "Answer", "Result", "Files", "Logs", "Events")
+    TAB_NAMES = ("Overview", "Task", "Inputs", "Progress", "Answer", "Result", "Files", "Logs", "Events")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -178,6 +178,7 @@ class JobDetailView(QWidget):
             ),
         )
         self.set_content("Task", escape(str(task_text or "Task details are hidden by your history settings.")))
+        self.set_content("Inputs", self._format_json(job.get("lineage") or job.get("inputs") or []))
         self.set_content("Progress", self._format_json(job.get("attempts", [])))
         self.set_content("Events", self._format_json(job.get("events", [])))
         self.set_content("Files", self._format_json(job.get("artifacts", [])))
