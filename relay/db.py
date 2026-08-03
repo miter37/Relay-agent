@@ -12,7 +12,7 @@ from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -317,6 +317,34 @@ ALTER TABLE jobs ADD COLUMN routine_id TEXT;
 ALTER TABLE project_runs ADD COLUMN routine_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_jobs_routine ON jobs(routine_id);
 CREATE INDEX IF NOT EXISTS idx_project_runs_routine ON project_runs(routine_id);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer TEXT,
+    reason TEXT,
+    edited_artifact_uid TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_project_run ON approvals(project_run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_token ON approvals(token);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    approval_id TEXT REFERENCES approvals(approval_id),
+    kind TEXT NOT NULL DEFAULT 'folder',
+    target_path TEXT NOT NULL,
+    artifact_uid TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_project_run ON deliveries(project_run_id);
 """
 MIGRATION_0_TO_1 = """
 ALTER TABLE jobs ADD COLUMN submitted_via TEXT NOT NULL DEFAULT 'legacy';
@@ -414,6 +442,36 @@ CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer
 
 MIGRATION_4_TO_5 = """
 -- FTS5 tables are created opportunistically after the schema migration.
+"""
+
+MIGRATION_8_TO_9 = """
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer TEXT,
+    reason TEXT,
+    edited_artifact_uid TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_project_run ON approvals(project_run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_token ON approvals(token);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    approval_id TEXT REFERENCES approvals(approval_id),
+    kind TEXT NOT NULL DEFAULT 'folder',
+    target_path TEXT NOT NULL,
+    artifact_uid TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_project_run ON deliveries(project_run_id);
 """
 
 MIGRATION_7_TO_8 = """
@@ -653,7 +711,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3, 4, 5, 6, 7}:
+            elif version in {1, 2, 3, 4, 5, 6, 7, 8}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -693,6 +751,13 @@ class Database:
                             except sqlite3.OperationalError as exc:
                                 if "duplicate column" not in str(exc):
                                     raise
+                    for statement in MIGRATION_8_TO_9.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
@@ -706,6 +771,13 @@ class Database:
                 try:
                     conn.execute("BEGIN")
                     for statement in MIGRATION_7_TO_8.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_8_TO_9.split(";"):
                         if statement.strip():
                             try:
                                 conn.execute(statement)
@@ -1849,5 +1921,71 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM routine_runs WHERE routine_id=? AND status NOT IN ('completed', 'failed', 'cancelled', 'skipped')",
                 (routine_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def create_approval(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {
+            "status": "pending",
+            "reviewer": None,
+            "reason": None,
+            "edited_artifact_uid": None,
+            "decided_at": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO approvals ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_approval(self, token: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM approvals WHERE token=?", (token,)).fetchone()
+            return dict(row) if row else None
+
+    def list_approvals(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM approvals WHERE project_run_id=? ORDER BY created_at",
+                (project_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_approval(self, token: str, **changes: Any) -> None:
+        if not changes:
+            return
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE approvals SET {','.join(f'{key}=?' for key in keys)} WHERE token=?",
+                [changes[key] for key in keys] + [token],
+            )
+
+    def create_delivery(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {
+            "kind": "folder",
+            "status": "completed",
+            "error": None,
+            "approval_id": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO deliveries ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def list_deliveries(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM deliveries WHERE project_run_id=? ORDER BY created_at",
+                (project_run_id,),
             ).fetchall()
             return [dict(row) for row in rows]

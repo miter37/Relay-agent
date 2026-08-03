@@ -146,6 +146,19 @@ class MigrationTests(unittest.TestCase):
                 self.assertIn("tasks", tables)
                 self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
 
+    def test_migration_8_to_9_adds_approval_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.db"
+            Database(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("PRAGMA user_version=8")
+            Database(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                self.assertIn("approvals", tables)
+                self.assertIn("deliveries", tables)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
+
     def test_migration_7_to_8_adds_routine_tables(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "relay.db"
