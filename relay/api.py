@@ -475,3 +475,89 @@ def get_agent(engine, agent_id: str) -> dict[str, Any]:
         return {"ok": True, "agent": engine.agent_registry.get_definition(agent_id)}
     except KeyError:
         raise RelayError("INVALID_REQUEST", f"Unknown agent: {agent_id}") from None
+
+
+def _task_public(task: dict[str, Any]) -> dict[str, Any]:
+    return {**task, "fallback_enabled": bool(task.get("fallback_enabled", 1))}
+
+
+def list_tasks(engine) -> dict[str, Any]:
+    return {"ok": True, "tasks": [_task_public(t) for t in engine.db.list_tasks(limit=200)]}
+
+
+def create_task(engine, payload: dict[str, Any]) -> dict[str, Any]:
+    from .models import TaskSpec
+
+    spec = TaskSpec(
+        name=str(payload.get("name") or "").strip(),
+        instructions=payload.get("instructions") or payload.get("task") or "",
+        description=payload.get("description"),
+        default_worker=payload.get("default_worker") or payload.get("worker"),
+        fallback_enabled=bool(payload.get("fallback_enabled", True)),
+        timeout_seconds=payload.get("timeout_seconds"),
+        profile=payload.get("profile"),
+        result_format=payload.get("result_format") or payload.get("format"),
+        input_schema=payload.get("input_schema"),
+        output_contract=payload.get("output_contract"),
+        validation_policy=payload.get("validation_policy"),
+    )
+    task = engine.create_task(spec)
+    return {"ok": True, "task": _task_public(task)}
+
+
+def get_task(engine, task_id: str) -> dict[str, Any]:
+    task = engine.db.get_task(task_id)
+    if not task:
+        raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+    return {"ok": True, "task": _task_public(task)}
+
+
+def update_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    task = engine.update_task(task_id, **payload)
+    return {"ok": True, "task": _task_public(task)}
+
+
+def delete_task(engine, task_id: str) -> dict[str, Any]:
+    engine.delete_task(task_id)
+    return {"ok": True, "task_id": task_id, "deleted": True}
+
+
+def run_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from .models import JobRequest
+
+    overrides = payload.get("request") or {}
+    request = None
+    if overrides or payload.get("worker") or payload.get("format"):
+        request = JobRequest(
+            task=overrides.get("task") or "",
+            worker=overrides.get("worker") or payload.get("worker") or "auto",
+            result_format=overrides.get("result_format") or payload.get("format") or "json",
+            profile=overrides.get("profile"),
+            timeout_seconds=overrides.get("timeout_seconds"),
+            attachments=list(overrides.get("attachments") or []),
+            artifact_inputs=list(overrides.get("artifact_inputs") or []),
+            request_id=overrides.get("request_id"),
+            caller=overrides.get("caller", "human"),
+        )
+    job, reused, task = engine.run_task(
+        task_id,
+        request=request,
+        queued=bool(payload.get("queued", False)),
+        submitted_via=payload.get("submitted_via"),
+    )
+    return {"ok": True, "run": job, "reused": reused, "task": _task_public(task)}
+
+
+def runs_for_task(engine, task_id: str, *, limit: int = 50) -> dict[str, Any]:
+    if not engine.db.get_task(task_id):
+        raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+    return {"ok": True, "task_id": task_id, "runs": engine.db.runs_for_task(task_id, limit=limit)}
+
+
+def save_run_as_task(engine, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    task = engine.save_run_as_task(
+        run_id,
+        name=str(payload.get("name") or "").strip(),
+        description=payload.get("description"),
+    )
+    return {"ok": True, "task": _task_public(task)}
