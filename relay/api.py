@@ -722,3 +722,54 @@ def routine_receipt(engine, routine_id):
 def preview_routine(engine, payload):
     result = engine.routine_service.preview(payload)
     return {"ok": True, **result}
+
+
+# --- Phase 6a Approvals ---
+
+
+def list_approvals(engine, project_run_id: str) -> dict[str, Any]:
+    from .approvals.service import ApprovalService
+
+    service = ApprovalService(engine.db, engine, engine.config)
+    approvals = service.db.list_approvals(project_run_id)
+    return {"ok": True, "project_run_id": project_run_id, "approvals": approvals}
+
+
+def get_approval(engine, token: str) -> dict[str, Any]:
+    from .approvals.service import ApprovalService
+
+    service = ApprovalService(engine.db, engine, engine.config)
+    app = service.db.get_approval(token)
+    if not app:
+        raise RelayError("APPROVAL_NOT_FOUND", f"Approval not found for token: {token}")
+    return {"ok": True, "approval": app}
+
+
+def approve_checkpoint(engine, project_run_id: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from .approvals.service import ApprovalService
+
+    service = ApprovalService(engine.db, engine, engine.config)
+    reviewer = str(payload.get("reviewer") or "human")
+    res = service.approve(project_run_id, token, reviewer=reviewer)
+    return {"ok": True, **res}
+
+
+def reject_checkpoint(engine, project_run_id: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from .approvals.service import ApprovalService
+
+    service = ApprovalService(engine.db, engine, engine.config)
+    reviewer = str(payload.get("reviewer") or "human")
+    reason = str(payload.get("reason") or "")
+    res = service.reject(project_run_id, token, reviewer=reviewer, reason=reason)
+    return {"ok": True, **res}
+
+
+def edit_checkpoint(engine, project_run_id: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from .approvals.service import ApprovalService
+
+    service = ApprovalService(engine.db, engine, engine.config)
+    reviewer = str(payload.get("reviewer") or "human")
+    edit_file_path = str(payload.get("file") or payload.get("edit_file_path") or "")
+    role = str(payload.get("role") or "output")
+    res = service.approve_with_edits(project_run_id, token, reviewer=reviewer, edit_file_path=edit_file_path, role=role)
+    return {"ok": True, **res}

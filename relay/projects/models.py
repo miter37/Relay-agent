@@ -52,7 +52,10 @@ class ProjectSpec:
             "description": self.description,
             "version": self.version,
             "failure_policy": self.failure_policy,
-            "nodes": [{"node_id": n.node_id, "task_id": n.task_id, **({"checkpoint": n.checkpoint} if n.checkpoint else {})} for n in self.nodes],
+            "nodes": [
+                {"node_id": n.node_id, "task_id": n.task_id, **({"checkpoint": n.checkpoint} if n.checkpoint else {})}
+                for n in self.nodes
+            ],
             "connections": [
                 {
                     "from_node": c.from_node,
@@ -67,7 +70,9 @@ class ProjectSpec:
             ],
         }
 
-    def validate(self, task_lookup: Callable[[str], dict[str, Any] | None], allow_roots: Iterable[str] | None = None) -> None:
+    def validate(
+        self, task_lookup: Callable[[str], dict[str, Any] | None], allow_roots: Iterable[str] | None = None
+    ) -> None:
         if not self.nodes:
             raise RelayError("PROJECT_INVALID", "Project must declare at least one node.")
         node_ids: list[str] = []
@@ -96,10 +101,14 @@ class ProjectSpec:
                         raise RelayError("PROJECT_INVALID", f"Delivery target path missing in node {node.node_id}")
                     if allow_roots is not None:
                         from pathlib import Path
+
                         from ..target_workspace import is_within, safe_resolve
+
                         resolved = safe_resolve(Path(target_path))
                         if not any(is_within(resolved, Path(r)) for r in allow_roots):
-                            raise RelayError("DELIVERY_PATH_NOT_ALLOWED", f"Delivery path is not in allow-list: {target_path}")
+                            raise RelayError(
+                                "DELIVERY_PATH_NOT_ALLOWED", f"Delivery path is not in allow-list: {target_path}"
+                            )
         node_set = set(node_ids)
         for conn in self.connections:
             if conn.from_node not in node_set:
@@ -185,7 +194,10 @@ class ProjectSpec:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ProjectSpec:
-        nodes = [ProjectNode(node_id=str(n["node_id"]), task_id=str(n["task_id"]), checkpoint=n.get("checkpoint")) for n in payload.get("nodes", [])]
+        nodes = [
+            ProjectNode(node_id=str(n["node_id"]), task_id=str(n["task_id"]), checkpoint=n.get("checkpoint"))
+            for n in payload.get("nodes", [])
+        ]
         connections = [
             ProjectConnection(
                 from_node=str(c["from_node"]),

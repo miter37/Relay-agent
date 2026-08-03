@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .agent_apps import AgentAppService
 from .api import (
+    approve_checkpoint,
     artifact_content,
     artifact_detail,
     artifact_lineage,
@@ -22,7 +23,9 @@ from .api import (
     delete_project,
     delete_routine,
     delete_task,
+    edit_checkpoint,
     get_agent,
+    get_approval,
     get_project,
     get_routine,
     get_task,
@@ -32,6 +35,7 @@ from .api import (
     job_logs,
     job_result,
     list_agents,
+    list_approvals,
     list_jobs,
     list_projects,
     list_routines,
@@ -44,6 +48,7 @@ from .api import (
     project_run_retry,
     project_run_steps,
     project_runs,
+    reject_checkpoint,
     routine_runs,
     run_artifacts,
     run_detail,
@@ -318,6 +323,14 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, get_routine(self.daemon.engine, suffix))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path.startswith("/v1/project-runs/") and path.endswith("/approvals"):
+            prid = path[len("/v1/project-runs/") : -len("/approvals")]
+            self._json(HTTPStatus.OK, list_approvals(self.daemon.engine, prid))
+            return
+        if path.startswith("/v1/approvals/"):
+            token = path[len("/v1/approvals/") :]
+            self._json(HTTPStatus.OK, get_approval(self.daemon.engine, token))
             return
         if path.startswith("/v1/project-runs/"):
             suffix = path[len("/v1/project-runs/") :]
@@ -663,6 +676,21 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 rid = path[len("/v1/routines/") :]
                 self._json(HTTPStatus.OK, update_routine(self.daemon.engine, rid, self._body()))
                 return
+            if path.startswith("/v1/project-runs/") and "/approvals/" in path:
+                # Path format: /v1/project-runs/{id}/approvals/{token}/{action}
+                parts = path.split("/")
+                # parts: ['', 'v1', 'project-runs', {id}, 'approvals', {token}, {action}]
+                if len(parts) == 7:
+                    prid, token, action = parts[3], parts[5], parts[6]
+                    if action == "approve":
+                        self._json(HTTPStatus.OK, approve_checkpoint(self.daemon.engine, prid, token, self._body()))
+                        return
+                    elif action == "reject":
+                        self._json(HTTPStatus.OK, reject_checkpoint(self.daemon.engine, prid, token, self._body()))
+                        return
+                    elif action == "edit":
+                        self._json(HTTPStatus.OK, edit_checkpoint(self.daemon.engine, prid, token, self._body()))
+                        return
             if path == "/v1/agent-apps":
                 self._json(
                     HTTPStatus.OK,

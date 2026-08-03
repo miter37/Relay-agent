@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from relay.approvals.service import ApprovalService
 from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
-from relay.errors import RelayError
 from relay.models import TaskSpec
 from relay.projects.models import (
     ProjectNode,
@@ -16,7 +16,6 @@ from relay.projects.models import (
     ProjectSpec,
 )
 from relay.projects.service import ProjectService
-from relay.approvals.service import ApprovalService
 
 
 class Phase6aServiceTests(unittest.TestCase):
@@ -59,8 +58,9 @@ class Phase6aServiceTests(unittest.TestCase):
         # Simulate Task Run completion producing draft artifact
         step = self.db.get_project_step(prid, checkpoint_node)
         job_id = self.engine.create_job(
-            self.engine.db.get_job(step["active_task_run_id"]) if step.get("active_task_run_id") else
-            __import__("relay.models", fromlist=["JobRequest"]).JobRequest(task="draft", worker="codex"),
+            self.engine.db.get_job(step["active_task_run_id"])
+            if step.get("active_task_run_id")
+            else __import__("relay.models", fromlist=["JobRequest"]).JobRequest(task="draft", worker="codex"),
             queued=True,
         )[0]["job_id"]
         self.db.update_project_step(prid, checkpoint_node, active_task_run_id=job_id, status="running")
@@ -124,7 +124,9 @@ class Phase6aServiceTests(unittest.TestCase):
         prid, node_id, job_id, target_out = self._setup_project_run_at_checkpoint()
         app = self.approval_service.create_pending_approval(prid, node_id)
 
-        result = self.approval_service.reject(prid, app["token"], reviewer="reviewer@example.com", reason="Not good enough")
+        result = self.approval_service.reject(
+            prid, app["token"], reviewer="reviewer@example.com", reason="Not good enough"
+        )
         self.assertEqual(result["approval"]["status"], "rejected")
         step = self.db.get_project_step(prid, node_id)
         self.assertEqual(step["status"], "failed")
@@ -132,9 +134,9 @@ class Phase6aServiceTests(unittest.TestCase):
         self.assertEqual(prun["status"], "failed")
         self.assertFalse(target_out.exists())
 
-
     def test_project_runtime_pauses_at_checkpoint_node(self):
         from relay.projects.runtime import ProjectRuntime
+
         runtime = ProjectRuntime(self.db, self.engine, self.project_service)
 
         prid, node_id, job_id, target_out = self._setup_project_run_at_checkpoint()

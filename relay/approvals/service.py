@@ -9,7 +9,7 @@ from ..config import Config
 from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
-from ..target_workspace import is_within, safe_resolve
+from ..target_workspace import safe_resolve
 from ..util import new_artifact_uid, new_job_id, sha256_file, utc_now
 
 
@@ -25,13 +25,15 @@ class ApprovalService:
             raise RelayError("PROJECT_NOT_FOUND", f"Step not found: {project_run_id}/{node_id}")
         approval_id = new_job_id()
         token = new_job_id()
-        self.db.create_approval({
-            "approval_id": approval_id,
-            "project_run_id": project_run_id,
-            "node_id": node_id,
-            "token": token,
-            "status": "pending",
-        })
+        self.db.create_approval(
+            {
+                "approval_id": approval_id,
+                "project_run_id": project_run_id,
+                "node_id": node_id,
+                "token": token,
+                "status": "pending",
+            }
+        )
         self.db.update_project_step(project_run_id, node_id, status="awaiting_approval")
         return self.db.get_approval(token)  # type: ignore[return-value]
 
@@ -91,7 +93,9 @@ class ApprovalService:
         )
 
         now = utc_now()
-        self.db.update_approval(token, status="approved", reviewer=reviewer, edited_artifact_uid=edited_uid, decided_at=now)
+        self.db.update_approval(
+            token, status="approved", reviewer=reviewer, edited_artifact_uid=edited_uid, decided_at=now
+        )
         self.db.update_project_step(project_run_id, app["node_id"], status="completed", completed_at=now)
         self.deliver(project_run_id, token, edited_artifact_uid=edited_uid)
         return {"approval": self.db.get_approval(token)}

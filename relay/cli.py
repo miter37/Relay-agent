@@ -53,6 +53,7 @@ COMMANDS = {
     "artifact",
     "run-lineage",
     "task",
+    "approval",
     "project",
     "project-run",
     "routine",
@@ -604,6 +605,73 @@ def _routine_cli_request(args, config):
     raise RelayError("INVALID_REQUEST", f"Unknown routine command: {cmd}")
 
 
+def _add_approval_parsers(sub: argparse._SubParsersAction) -> None:
+    approval = sub.add_parser(
+        "approval",
+        help="List and decide checkpoint approvals",
+        description="Inspect pending checkpoint approvals and approve, reject, or edit them.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    app_sub = approval.add_subparsers(dest="approval_command", required=True)
+
+    list_p = app_sub.add_parser("list", help="List approvals for a Project Run")
+    list_p.add_argument("project_run_id")
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = app_sub.add_parser("show", help="Show an approval by token")
+    show_p.add_argument("token")
+    show_p.add_argument("--machine", action="store_true")
+
+    approve_p = app_sub.add_parser("approve", help="Approve a checkpoint step")
+    approve_p.add_argument("project_run_id")
+    approve_p.add_argument("token")
+    approve_p.add_argument("--reviewer", default="human")
+    approve_p.add_argument("--machine", action="store_true")
+
+    reject_p = app_sub.add_parser("reject", help="Reject a checkpoint step")
+    reject_p.add_argument("project_run_id")
+    reject_p.add_argument("token")
+    reject_p.add_argument("--reviewer", default="human")
+    reject_p.add_argument("--reason", default="")
+    reject_p.add_argument("--machine", action="store_true")
+
+    edit_p = app_sub.add_parser("edit", help="Approve a checkpoint step with an edited file")
+    edit_p.add_argument("project_run_id")
+    edit_p.add_argument("token")
+    edit_p.add_argument("--file", required=True)
+    edit_p.add_argument("--role", default="output")
+    edit_p.add_argument("--reviewer", default="human")
+    edit_p.add_argument("--machine", action="store_true")
+
+
+def _approval_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.approval_command
+    if cmd == "list":
+        return client.request("GET", f"/v1/project-runs/{args.project_run_id}/approvals")
+    if cmd == "show":
+        return client.request("GET", f"/v1/approvals/{args.token}")
+    if cmd == "approve":
+        return client.request(
+            "POST",
+            f"/v1/project-runs/{args.project_run_id}/approvals/{args.token}/approve",
+            {"reviewer": args.reviewer},
+        )
+    if cmd == "reject":
+        return client.request(
+            "POST",
+            f"/v1/project-runs/{args.project_run_id}/approvals/{args.token}/reject",
+            {"reviewer": args.reviewer, "reason": args.reason},
+        )
+    if cmd == "edit":
+        return client.request(
+            "POST",
+            f"/v1/project-runs/{args.project_run_id}/approvals/{args.token}/edit",
+            {"reviewer": args.reviewer, "file": args.file, "role": args.role},
+        )
+    raise RelayError("INVALID_REQUEST", f"Unknown approval command: {cmd}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",
@@ -975,6 +1043,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_task_parsers(sub)
     _add_project_parsers(sub)
     _add_routine_parsers(sub)
+    _add_approval_parsers(sub)
     project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
     _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
@@ -1651,6 +1720,8 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_project_cli_request(args, config), machine)
         elif args.command == "routine":
             _emit(_routine_cli_request(args, config), machine)
+        elif args.command == "approval":
+            _emit(_approval_cli_request(args, config), machine)
         elif args.command == "project-run":
             _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":

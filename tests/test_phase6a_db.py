@@ -18,22 +18,26 @@ class Phase6aDBTests(unittest.TestCase):
         self.temp.cleanup()
 
     def _seed_project_run(self):
-        self.db.create_project({
-            "project_id": "p-1",
-            "name": "P",
-            "description": None,
-            "version": 1,
-            "definition_json": "{}",
-        })
-        self.db.create_project_run({
-            "project_run_id": "pr-1",
-            "project_id": "p-1",
-            "project_version": 1,
-            "project_snapshot_json": "{}",
-            "status": "running",
-            "trigger_type": "manual",
-            "submitted_via": "cli",
-        })
+        self.db.create_project(
+            {
+                "project_id": "p-1",
+                "name": "P",
+                "description": None,
+                "version": 1,
+                "definition_json": "{}",
+            }
+        )
+        self.db.create_project_run(
+            {
+                "project_run_id": "pr-1",
+                "project_id": "p-1",
+                "project_version": 1,
+                "project_snapshot_json": "{}",
+                "status": "running",
+                "trigger_type": "manual",
+                "submitted_via": "cli",
+            }
+        )
 
     def test_migration_8_to_9_creates_approval_tables(self):
         with sqlite3.connect(self.path) as conn:
@@ -44,13 +48,15 @@ class Phase6aDBTests(unittest.TestCase):
 
     def test_approval_crud_and_token_lookup(self):
         self._seed_project_run()
-        self.db.create_approval({
-            "approval_id": "app-1",
-            "project_run_id": "pr-1",
-            "node_id": "n-1",
-            "token": "tok-123",
-            "status": "pending",
-        })
+        self.db.create_approval(
+            {
+                "approval_id": "app-1",
+                "project_run_id": "pr-1",
+                "node_id": "n-1",
+                "token": "tok-123",
+                "status": "pending",
+            }
+        )
         app = self.db.get_approval("tok-123")
         self.assertIsNotNone(app)
         self.assertEqual(app["project_run_id"], "pr-1")
@@ -66,15 +72,17 @@ class Phase6aDBTests(unittest.TestCase):
 
     def test_delivery_crud_and_listing(self):
         self._seed_project_run()
-        self.db.create_delivery({
-            "delivery_id": "del-1",
-            "project_run_id": "pr-1",
-            "approval_id": None,
-            "kind": "folder",
-            "target_path": "/tmp/out",
-            "artifact_uid": "art-1",
-            "status": "completed",
-        })
+        self.db.create_delivery(
+            {
+                "delivery_id": "del-1",
+                "project_run_id": "pr-1",
+                "approval_id": None,
+                "kind": "folder",
+                "target_path": "/tmp/out",
+                "artifact_uid": "art-1",
+                "status": "completed",
+            }
+        )
         deliveries = self.db.list_deliveries("pr-1")
         self.assertEqual(len(deliveries), 1)
         self.assertEqual(deliveries[0]["delivery_id"], "del-1")

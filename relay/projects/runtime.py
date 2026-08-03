@@ -96,6 +96,7 @@ class ProjectRuntime:
 
                 if has_checkpoint:
                     from ..approvals.service import ApprovalService
+
                     approval_service = ApprovalService(self.db, self.engine, self.engine.config)
                     approval_service.create_pending_approval(project_run_id, step["node_id"])
                     self.db.update_project_step(
