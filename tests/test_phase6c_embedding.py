@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from relay.config import Config
-from relay.search.embedding import EmbeddingBackend, NullEmbedding, get_embedding_backend
+from relay.search.embedding import NullEmbedding, get_embedding_backend
 
 
 class Phase6cEmbeddingTests(unittest.TestCase):

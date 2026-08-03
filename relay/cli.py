@@ -58,6 +58,8 @@ COMMANDS = {
     "project",
     "project-run",
     "routine",
+    "quality",
+    "search-semantic",
 }
 
 
@@ -66,6 +68,8 @@ def _preprocess(argv: list[str]) -> list[str]:
         return argv
     if len(argv) >= 2 and argv[0] == "run" and argv[1] == "save-as-task":
         return ["task", "save-as-task", *argv[2:]]
+    if len(argv) >= 2 and argv[0] == "search" and argv[1] == "semantic":
+        return ["search-semantic", *argv[2:]]
     if argv[0] not in COMMANDS and not argv[0].startswith("-"):
         return ["run", *argv]
     return argv
@@ -715,6 +719,53 @@ def _compare_cli_request(args, config: Config) -> Any:
     raise RelayError("INVALID_REQUEST", f"Unknown compare command: {cmd}")
 
 
+def _add_quality_parsers(sub: argparse._SubParsersAction) -> None:
+    quality = sub.add_parser(
+        "quality",
+        help="Inspect Run quality scores and attention items",
+        description="Score Run quality or list items requiring attention.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    qsub = quality.add_subparsers(dest="quality_command", required=True)
+
+    run_q = qsub.add_parser("run", help="Score a single Run")
+    run_q.add_argument("run_id")
+    run_q.add_argument("--machine", action="store_true")
+
+    att_q = qsub.add_parser("attention", help="List runs needing attention")
+    att_q.add_argument("--status", default="low", choices=["low", "medium", "high", "all"])
+    att_q.add_argument("--limit", type=int, default=50)
+    att_q.add_argument("--machine", action="store_true")
+
+
+def _add_search_semantic_parsers(sub: argparse._SubParsersAction) -> None:
+    sem = sub.add_parser(
+        "search-semantic",
+        help="Semantic search across Runs or Artifacts",
+        description="Search Runs or Artifacts using vector similarity embeddings.",
+    )
+    sem.add_argument("query")
+    sem.add_argument("--kind", choices=["runs", "artifacts"], default="runs")
+    sem.add_argument("--limit", type=int, default=20)
+    sem.add_argument("--machine", action="store_true")
+
+
+def _quality_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.quality_command
+    if cmd == "run":
+        return client.request("GET", f"/v1/runs/{args.run_id}/quality")
+    if cmd == "attention":
+        return client.request("GET", f"/v1/quality/attention?status={args.status}&limit={args.limit}")
+    raise RelayError("INVALID_REQUEST", f"Unknown quality command: {cmd}")
+
+
+def _search_semantic_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    payload = {"query": args.query, "kind": args.kind, "limit": args.limit}
+    return client.request("POST", "/v1/search/semantic", payload)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",
@@ -1088,6 +1139,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_routine_parsers(sub)
     _add_approval_parsers(sub)
     _add_compare_parsers(sub)
+    _add_quality_parsers(sub)
+    _add_search_semantic_parsers(sub)
     project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
     _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
@@ -1768,6 +1821,10 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_approval_cli_request(args, config), machine)
         elif args.command == "compare":
             _emit(_compare_cli_request(args, config), machine)
+        elif args.command == "quality":
+            _emit(_quality_cli_request(args, config), machine)
+        elif args.command == "search-semantic":
+            _emit(_search_semantic_cli_request(args, config), machine)
         elif args.command == "project-run":
             _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":

@@ -27,7 +27,16 @@ class Phase6cQualityTests(unittest.TestCase):
     def test_score_completed_run_without_uncertainties_is_high(self):
         job, _ = self.engine.create_job(JobRequest(task="Task 1"), queued=True)
         self.db.update_job(job["job_id"], status="COMPLETED", result_status="complete")
-        self.db.add_artifact(job["job_id"], relative_path="out.txt", final_path=str(self.home / "out.txt"), mime_type="text/plain", size=10, sha256="abc", artifact_uid="art-q1", role="output")
+        self.db.add_artifact(
+            job["job_id"],
+            relative_path="out.txt",
+            final_path=str(self.home / "out.txt"),
+            mime_type="text/plain",
+            size=10,
+            sha256="abc",
+            artifact_uid="art-q1",
+            role="output",
+        )
 
         res = self.quality_service.score_run(job["job_id"])
         self.assertEqual(res["score"], "high")
@@ -44,7 +53,16 @@ class Phase6cQualityTests(unittest.TestCase):
     def test_attention_runs_filters_by_low_quality(self):
         job1, _ = self.engine.create_job(JobRequest(task="Task High"), queued=True)
         self.db.update_job(job1["job_id"], status="COMPLETED", result_status="complete")
-        self.db.add_artifact(job1["job_id"], relative_path="out.txt", final_path=str(self.home / "out.txt"), mime_type="text/plain", size=10, sha256="abc", artifact_uid="art-q2", role="output")
+        self.db.add_artifact(
+            job1["job_id"],
+            relative_path="out.txt",
+            final_path=str(self.home / "out.txt"),
+            mime_type="text/plain",
+            size=10,
+            sha256="abc",
+            artifact_uid="art-q2",
+            role="output",
+        )
 
         job2, _ = self.engine.create_job(JobRequest(task="Task Low"), queued=True)
         self.db.update_job(job2["job_id"], status="FAILED", error_code="ALL_WORKERS_FAILED")

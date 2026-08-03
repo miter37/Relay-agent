@@ -106,15 +106,17 @@ class QualityService:
         for job in jobs:
             sc = self._score_job(job)
             if status_filter == "all" or sc["score"] == status_filter:
-                items.append({
-                    "run_id": job["job_id"],
-                    "kind": "task_run",
-                    "title": job.get("title") or job["job_id"],
-                    "status": job.get("status"),
-                    "score": sc["score"],
-                    "reason": job.get("error_message") or f"Quality score: {sc['score']}",
-                    "created_at": job.get("created_at"),
-                })
+                items.append(
+                    {
+                        "run_id": job["job_id"],
+                        "kind": "task_run",
+                        "title": job.get("title") or job["job_id"],
+                        "status": job.get("status"),
+                        "score": sc["score"],
+                        "reason": job.get("error_message") or f"Quality score: {sc['score']}",
+                        "created_at": job.get("created_at"),
+                    }
+                )
                 if len(items) >= limit:
                     break
         return items

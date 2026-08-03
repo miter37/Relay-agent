@@ -802,3 +802,33 @@ def partial_reexecute_project_run(engine, project_run_id: str, payload: dict[str
     worker = payload.get("worker")
     res = engine.project_service.partial_reexecute(project_run_id, from_node=from_node, cascade=cascade, worker=worker)
     return {"ok": True, **res}
+
+
+# --- Phase 6c Semantic Search & Quality Scoring ---
+
+
+def semantic_search_api(engine, payload: dict[str, Any]) -> dict[str, Any]:
+    from .search.embedding import get_embedding_backend
+    from .search.semantic import semantic_search
+
+    query = str(payload.get("query") or "")
+    kind = str(payload.get("kind") or "runs")
+    limit = int(payload.get("limit") or 20)
+    backend = get_embedding_backend(engine.config)
+    return semantic_search(engine.db, backend, query, kind=kind, limit=limit)
+
+
+def run_quality_api(engine, run_id: str) -> dict[str, Any]:
+    from .quality.service import QualityService
+
+    qs = QualityService(engine.db)
+    quality = qs.score_run(run_id)
+    return {"ok": True, "quality": quality}
+
+
+def quality_attention_api(engine, status_filter: str = "low", limit: int = 50) -> dict[str, Any]:
+    from .quality.service import QualityService
+
+    qs = QualityService(engine.db)
+    items = qs.attention_runs(status_filter=status_filter, limit=limit)
+    return {"ok": True, "status": status_filter, "items": items}

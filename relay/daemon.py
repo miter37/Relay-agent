@@ -51,6 +51,7 @@ from .api import (
     project_run_retry,
     project_run_steps,
     project_runs,
+    quality_attention_api,
     reject_checkpoint,
     routine_runs,
     run_artifacts,
@@ -60,6 +61,7 @@ from .api import (
     run_logs,
     run_progress,
     run_project,
+    run_quality_api,
     run_result,
     run_routine_now,
     run_task,
@@ -67,6 +69,7 @@ from .api import (
     save_run_as_task,
     search_artifacts,
     search_runs,
+    semantic_search_api,
     update_project,
     update_routine,
     update_task,
@@ -557,6 +560,15 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
+        if path.startswith("/v1/runs/") and path.endswith("/quality"):
+            run_id = path[len("/v1/runs/") : -len("/quality")]
+            self._json(HTTPStatus.OK, run_quality_api(self.daemon.engine, run_id))
+            return
+        if path == "/v1/quality/attention":
+            st = (params.get("status") or ["low"])[0]
+            limit = int((params.get("limit") or ["50"])[0])
+            self._json(HTTPStatus.OK, quality_attention_api(self.daemon.engine, status_filter=st, limit=limit))
+            return
         if path.startswith("/v1/runs/"):
             suffix = path[len("/v1/runs/") :]
             try:
@@ -720,6 +732,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     elif action == "edit":
                         self._json(HTTPStatus.OK, edit_checkpoint(self.daemon.engine, prid, token, self._body()))
                         return
+            if path == "/v1/search/semantic":
+                self._json(HTTPStatus.OK, semantic_search_api(self.daemon.engine, self._body()))
+                return
             if path == "/v1/agent-apps":
                 self._json(
                     HTTPStatus.OK,
