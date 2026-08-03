@@ -210,21 +210,11 @@ class ProjectService:
 
         for node in spec.nodes:
             deps = spec.predecessor_map()[node.node_id]
-            no_deps = len(deps) == 0
-            ext_ready = node.node_id in external_by_node or no_deps
-            status = "ready" if (no_deps or (len(deps) == 0)) else "ready"
-            # If node has upstream deps but no external bindings exclusively, default pending.
             has_external = bool(external_by_node.get(node.node_id))
-            if deps and not has_external and False:
-                status = "pending"
-            elif deps and not has_external:
-                status = "pending" if all(c for c in inputs_by_node[node.node_id] if c.get("artifact_uid") is None) and not has_external else "ready"
-            # Simplified: nodes whose only inputs come from external -> ready.
-            # Pure upstream nodes (no external, only connection-bound) -> pending until upstream completes.
-            only_external = has_external and not any(c for c in inputs_by_node[node.node_id] if c.get("artifact_uid") is None)
-            if only_external:
+            connection_inputs = [c for c in inputs_by_node[node.node_id] if c.get("artifact_uid") is None]
+            if not deps:
                 status = "ready"
-            elif not deps:
+            elif has_external and not connection_inputs:
                 status = "ready"
             else:
                 status = "pending"

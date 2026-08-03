@@ -45,6 +45,8 @@ from .api import (
 )
 from .autostart import AutoStartManager
 from .cleanup import CleanupManager
+from .projects.runtime import ProjectRuntime
+from .projects.service import ProjectService
 from .compatibility import relay_home_id
 from .config import Config
 from .db import Database
@@ -750,6 +752,8 @@ class RelayDaemon:
         self.engine = RelayEngine(config, self.db)
         self.agent_app_service = AgentAppService(self.config, self.db, self.engine)
         self.schedule_service = ScheduleService(self.config, self.db, self.engine)
+        self.project_service = ProjectService(self.db, self.engine)
+        self.project_runtime = ProjectRuntime(self.db, self.engine, self.project_service)
         self.autostart_manager = AutoStartManager(self.config)
         self.schedule_runtime = ScheduleRuntime(self.config, self.db, self.engine)
         self.scheduler = Scheduler(self.engine)
@@ -790,10 +794,12 @@ class RelayDaemon:
         self.scheduler.start()
         self.schedule_loop.start()
         self.maintenance.start()
+        self.project_runtime.start()
         try:
             self.server.serve_forever(poll_interval=0.5)
         finally:
             self.maintenance.stop()
+            self.project_runtime.stop()
             self.schedule_loop.stop()
             self.scheduler.stop()
             self.pid_path.unlink(missing_ok=True)

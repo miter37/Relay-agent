@@ -74,7 +74,7 @@ TECHNICAL_FALLBACK_CODES = {
 }
 
 VALID_CALLERS = {"human", "hermes", "service", "schedule"}
-VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy"}
+VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy", "project"}
 VALID_TRIGGER_TYPES = {"manual", "api", "schedule", "rerun", "project"}
 
 
