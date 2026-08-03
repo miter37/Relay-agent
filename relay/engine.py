@@ -16,7 +16,7 @@ from .config import Config
 from .db import Database
 from .delivery import atomic_deliver_pair
 from .errors import RelayError
-from .models import JobRequest
+from .models import JobRequest, TaskSpec
 from .process_supervisor import run_supervised
 from .request_builder import build_request_markdown, copy_attachments, write_schema
 from .security import validate_attachment_paths, validate_requested_paths
@@ -180,6 +180,7 @@ class RelayEngine:
         *,
         trigger_type: str,
         artifact_inputs: list[dict[str, Any]] | None = None,
+        task_definition: dict[str, Any] | None = None,
     ) -> str:
         snapshot = {
             "task": request.task,
@@ -195,6 +196,11 @@ class RelayEngine:
             "model": request.model,
             "trigger_type": trigger_type,
         }
+        if task_definition:
+            snapshot["task_id"] = task_definition.get("task_id")
+            snapshot["task_name"] = task_definition.get("name")
+            snapshot["task_version"] = task_definition.get("version")
+            snapshot["task_definition"] = task_definition
         return canonical_json(snapshot)
 
     def _resolve_artifact_inputs(self, request: JobRequest) -> list[dict[str, Any]]:
@@ -290,6 +296,8 @@ class RelayEngine:
         scheduled_for: str | None = None,
         schedule_output_root: Path | None = None,
         trigger_type: str | None = None,
+        task_id: str | None = None,
+        task_definition: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         self._resolve_request_task(request)
         self.config.reload()
@@ -379,9 +387,9 @@ class RelayEngine:
             "caller": request.caller,
             "submitted_via": submitted_source,
             "trigger_type": resolved_trigger,
-            "task_id": None,
+            "task_id": task_id,
             "task_snapshot_json": self._task_snapshot(
-                request, trigger_type=resolved_trigger, artifact_inputs=resolved_inputs
+                request, trigger_type=resolved_trigger, artifact_inputs=resolved_inputs, task_definition=task_definition
             ),
             "input_manifest_json": canonical_json(
                 [
@@ -1036,3 +1044,100 @@ class RelayEngine:
         result = self.queue(request, submitted_via=submitted_via, trigger_type="rerun")
         result["source_job_id"] = job_id
         return result
+
+
+    def create_task(self, spec: TaskSpec) -> dict[str, Any]:
+        row = spec.to_row()
+        self.db.create_task(row)
+        return self.db.get_task(row["task_id"])
+
+    def update_task(self, task_id: str, **changes: Any) -> dict[str, Any]:
+        task = self.db.get_task(task_id)
+        if not task:
+            raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+        normalized = TaskSpec.normalize_changes(changes)
+        if not normalized:
+            return task
+        self.db.update_task(task_id, **normalized)
+        return self.db.get_task(task_id)
+
+    def delete_task(self, task_id: str) -> bool:
+        if not self.db.get_task(task_id):
+            raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+        return self.db.delete_task(task_id)
+
+    def run_task(
+        self,
+        task_id: str,
+        *,
+        request: JobRequest | None = None,
+        queued: bool = False,
+        submitted_via: str | None = None,
+    ) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+        task = self.db.get_task(task_id)
+        if not task:
+            raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+        instructions = task.get("instructions") or ""
+        base = JobRequest(
+            task=instructions,
+            worker=task.get("default_worker") or "auto",
+            fallback=bool(task.get("fallback_enabled", 1)) if task.get("fallback_enabled") is not None else None,
+            timeout_seconds=task.get("timeout_seconds"),
+            profile=task.get("profile") or "web-research",
+            result_format=task.get("result_format") or "json",
+        )
+        if request:
+            base.task = request.task or instructions
+            base.worker = request.worker or base.worker
+            base.result_format = request.result_format or base.result_format
+            base.profile = request.profile or base.profile
+            base.timeout_seconds = request.timeout_seconds or base.timeout_seconds
+            base.fallback = request.fallback if request.fallback is not None else base.fallback
+            base.attachments = list(request.attachments)
+            base.artifact_inputs = list(request.artifact_inputs)
+            base.request_id = request.request_id
+            base.output_path = request.output_path
+            base.artifact_path = request.artifact_path
+            base.caller = request.caller
+            base.model = request.model
+        definition = {
+            "task_id": task["task_id"],
+            "name": task["name"],
+            "version": task["version"],
+            "instructions": instructions,
+            "default_worker": task.get("default_worker"),
+            "fallback_enabled": task.get("fallback_enabled"),
+            "timeout_seconds": task.get("timeout_seconds"),
+            "profile": task.get("profile"),
+            "result_format": task.get("result_format"),
+            "input_schema": task.get("input_schema"),
+            "output_contract": task.get("output_contract"),
+            "validation_policy": task.get("validation_policy"),
+        }
+        job, reused = self.create_job(
+            base,
+            queued=queued,
+            submitted_via=submitted_via,
+            task_id=task["task_id"],
+            task_definition=definition,
+        )
+        return job, reused, task
+
+    def save_run_as_task(self, run_id: str, *, name: str, description: str | None = None) -> dict[str, Any]:
+        job = self.db.get_job(run_id)
+        if not job:
+            raise RelayError("JOB_NOT_FOUND", f"Job not found: {run_id}")
+        snapshot: dict[str, Any] = {}
+        if job.get("task_snapshot_json"):
+            try:
+                snapshot = json.loads(job["task_snapshot_json"])
+            except json.JSONDecodeError:
+                snapshot = {}
+        request: dict[str, Any] = {}
+        if job.get("request_json"):
+            try:
+                request = json.loads(job["request_json"])
+            except json.JSONDecodeError:
+                request = {}
+        spec = TaskSpec.from_snapshot(snapshot, request, name=name, description=description)
+        return self.create_task(spec)
