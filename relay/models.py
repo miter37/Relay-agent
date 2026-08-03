@@ -87,3 +87,91 @@ class AttemptResult:
     failure_code: str | None = None
     failure_message: str | None = None
     retryable: bool = False
+
+
+@dataclass(slots=True)
+class TaskSpec:
+    name: str
+    instructions: str
+    description: str | None = None
+    default_worker: str | None = "auto"
+    fallback_enabled: bool = True
+    timeout_seconds: int | None = None
+    profile: str | None = None
+    result_format: str | None = None
+    input_schema: str | None = None
+    output_contract: str | None = None
+    validation_policy: str | None = None
+    task_id: str | None = None
+    version: int = 1
+
+    def validate(self) -> None:
+        from .errors import RelayError
+        if not str(self.name or "").strip():
+            raise RelayError("TASK_NAME_REQUIRED", "A task name is required.")
+        if not str(self.instructions or "").strip():
+            raise RelayError("TASK_INVALID", "Task instructions are required.")
+        if self.result_format and self.result_format not in {"json", "txt"}:
+            raise RelayError("TASK_INVALID", "result_format must be json or txt.")
+
+    def to_row(self) -> dict[str, Any]:
+        from .util import new_job_id, utc_now
+        self.validate()
+        now = utc_now()
+        return {
+            "task_id": self.task_id or new_job_id(),
+            "name": self.name,
+            "description": self.description,
+            "instructions": self.instructions,
+            "default_worker": self.default_worker,
+            "fallback_enabled": 1 if self.fallback_enabled else 0,
+            "timeout_seconds": self.timeout_seconds,
+            "profile": self.profile,
+            "result_format": self.result_format,
+            "input_schema": self.input_schema,
+            "output_contract": self.output_contract,
+            "validation_policy": self.validation_policy,
+            "version": self.version,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    @staticmethod
+    def normalize_changes(changes: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "name", "description", "instructions", "default_worker",
+            "fallback_enabled", "timeout_seconds", "profile", "result_format",
+            "input_schema", "output_contract", "validation_policy",
+        }
+        out: dict[str, Any] = {}
+        for key, value in changes.items():
+            if key not in allowed:
+                continue
+            if key == "fallback_enabled":
+                out[key] = 1 if value else 0
+            else:
+                out[key] = value
+        return out
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: dict[str, Any],
+        request: dict[str, Any],
+        *,
+        name: str,
+        description: str | None = None,
+    ) -> TaskSpec:
+        instructions = snapshot.get("task") or request.get("task") or ""
+        worker = snapshot.get("worker") or request.get("worker") or "auto"
+        fallback = snapshot.get("fallback")
+        return cls(
+            name=name,
+            instructions=instructions,
+            description=description,
+            default_worker=worker,
+            fallback_enabled=bool(fallback) if fallback is not None else True,
+            timeout_seconds=snapshot.get("timeout_seconds") or request.get("timeout_seconds"),
+            profile=snapshot.get("profile") or request.get("profile"),
+            result_format=snapshot.get("result_format") or request.get("result_format"),
+        )
