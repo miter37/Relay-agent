@@ -12,7 +12,7 @@ from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -267,8 +267,57 @@ CREATE TABLE IF NOT EXISTS project_step_runs (
     FOREIGN KEY (project_run_id, node_id) REFERENCES project_run_steps(project_run_id, node_id) ON DELETE CASCADE
 );
 
-"""
+CREATE TABLE IF NOT EXISTS routines (
+    routine_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    rule_json TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    deleted_at TEXT,
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_grace_seconds INTEGER NOT NULL DEFAULT 43200,
+    version_policy TEXT NOT NULL DEFAULT 'latest',
+    pinned_version INTEGER,
+    input_policy_json TEXT,
+    notification_policy_json TEXT,
+    starts_at_utc TEXT,
+    ends_at_utc TEXT,
+    next_run_at_utc TEXT,
+    last_occurrence_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_routines_next_run ON routines(enabled, next_run_at_utc);
 
+CREATE TABLE IF NOT EXISTS routine_runs (
+    run_id TEXT PRIMARY KEY,
+    routine_id TEXT NOT NULL REFERENCES routines(routine_id) ON DELETE CASCADE,
+    occurrence_key TEXT NOT NULL,
+    scheduled_for_utc TEXT NOT NULL,
+    scheduled_for_local TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    task_run_id TEXT REFERENCES jobs(job_id),
+    project_run_id TEXT REFERENCES project_runs(project_run_id),
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(routine_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id, scheduled_for_utc);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_task ON routine_runs(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_run_id);
+
+ALTER TABLE jobs ADD COLUMN routine_id TEXT;
+ALTER TABLE project_runs ADD COLUMN routine_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_routine ON jobs(routine_id);
+CREATE INDEX IF NOT EXISTS idx_project_runs_routine ON project_runs(routine_id);
+"""
 MIGRATION_0_TO_1 = """
 ALTER TABLE jobs ADD COLUMN submitted_via TEXT NOT NULL DEFAULT 'legacy';
 ALTER TABLE jobs ADD COLUMN task_preview TEXT;
@@ -279,6 +328,7 @@ ALTER TABLE jobs ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_jobs_completed_at ON jobs(completed_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_submitted_via ON jobs(submitted_via);
 CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at);
+
 """
 
 MIGRATION_1_TO_2 = """
@@ -364,6 +414,59 @@ CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer
 
 MIGRATION_4_TO_5 = """
 -- FTS5 tables are created opportunistically after the schema migration.
+"""
+
+MIGRATION_7_TO_8 = """
+CREATE TABLE IF NOT EXISTS routines (
+    routine_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    rule_json TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    deleted_at TEXT,
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_grace_seconds INTEGER NOT NULL DEFAULT 43200,
+    version_policy TEXT NOT NULL DEFAULT 'latest',
+    pinned_version INTEGER,
+    input_policy_json TEXT,
+    notification_policy_json TEXT,
+    starts_at_utc TEXT,
+    ends_at_utc TEXT,
+    next_run_at_utc TEXT,
+    last_occurrence_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_routines_next_run ON routines(enabled, next_run_at_utc);
+
+CREATE TABLE IF NOT EXISTS routine_runs (
+    run_id TEXT PRIMARY KEY,
+    routine_id TEXT NOT NULL REFERENCES routines(routine_id) ON DELETE CASCADE,
+    occurrence_key TEXT NOT NULL,
+    scheduled_for_utc TEXT NOT NULL,
+    scheduled_for_local TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    task_run_id TEXT REFERENCES jobs(job_id),
+    project_run_id TEXT REFERENCES project_runs(project_run_id),
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(routine_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id, scheduled_for_utc);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_task ON routine_runs(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_run_id);
+
+ALTER TABLE jobs ADD COLUMN routine_id TEXT;
+ALTER TABLE project_runs ADD COLUMN routine_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_routine ON jobs(routine_id);
+CREATE INDEX IF NOT EXISTS idx_project_runs_routine ON project_runs(routine_id);
 """
 
 MIGRATION_6_TO_7 = """
@@ -550,7 +653,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3, 4, 5, 6}:
+            elif version in {1, 2, 3, 4, 5, 6, 7}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -571,11 +674,44 @@ class Database:
                             conn.execute(statement)
                     for statement in MIGRATION_5_TO_6.split(";"):
                         if statement.strip():
-                            conn.execute(statement)
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     for statement in MIGRATION_6_TO_7.split(";"):
                         if statement.strip():
-                            conn.execute(statement)
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_7_TO_8.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     self._backfill_artifact_uids(conn)
+                    conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
+                    conn.execute("COMMIT")
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+
+            elif version == 7:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_7_TO_8.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
                 except Exception as exc:
@@ -1581,3 +1717,130 @@ class Database:
                 conn.rollback()
                 raise
         return claimed_list
+
+    def create_routine(self, row):
+        from .util import utc_now
+        now = utc_now()
+        values = {
+            "enabled": 1,
+            "deleted_at": None,
+            "missed_grace_seconds": 43200,
+            "overlap_policy": "skip",
+            "missed_policy": "skip",
+            "version_policy": "latest",
+            **row,
+            "created_at": row.get("created_at", now),
+            "updated_at": row.get("updated_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO routines ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_routine(self, routine_id):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM routines WHERE routine_id=?", (routine_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_routines(self, *, include_deleted=False, name=None, limit=200):
+        query = "SELECT * FROM routines"
+        params = []
+        where = []
+        if not include_deleted:
+            where.append("deleted_at IS NULL")
+        if name:
+            where.append("name LIKE ?")
+            params.append(f"%{name}%")
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def update_routine(self, routine_id, **changes):
+        from .util import utc_now
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE routines SET {','.join(f'{key}=?' for key in keys)} WHERE routine_id=?",
+                [changes[key] for key in keys] + [routine_id],
+            )
+
+    def soft_delete_routine(self, routine_id):
+        from .util import utc_now
+        existing = self.get_routine(routine_id)
+        if not existing:
+            from .errors import RelayError
+            raise RelayError("ROUTINE_NOT_FOUND", f"Routine not found: {routine_id}")
+        if existing.get("deleted_at") is not None:
+            return False
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE routines SET deleted_at=?, updated_at=? WHERE routine_id=?",
+                (utc_now(), utc_now(), routine_id),
+            )
+        return True
+
+    def claim_routine_occurrence(self, routine_id, run_row):
+        import sqlite3 as _sq
+        from .util import utc_now
+        now = utc_now()
+        values = {**run_row, "routine_id": routine_id, "created_at": now, "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            try:
+                conn.execute(
+                    f"INSERT INTO routine_runs ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                    [values[key] for key in keys],
+                )
+            except _sq.IntegrityError:
+                return False
+        return True
+
+    def get_routine_run(self, run_id):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM routine_runs WHERE run_id=?", (run_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_routine_run(self, run_id, **changes):
+        from .util import utc_now
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE routine_runs SET {','.join(f'{key}=?' for key in keys)} WHERE run_id=?",
+                [changes[key] for key in keys] + [run_id],
+            )
+
+    def list_routine_runs(self, *, routine_id=None, status=None, limit=100):
+        query = "SELECT * FROM routine_runs"
+        params = []
+        where = []
+        if routine_id:
+            where.append("routine_id=?")
+            params.append(routine_id)
+        if status:
+            where.append("status=?")
+            params.append(status)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def active_runs_for_routine(self, routine_id):
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM routine_runs WHERE routine_id=? AND status NOT IN ('completed', 'failed', 'cancelled', 'skipped')",
+                (routine_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
