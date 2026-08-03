@@ -309,6 +309,7 @@ def _task_cli_request(args, config: Config) -> Any:
         return client.request("POST", "/v1/runs/save-as-task", payload)
     raise RelayError("INVALID_REQUEST", f"Unknown task command: {cmd}")
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",

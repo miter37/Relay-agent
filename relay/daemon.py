@@ -12,19 +12,14 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .agent_apps import AgentAppService
 from .api import (
-    create_task,
-    delete_task,
-    get_task,
-    list_tasks,
-    run_task,
-    runs_for_task,
-    save_run_as_task,
-    update_task,
     artifact_content,
     artifact_detail,
     artifact_lineage,
     check_job_progress,
+    create_task,
+    delete_task,
     get_agent,
+    get_task,
     job_artifacts,
     job_detail,
     job_events,
@@ -33,6 +28,7 @@ from .api import (
     list_agents,
     list_jobs,
     list_runs,
+    list_tasks,
     run_artifacts,
     run_detail,
     run_events,
@@ -40,8 +36,12 @@ from .api import (
     run_logs,
     run_progress,
     run_result,
+    run_task,
+    runs_for_task,
+    save_run_as_task,
     search_artifacts,
     search_runs,
+    update_task,
 )
 from .autostart import AutoStartManager
 from .cleanup import CleanupManager
@@ -527,7 +527,6 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     self._json(404, {"ok": False, "error_code": err.code, "error_message": err.message})
                 return
         self._json(404, {"ok": False, "error": "not found"})
-
 
     def do_POST(self) -> None:
         if not self._authorized():

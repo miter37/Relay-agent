@@ -1184,7 +1184,7 @@ class Database:
         keys = list(values)
         with self.connect() as conn:
             conn.execute(
-                f"INSERT INTO tasks ({",".join(keys)}) VALUES ({",".join('?' for _ in keys)})",
+                f"INSERT INTO tasks ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
                 [values[key] for key in keys],
             )
 
@@ -1215,7 +1215,7 @@ class Database:
         keys = list(changes)
         with self.connect() as conn:
             conn.execute(
-                f"UPDATE tasks SET {",".join(f'{key}=?' for key in keys)} WHERE task_id=?",
+                f"UPDATE tasks SET {','.join(f'{key}=?' for key in keys)} WHERE task_id=?",
                 [changes[key] for key in keys] + [task_id],
             )
 

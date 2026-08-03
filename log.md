@@ -1,3 +1,4 @@
+- 2026-08-03 22:30 | Implemented Phase 3 Task registration: schema v6 tasks table, TaskSpec model, Task CRUD, run_task with immutable snapshots, save-as-task promotion, daemon APIs and CLI.
 - 2026-08-03 18:14 | Clarified product direction: any human, Agent, or service may call Relay; any enabled, currently health-verified backend may be a Worker.
 - 2026-08-03 19:30 | Implemented Phase 0 domain compatibility: schema v3 metadata, artifact identity, Run API aliases, and additive compatibility capabilities.
 - 2026-08-03 20:30 | Implemented Phase 1 Artifact snapshots and lineage: UID-selected inputs, immutable manifests, source/consumer queries, CLI option, and GUI selection flow.

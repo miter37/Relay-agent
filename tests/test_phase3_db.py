@@ -68,12 +68,22 @@ class TaskDBTests(unittest.TestCase):
     def test_runs_for_task_lists_linked_jobs(self):
         self.db.create_task(self._row())
         for jid, tid in [("job-a", "task-1"), ("job-b", "task-1"), ("job-c", None)]:
-            self.db.create_job({
-                "job_id": jid, "caller": "human", "submitted_via": "cli",
-                "task_hash": "h", "requested_worker": "auto", "format": "json",
-                "profile": "web-research", "output_path": "o", "artifact_path": "a",
-                "status": "QUEUED", "request_json": "{}", "task_id": tid,
-            })
+            self.db.create_job(
+                {
+                    "job_id": jid,
+                    "caller": "human",
+                    "submitted_via": "cli",
+                    "task_hash": "h",
+                    "requested_worker": "auto",
+                    "format": "json",
+                    "profile": "web-research",
+                    "output_path": "o",
+                    "artifact_path": "a",
+                    "status": "QUEUED",
+                    "request_json": "{}",
+                    "task_id": tid,
+                }
+            )
         runs = self.db.runs_for_task("task-1")
         self.assertEqual([r["job_id"] for r in runs], ["job-b", "job-a"])
 

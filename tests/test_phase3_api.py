@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import socket
-import threading
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -17,11 +17,11 @@ from relay.api import (
     update_task,
 )
 from relay.config import Config
+from relay.daemon import RelayDaemon
 from relay.db import Database
 from relay.engine import RelayEngine
 from relay.errors import RelayError
 from relay.models import JobRequest
-from relay.daemon import RelayDaemon
 from relay.rpc import RPCClient
 
 

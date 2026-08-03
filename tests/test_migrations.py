@@ -140,7 +140,7 @@ class MigrationTests(unittest.TestCase):
             Database(path)
             with closing(sqlite3.connect(path)) as conn, conn:
                 conn.execute("PRAGMA user_version=5")
-            reopened = Database(path)
+            Database(path)
             with closing(sqlite3.connect(path)) as conn, conn:
                 tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
                 self.assertIn("tasks", tables)

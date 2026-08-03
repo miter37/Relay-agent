@@ -1045,7 +1045,6 @@ class RelayEngine:
         result["source_job_id"] = job_id
         return result
 
-
     def create_task(self, spec: TaskSpec) -> dict[str, Any]:
         row = spec.to_row()
         self.db.create_task(row)

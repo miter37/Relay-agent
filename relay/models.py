@@ -107,6 +107,7 @@ class TaskSpec:
 
     def validate(self) -> None:
         from .errors import RelayError
+
         if not str(self.name or "").strip():
             raise RelayError("TASK_NAME_REQUIRED", "A task name is required.")
         if not str(self.instructions or "").strip():
@@ -116,6 +117,7 @@ class TaskSpec:
 
     def to_row(self) -> dict[str, Any]:
         from .util import new_job_id, utc_now
+
         self.validate()
         now = utc_now()
         return {
@@ -139,9 +141,17 @@ class TaskSpec:
     @staticmethod
     def normalize_changes(changes: dict[str, Any]) -> dict[str, Any]:
         allowed = {
-            "name", "description", "instructions", "default_worker",
-            "fallback_enabled", "timeout_seconds", "profile", "result_format",
-            "input_schema", "output_contract", "validation_policy",
+            "name",
+            "description",
+            "instructions",
+            "default_worker",
+            "fallback_enabled",
+            "timeout_seconds",
+            "profile",
+            "result_format",
+            "input_schema",
+            "output_contract",
+            "validation_policy",
         }
         out: dict[str, Any] = {}
         for key, value in changes.items():

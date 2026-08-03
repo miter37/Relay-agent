@@ -7,17 +7,34 @@ from relay.cli import _preprocess, build_parser
 
 class TaskCLITests(unittest.TestCase):
     def test_task_create_parses_name_and_instructions(self):
-        ns = build_parser().parse_args(_preprocess(["task", "create", "--name", "Report", "--instructions", "Write it"]))
+        ns = build_parser().parse_args(
+            _preprocess(["task", "create", "--name", "Report", "--instructions", "Write it"])
+        )
         self.assertEqual(ns.command, "task")
         self.assertEqual(ns.task_command, "create")
         self.assertEqual(ns.name, "Report")
         self.assertEqual(ns.instructions, "Write it")
 
     def test_task_create_parses_task_file_and_overrides(self):
-        ns = build_parser().parse_args(_preprocess([
-            "task", "create", "--name", "Report", "--task-file", "prompt.md",
-            "--worker", "codex", "--no-fallback", "--timeout", "120", "--format", "json",
-        ]))
+        ns = build_parser().parse_args(
+            _preprocess(
+                [
+                    "task",
+                    "create",
+                    "--name",
+                    "Report",
+                    "--task-file",
+                    "prompt.md",
+                    "--worker",
+                    "codex",
+                    "--no-fallback",
+                    "--timeout",
+                    "120",
+                    "--format",
+                    "json",
+                ]
+            )
+        )
         self.assertEqual(ns.task_file, "prompt.md")
         self.assertEqual(ns.worker, "codex")
         self.assertFalse(ns.fallback)
