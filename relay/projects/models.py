@@ -16,6 +16,7 @@ _POLICY_VALUES = {"stop"}
 class ProjectNode:
     node_id: str
     task_id: str
+    checkpoint: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -51,7 +52,7 @@ class ProjectSpec:
             "description": self.description,
             "version": self.version,
             "failure_policy": self.failure_policy,
-            "nodes": [{"node_id": n.node_id, "task_id": n.task_id} for n in self.nodes],
+            "nodes": [{"node_id": n.node_id, "task_id": n.task_id, **({"checkpoint": n.checkpoint} if n.checkpoint else {})} for n in self.nodes],
             "connections": [
                 {
                     "from_node": c.from_node,
@@ -66,7 +67,7 @@ class ProjectSpec:
             ],
         }
 
-    def validate(self, task_lookup: Callable[[str], dict[str, Any] | None]) -> None:
+    def validate(self, task_lookup: Callable[[str], dict[str, Any] | None], allow_roots: Iterable[str] | None = None) -> None:
         if not self.nodes:
             raise RelayError("PROJECT_INVALID", "Project must declare at least one node.")
         node_ids: list[str] = []
@@ -78,6 +79,27 @@ class ProjectSpec:
             node_ids.append(node.node_id)
             if not task_lookup(node.task_id):
                 raise RelayError("PROJECT_TASK_MISSING", f"Task not found: {node.task_id}")
+            if node.checkpoint:
+                if not isinstance(node.checkpoint, dict):
+                    raise RelayError("PROJECT_INVALID", f"Node checkpoint must be an object: {node.node_id}")
+                deliver_to = node.checkpoint.get("deliver_to") or []
+                if not isinstance(deliver_to, list):
+                    raise RelayError("PROJECT_INVALID", f"deliver_to must be a list in node {node.node_id}")
+                for item in deliver_to:
+                    if not isinstance(item, dict):
+                        raise RelayError("PROJECT_INVALID", f"deliver_to item must be an object in node {node.node_id}")
+                    kind = str(item.get("kind") or "").strip()
+                    if kind != "folder":
+                        raise RelayError("DELIVERY_KIND_UNSUPPORTED", f"Unsupported delivery kind: {kind}")
+                    target_path = str(item.get("path") or "").strip()
+                    if not target_path:
+                        raise RelayError("PROJECT_INVALID", f"Delivery target path missing in node {node.node_id}")
+                    if allow_roots is not None:
+                        from pathlib import Path
+                        from ..target_workspace import is_within, safe_resolve
+                        resolved = safe_resolve(Path(target_path))
+                        if not any(is_within(resolved, Path(r)) for r in allow_roots):
+                            raise RelayError("DELIVERY_PATH_NOT_ALLOWED", f"Delivery path is not in allow-list: {target_path}")
         node_set = set(node_ids)
         for conn in self.connections:
             if conn.from_node not in node_set:
@@ -163,7 +185,7 @@ class ProjectSpec:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ProjectSpec:
-        nodes = [ProjectNode(node_id=str(n["node_id"]), task_id=str(n["task_id"])) for n in payload.get("nodes", [])]
+        nodes = [ProjectNode(node_id=str(n["node_id"]), task_id=str(n["task_id"]), checkpoint=n.get("checkpoint")) for n in payload.get("nodes", [])]
         connections = [
             ProjectConnection(
                 from_node=str(c["from_node"]),
