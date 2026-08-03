@@ -127,6 +127,7 @@ class ProjectService:
         submitted_via: str = "cli",
         caller: str = "human",
         external_inputs: list[dict[str, Any]] | None = None,
+        routine_id: str | None = None,
     ) -> dict[str, Any]:
         project = self.get_project(project_id)
         spec = self._project_spec(project_id, project["version"])
@@ -184,6 +185,9 @@ class ProjectService:
                 "submitted_via": submitted_via,
             }
         )
+
+        if routine_id:
+            self.db.update_project_run(project_run_id, routine_id=routine_id)
 
         steps: list[dict[str, Any]] = []
         external_by_node: dict[str, list[dict[str, Any]]] = {}

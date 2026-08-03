@@ -74,8 +74,8 @@ TECHNICAL_FALLBACK_CODES = {
 }
 
 VALID_CALLERS = {"human", "hermes", "service", "schedule"}
-VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy", "project"}
-VALID_TRIGGER_TYPES = {"manual", "api", "schedule", "rerun", "project"}
+VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy", "project", "routine"}
+VALID_TRIGGER_TYPES = {"manual", "api", "schedule", "rerun", "project", "routine"}
 
 
 class RelayEngine:
@@ -1075,6 +1075,8 @@ class RelayEngine:
         request: JobRequest | None = None,
         queued: bool = False,
         submitted_via: str | None = None,
+        trigger_type: str | None = None,
+        routine_id: str | None = None,
     ) -> tuple[dict[str, Any], bool, dict[str, Any]]:
         task = self.db.get_task(task_id)
         if not task:
@@ -1122,7 +1124,11 @@ class RelayEngine:
             submitted_via=submitted_via,
             task_id=task["task_id"],
             task_definition=definition,
+            trigger_type=trigger_type,
         )
+        if routine_id:
+            self.db.update_job(job["job_id"], routine_id=routine_id)
+            job["routine_id"] = routine_id
         return job, reused, task
 
     def load_task_for_snapshot(self, task_id: str) -> dict[str, Any]:
