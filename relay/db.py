@@ -12,7 +12,7 @@ from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -183,6 +183,26 @@ CREATE TABLE IF NOT EXISTS capability_audits (
     spec_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audits_worker ON capability_audits(worker, audit_time);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    instructions TEXT,
+    default_worker TEXT,
+    fallback_enabled INTEGER NOT NULL DEFAULT 1,
+    timeout_seconds INTEGER,
+    profile TEXT,
+    result_format TEXT,
+    input_schema TEXT,
+    output_contract TEXT,
+    validation_policy TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id, created_at);
 """
 
 MIGRATION_0_TO_1 = """
@@ -282,6 +302,28 @@ MIGRATION_4_TO_5 = """
 -- FTS5 tables are created opportunistically after the schema migration.
 """
 
+MIGRATION_5_TO_6 = """
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    instructions TEXT,
+    default_worker TEXT,
+    fallback_enabled INTEGER NOT NULL DEFAULT 1,
+    timeout_seconds INTEGER,
+    profile TEXT,
+    result_format TEXT,
+    input_schema TEXT,
+    output_contract TEXT,
+    validation_policy TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id, created_at);
+"""
+
 LEGACY_JOB_COLUMNS = {
     "job_id",
     "request_id",
@@ -366,6 +408,9 @@ class Database:
                     for statement in MIGRATION_4_TO_5.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for statement in MIGRATION_5_TO_6.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     self._backfill_job_metadata(conn)
@@ -374,7 +419,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3, 4}:
+            elif version in {1, 2, 3, 4, 5}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -391,6 +436,9 @@ class Database:
                             if statement.strip():
                                 conn.execute(statement)
                     for statement in MIGRATION_4_TO_5.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_5_TO_6.split(";"):
                         if statement.strip():
                             conn.execute(statement)
                     self._backfill_artifact_uids(conn)
@@ -1129,3 +1177,57 @@ class Database:
                 (utc_now(), utc_now(), job_id),
             )
             return cursor.rowcount > 0
+
+    def create_task(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"version": 1, **row, "created_at": row.get("created_at", now), "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO tasks ({",".join(keys)}) VALUES ({",".join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_tasks(self, *, name: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM tasks"
+        params: list[Any] = []
+        if name:
+            query += " WHERE name LIKE ?"
+            params.append(f"%{name}%")
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def update_task(self, task_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        task = self.get_task(task_id)
+        if not task:
+            raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+        changes["version"] = task["version"] + 1
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE tasks SET {",".join(f'{key}=?' for key in keys)} WHERE task_id=?",
+                [changes[key] for key in keys] + [task_id],
+            )
+
+    def delete_task(self, task_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
+            return cur.rowcount > 0
+
+    def runs_for_task(self, task_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+                (task_id, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]

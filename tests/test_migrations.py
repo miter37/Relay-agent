@@ -134,6 +134,18 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaisesRegex(RelayError, "newer than supported"):
                 Database(path)
 
+    def test_migration_5_to_6_adds_tasks_table(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.db"
+            Database(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("PRAGMA user_version=5")
+            reopened = Database(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                self.assertIn("tasks", tables)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
+
 
 if __name__ == "__main__":
     unittest.main()
