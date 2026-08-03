@@ -12,7 +12,7 @@ from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -345,6 +345,22 @@ CREATE TABLE IF NOT EXISTS deliveries (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_project_run ON deliveries(project_run_id);
+
+CREATE TABLE IF NOT EXISTS notification_events (
+    event_id TEXT PRIMARY KEY,
+    routine_id TEXT,
+    project_run_id TEXT,
+    trigger_type TEXT NOT NULL,
+    sink_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'delivered',
+    status_code INTEGER,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    error TEXT,
+    payload_hash TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_events_routine ON notification_events(routine_id);
+CREATE INDEX IF NOT EXISTS idx_notification_events_project ON notification_events(project_run_id);
 """
 MIGRATION_0_TO_1 = """
 ALTER TABLE jobs ADD COLUMN submitted_via TEXT NOT NULL DEFAULT 'legacy';
@@ -442,6 +458,24 @@ CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer
 
 MIGRATION_4_TO_5 = """
 -- FTS5 tables are created opportunistically after the schema migration.
+"""
+
+MIGRATION_9_TO_10 = """
+CREATE TABLE IF NOT EXISTS notification_events (
+    event_id TEXT PRIMARY KEY,
+    routine_id TEXT,
+    project_run_id TEXT,
+    trigger_type TEXT NOT NULL,
+    sink_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'delivered',
+    status_code INTEGER,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    error TEXT,
+    payload_hash TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_events_routine ON notification_events(routine_id);
+CREATE INDEX IF NOT EXISTS idx_notification_events_project ON notification_events(project_run_id);
 """
 
 MIGRATION_8_TO_9 = """
@@ -711,7 +745,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3, 4, 5, 6, 7, 8}:
+            elif version in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -758,6 +792,13 @@ class Database:
                             except sqlite3.OperationalError as exc:
                                 if "duplicate column" not in str(exc):
                                     raise
+                    for statement in MIGRATION_9_TO_10.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
@@ -778,6 +819,13 @@ class Database:
                                 if "duplicate column" not in str(exc):
                                     raise
                     for statement in MIGRATION_8_TO_9.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_9_TO_10.split(";"):
                         if statement.strip():
                             try:
                                 conn.execute(statement)
@@ -1989,3 +2037,40 @@ class Database:
                 (project_run_id,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def create_notification_event(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {
+            "status": "delivered",
+            "status_code": None,
+            "attempt": 1,
+            "error": None,
+            "payload_hash": None,
+            "routine_id": None,
+            "project_run_id": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO notification_events ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def list_notification_events(self, *, routine_id: str | None = None, project_run_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM notification_events"
+        params: list[Any] = []
+        where: list[str] = []
+        if routine_id:
+            where.append("routine_id=?")
+            params.append(routine_id)
+        if project_run_id:
+            where.append("project_run_id=?")
+            params.append(project_run_id)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
