@@ -391,6 +391,7 @@ class RelayEngine:
             "submitted_via": submitted_source,
             "trigger_type": resolved_trigger,
             "task_id": task_id,
+            "receipt_schema_version": 1,
             "task_snapshot_json": self._task_snapshot(
                 request, trigger_type=resolved_trigger, artifact_inputs=resolved_inputs, task_definition=task_definition
             ),

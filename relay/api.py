@@ -170,7 +170,7 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             schedule_reason = exc.code
     else:
         schedule_reason = "SCHEDULE_NOT_ELIGIBLE"
-    detail["receipt_schema_version"] = RECEIPT_SCHEMA_VERSION
+    detail["receipt_schema_version"] = raw.get("receipt_schema_version", RECEIPT_SCHEMA_VERSION)
     detail["actions"] = {
         "can_cancel": status in {"QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING"},
         "can_check_progress": status

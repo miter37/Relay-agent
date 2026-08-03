@@ -25,6 +25,12 @@ class Phase6eReceiptTests(unittest.TestCase):
 
     def test_job_receipt_carries_receipt_schema_version(self):
         job, _ = self.engine.create_job(JobRequest(task="Test Receipt"), queued=True)
+
+        # Verify DB persistence
+        db_job = self.db.get_job(job["job_id"])
+        self.assertEqual(db_job.get("receipt_schema_version"), 1)
+
+        # Verify API response
         detail = job_detail(self.engine, job["job_id"])
         self.assertEqual(detail.get("receipt_schema_version"), RECEIPT_SCHEMA_VERSION)
 

@@ -88,6 +88,10 @@ class ProjectRuntime:
                 continue
             job_status = job.get("status")
             if job_status in {"COMPLETED"}:
+                # Skip if step already processed (prevents duplicate checkpoint pausing on restart)
+                if step["status"] in {"awaiting_approval", "completed"}:
+                    continue
+
                 artifacts = self.engine.db.artifacts_for_job(task_run_id)
                 # Check if step has a checkpoint
                 nodes = snapshot.get("project_definition", {}).get("nodes", [])

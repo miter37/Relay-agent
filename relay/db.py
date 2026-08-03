@@ -12,7 +12,7 @@ from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -361,6 +361,8 @@ CREATE TABLE IF NOT EXISTS notification_events (
 );
 CREATE INDEX IF NOT EXISTS idx_notification_events_routine ON notification_events(routine_id);
 CREATE INDEX IF NOT EXISTS idx_notification_events_project ON notification_events(project_run_id);
+
+ALTER TABLE jobs ADD COLUMN receipt_schema_version INTEGER NOT NULL DEFAULT 1;
 """
 MIGRATION_0_TO_1 = """
 ALTER TABLE jobs ADD COLUMN submitted_via TEXT NOT NULL DEFAULT 'legacy';
@@ -458,6 +460,10 @@ CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer
 
 MIGRATION_4_TO_5 = """
 -- FTS5 tables are created opportunistically after the schema migration.
+"""
+
+MIGRATION_10_TO_11 = """
+ALTER TABLE jobs ADD COLUMN receipt_schema_version INTEGER NOT NULL DEFAULT 1;
 """
 
 MIGRATION_9_TO_10 = """
@@ -745,7 +751,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
+            elif version in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -799,6 +805,13 @@ class Database:
                             except sqlite3.OperationalError as exc:
                                 if "duplicate column" not in str(exc):
                                     raise
+                    for statement in MIGRATION_10_TO_11.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
@@ -826,6 +839,13 @@ class Database:
                                 if "duplicate column" not in str(exc):
                                     raise
                     for statement in MIGRATION_9_TO_10.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_10_TO_11.split(";"):
                         if statement.strip():
                             try:
                                 conn.execute(statement)

@@ -180,10 +180,21 @@ class RoutineRuntime:
         }
 
     def _advance(self, routine: dict[str, Any], occ: Occurrence) -> None:
+        # Calculate next occurrence strictly after the current one
+        try:
+            rule = __import__("json").loads(routine["rule_json"])
+            rule.setdefault("timezone", routine["timezone"])
+            starts = self._parse_dt(routine.get("starts_at_utc"))
+            ends = self._parse_dt(routine.get("ends_at_utc"))
+            next_items = next_occurrences(rule, occ.instant_utc, limit=1, starts_at_utc=starts, ends_at_utc=ends)
+            next_run = next_items[0].instant_utc.isoformat(timespec="seconds") if next_items else None
+        except Exception:
+            next_run = None
+
         self.db.update_routine(
             routine["routine_id"],
             last_occurrence_key=occ.occurrence_key,
-            next_run_at_utc=None,
+            next_run_at_utc=next_run,
         )
 
     @staticmethod
