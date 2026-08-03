@@ -12,6 +12,18 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .agent_apps import AgentAppService
 from .api import (
+    create_project,
+    delete_project,
+    get_project,
+    list_projects,
+    project_run,
+    project_run_cancel,
+    project_run_receipt,
+    project_run_retry,
+    project_run_steps,
+    project_runs,
+    run_project,
+    update_project,
     artifact_content,
     artifact_detail,
     artifact_lineage,
@@ -241,6 +253,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         "artifact-content-read",
                         "task-registry",
                         "task-run",
+                        "project-runtime",
                     ],
                     "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
@@ -258,6 +271,40 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, runs_for_task(self.daemon.engine, suffix[: -len("/runs")], limit=limit))
                 else:
                     self._json(HTTPStatus.OK, get_task(self.daemon.engine, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path == "/v1/projects":
+            self._json(HTTPStatus.OK, list_projects(self.daemon.engine))
+            return
+        if path.startswith("/v1/projects/"):
+            suffix = path[len("/v1/projects/") :]
+            try:
+                if suffix.endswith("/runs"):
+                    pid = suffix[: -len("/runs")]
+                    self._json(HTTPStatus.OK, project_runs(self.daemon.engine, pid))
+                else:
+                    self._json(HTTPStatus.OK, get_project(self.daemon.engine, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path.startswith("/v1/project-runs/"):
+            suffix = path[len("/v1/project-runs/") :]
+            try:
+                if suffix.endswith("/steps"):
+                    prid = suffix[: -len("/steps")]
+                    self._json(HTTPStatus.OK, project_run_steps(self.daemon.engine, prid))
+                elif suffix.endswith("/receipt"):
+                    prid = suffix[: -len("/receipt")]
+                    self._json(HTTPStatus.OK, project_run_receipt(self.daemon.engine, prid))
+                elif suffix.endswith("/retry"):
+                    prid = suffix[: -len("/retry")]
+                    self._json(HTTPStatus.OK, project_run_retry(self.daemon.engine, prid, self._body()))
+                elif suffix.endswith("/cancel"):
+                    prid = suffix[: -len("/cancel")]
+                    self._json(HTTPStatus.OK, project_run_cancel(self.daemon.engine, prid))
+                else:
+                    self._json(HTTPStatus.OK, project_run(self.daemon.engine, suffix))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
@@ -563,6 +610,17 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 task_id = path[len("/v1/tasks/") :]
                 self._json(HTTPStatus.OK, update_task(self.daemon.engine, task_id, self._body()))
                 return
+            if path == "/v1/projects":
+                self._json(HTTPStatus.OK, create_project(self.daemon.engine, self._body()))
+                return
+            if path.startswith("/v1/projects/") and path.endswith("/run"):
+                pid = path[len("/v1/projects/") : -len("/run")]
+                self._json(HTTPStatus.OK, run_project(self.daemon.engine, pid, self._body()))
+                return
+            if path.startswith("/v1/projects/"):
+                pid = path[len("/v1/projects/") :]
+                self._json(HTTPStatus.OK, update_project(self.daemon.engine, pid, self._body()))
+                return
             if path == "/v1/agent-apps":
                 self._json(
                     HTTPStatus.OK,
@@ -720,6 +778,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             try:
                 task_id = path[len("/v1/tasks/") :]
                 self._json(HTTPStatus.OK, delete_task(self.daemon.engine, task_id))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path.startswith("/v1/projects/"):
+            try:
+                pid = path[len("/v1/projects/") :]
+                self._json(HTTPStatus.OK, delete_project(self.daemon.engine, pid))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return

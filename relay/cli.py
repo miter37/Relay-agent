@@ -53,6 +53,8 @@ COMMANDS = {
     "artifact",
     "run-lineage",
     "task",
+    "project",
+    "project-run",
 }
 
 
@@ -308,6 +310,148 @@ def _task_cli_request(args, config: Config) -> Any:
         payload = {"run_id": args.job_id, "name": args.name, "description": args.description}
         return client.request("POST", "/v1/runs/save-as-task", payload)
     raise RelayError("INVALID_REQUEST", f"Unknown task command: {cmd}")
+
+
+
+def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
+    project = sub.add_parser(
+        "project",
+        help="Create and manage Projects that connect multiple Tasks",
+        description="Define Projects that link Task definitions through explicit Artifact bindings.",
+    )
+    proj_sub = project.add_subparsers(dest="project_command", required=True)
+
+    create = proj_sub.add_parser("create", help="Create a Project from a definition file or inline JSON")
+    create.add_argument("--file", help="Path to a UTF-8 JSON file with the Project definition")
+    create.add_argument("--name", help="Name used when --file is omitted")
+    create.add_argument("--json", help="Inline JSON string (alternative to --file)")
+    create.add_argument("--machine", action="store_true")
+
+    list_p = proj_sub.add_parser("list", help="List registered Projects")
+    list_p.add_argument("--name")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = proj_sub.add_parser("show", help="Show a Project definition")
+    show_p.add_argument("project_id")
+    show_p.add_argument("--machine", action="store_true")
+
+    update = proj_sub.add_parser("update", help="Update a Project definition")
+    update.add_argument("project_id")
+    update.add_argument("--file")
+    update.add_argument("--json")
+    update.add_argument("--machine", action="store_true")
+
+    delete_p = proj_sub.add_parser("delete", help="Soft-delete a Project")
+    delete_p.add_argument("project_id")
+    delete_p.add_argument("--machine", action="store_true")
+
+    run_p = proj_sub.add_parser("run", help="Execute a Project")
+    run_p.add_argument("project_id")
+    run_p.add_argument("--input", action="append", default=[],
+                       help="External input binding node:alias=ARTIFACT_UID (repeatable)")
+    run_p.add_argument("--machine", action="store_true")
+
+    runs_p = proj_sub.add_parser("runs", help="List Project Runs")
+    runs_p.add_argument("project_id")
+    runs_p.add_argument("--limit", type=int, default=50)
+    runs_p.add_argument("--machine", action="store_true")
+
+
+def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
+    show = run_sub.add_parser("show", help="Show a Project Run")
+    show.add_argument("project_run_id")
+    show.add_argument("--machine", action="store_true")
+
+    steps = run_sub.add_parser("steps", help="List Project Run steps")
+    steps.add_argument("project_run_id")
+    steps.add_argument("--machine", action="store_true")
+
+    receipt = run_sub.add_parser("receipt", help="Show the Project Run receipt")
+    receipt.add_argument("project_run_id")
+    receipt.add_argument("--machine", action="store_true")
+
+    retry = run_sub.add_parser("retry", help="Retry a failed Project step or from a node")
+    retry.add_argument("project_run_id")
+    retry.add_argument("--from-node")
+    retry.add_argument("--worker")
+    retry.add_argument("--machine", action="store_true")
+
+    cancel = run_sub.add_parser("cancel", help="Cancel a running Project Run")
+    cancel.add_argument("project_run_id")
+    cancel.add_argument("--machine", action="store_true")
+
+
+def _project_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.project_command
+    if cmd == "create":
+        payload = _load_project_payload(args)
+        if "name" not in payload:
+            raise RelayError("INVALID_REQUEST", "Project definition must include a name.")
+        return client.request("POST", "/v1/projects", payload)
+    if cmd == "list":
+        path = "/v1/projects"
+        if args.name:
+            path += f"?name={args.name}&limit={args.limit}"
+        elif args.limit:
+            path += f"?limit={args.limit}"
+        return client.request("GET", path)
+    if cmd == "show":
+        return client.request("GET", f"/v1/projects/{args.project_id}")
+    if cmd == "update":
+        payload = _load_project_payload(args)
+        return client.request("POST", f"/v1/projects/{args.project_id}", payload)
+    if cmd == "delete":
+        return client.request("DELETE", f"/v1/projects/{args.project_id}")
+    if cmd == "run":
+        inputs = []
+        for value in args.input or []:
+            spec_part, sep, artifact_uid = value.partition("=")
+            if not sep or not artifact_uid:
+                raise RelayError("INVALID_REQUEST", f"Invalid --input: {value}")
+            node, _, alias = spec_part.partition(":")
+            if not node or not alias:
+                raise RelayError("INVALID_REQUEST", f"--input must be node:alias=ARTIFACT_UID: {value}")
+            inputs.append({"node_id": node, "to_alias": alias, "artifact_uid": artifact_uid})
+        return client.request("POST", f"/v1/projects/{args.project_id}/run", {"inputs": inputs})
+    if cmd == "runs":
+        path = f"/v1/projects/{args.project_id}/runs?limit={args.limit}"
+        return client.request("GET", path)
+    raise RelayError("INVALID_REQUEST", f"Unknown project command: {cmd}")
+
+
+def _project_run_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.project_run_command
+    prid = args.project_run_id
+    if cmd == "show":
+        return client.request("GET", f"/v1/project-runs/{prid}")
+    if cmd == "steps":
+        return client.request("GET", f"/v1/project-runs/{prid}/steps")
+    if cmd == "receipt":
+        return client.request("GET", f"/v1/project-runs/{prid}/receipt")
+    if cmd == "retry":
+        payload: dict[str, Any] = {}
+        if args.from_node:
+            payload["from_node"] = args.from_node
+        if args.worker:
+            payload["worker"] = args.worker
+        return client.request("POST", f"/v1/project-runs/{prid}/retry", payload)
+    if cmd == "cancel":
+        return client.request("POST", f"/v1/project-runs/{prid}/cancel")
+    raise RelayError("INVALID_REQUEST", f"Unknown project-run command: {cmd}")
+
+
+def _load_project_payload(args) -> dict[str, Any]:
+    if args.file:
+        return json.loads(Path(args.file).read_text(encoding="utf-8"))
+    if args.json:
+        return json.loads(args.json)
+    payload = {}
+    if args.name:
+        payload["name"] = args.name
+    return payload
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -679,6 +823,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_schedule_parsers(sub)
     _add_task_parsers(sub)
+    _add_project_parsers(sub)
+    project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
+    _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
     search.add_argument("query", nargs="?", default="")
     search.add_argument("--kind", choices=["runs", "artifacts"], default="runs")
@@ -1349,6 +1496,10 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_schedule_cli_request(args, config), machine)
         elif args.command == "task":
             _emit(_task_cli_request(args, config), machine)
+        elif args.command == "project":
+            _emit(_project_cli_request(args, config), machine)
+        elif args.command == "project-run":
+            _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":
             if args.daemon_command == "serve":
                 RelayDaemon(config).serve()

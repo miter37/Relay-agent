@@ -93,6 +93,8 @@ class RelayEngine:
         self._per_worker_limit = per_worker
         self._worker_slots = {name: threading.Semaphore(per_worker) for name in ("claude", "codex", "antigravity")}
         self._worker_slots_lock = threading.Lock()
+        from .projects.service import ProjectService
+        self.project_service = ProjectService(self.db, self)
 
     def _set_progress(self, job_id: str, **changes: Any) -> None:
         with self._progress_lock:
