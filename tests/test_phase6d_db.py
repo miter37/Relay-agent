@@ -25,15 +25,17 @@ class Phase6dDBTests(unittest.TestCase):
             self.assertIn("notification_events", tables)
 
     def test_notification_event_crud(self):
-        self.db.create_notification_event({
-            "event_id": "ne-1",
-            "routine_id": "r-1",
-            "trigger_type": "on_failure",
-            "sink_url": "http://127.0.0.1:8080/hook",
-            "status": "delivered",
-            "status_code": 200,
-            "attempt": 1,
-        })
+        self.db.create_notification_event(
+            {
+                "event_id": "ne-1",
+                "routine_id": "r-1",
+                "trigger_type": "on_failure",
+                "sink_url": "http://127.0.0.1:8080/hook",
+                "status": "delivered",
+                "status_code": 200,
+                "attempt": 1,
+            }
+        )
         events = self.db.list_notification_events(routine_id="r-1")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_id"], "ne-1")

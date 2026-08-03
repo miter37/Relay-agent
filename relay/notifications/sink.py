@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import urllib.error
 import urllib.request
 from typing import Any

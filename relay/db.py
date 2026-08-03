@@ -2058,7 +2058,9 @@ class Database:
                 [values[key] for key in keys],
             )
 
-    def list_notification_events(self, *, routine_id: str | None = None, project_run_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_notification_events(
+        self, *, routine_id: str | None = None, project_run_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM notification_events"
         params: list[Any] = []
         where: list[str] = []

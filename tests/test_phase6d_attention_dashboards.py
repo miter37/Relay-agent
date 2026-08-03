@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from relay.attention.service import AttentionService
 from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
 from relay.models import JobRequest
-from relay.attention.service import AttentionService
 from relay.operations.service import OperationsDashboardService
 
 
@@ -32,16 +32,35 @@ class Phase6dAttentionDashboardsTests(unittest.TestCase):
         self.db.update_job(j1["job_id"], status="FAILED", error_code="ALL_WORKERS_FAILED")
 
         # Pending Approval
-        self.db.create_project({
-            "project_id": "p-1", "name": "P", "description": None, "version": 1, "definition_json": "{}",
-        })
-        self.db.create_project_run({
-            "project_run_id": "pr-1", "project_id": "p-1", "project_version": 1,
-            "project_snapshot_json": "{}", "status": "running", "trigger_type": "manual", "submitted_via": "cli",
-        })
-        self.db.create_approval({
-            "approval_id": "app-1", "project_run_id": "pr-1", "node_id": "n1", "token": "tok1", "status": "pending",
-        })
+        self.db.create_project(
+            {
+                "project_id": "p-1",
+                "name": "P",
+                "description": None,
+                "version": 1,
+                "definition_json": "{}",
+            }
+        )
+        self.db.create_project_run(
+            {
+                "project_run_id": "pr-1",
+                "project_id": "p-1",
+                "project_version": 1,
+                "project_snapshot_json": "{}",
+                "status": "running",
+                "trigger_type": "manual",
+                "submitted_via": "cli",
+            }
+        )
+        self.db.create_approval(
+            {
+                "approval_id": "app-1",
+                "project_run_id": "pr-1",
+                "node_id": "n1",
+                "token": "tok1",
+                "status": "pending",
+            }
+        )
 
         items = self.attention_service.list_items()
         self.assertGreaterEqual(len(items), 2)
@@ -50,12 +69,22 @@ class Phase6dAttentionDashboardsTests(unittest.TestCase):
         self.assertIn("approval", kinds)
 
     def test_dashboards_compute_stats(self):
-        self.db.create_routine({
-            "routine_id": "r-1", "name": "Daily R", "target_type": "task", "target_id": "T-1",
-            "rule_json": "{}", "timezone": "Asia/Seoul", "enabled": 1,
-            "overlap_policy": "skip", "missed_policy": "skip", "missed_grace_seconds": 43200,
-            "version_policy": "latest", "next_run_at_utc": None,
-        })
+        self.db.create_routine(
+            {
+                "routine_id": "r-1",
+                "name": "Daily R",
+                "target_type": "task",
+                "target_id": "T-1",
+                "rule_json": "{}",
+                "timezone": "Asia/Seoul",
+                "enabled": 1,
+                "overlap_policy": "skip",
+                "missed_policy": "skip",
+                "missed_grace_seconds": 43200,
+                "version_policy": "latest",
+                "next_run_at_utc": None,
+            }
+        )
         dash = self.operations_service.routine_dashboard()
         self.assertEqual(len(dash), 1)
         self.assertEqual(dash[0]["routine_id"], "r-1")

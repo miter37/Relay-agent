@@ -60,6 +60,9 @@ COMMANDS = {
     "routine",
     "quality",
     "search-semantic",
+    "attention",
+    "operations",
+    "notify",
 }
 
 
@@ -766,6 +769,72 @@ def _search_semantic_cli_request(args, config: Config) -> Any:
     return client.request("POST", "/v1/search/semantic", payload)
 
 
+def _add_attention_parsers(sub: argparse._SubParsersAction) -> None:
+    att = sub.add_parser(
+        "attention",
+        help="Inspect items needing operator attention",
+        description="List failed jobs, checkpoint approvals, and low quality runs needing attention.",
+    )
+    asub = att.add_subparsers(dest="attention_command", required=True)
+    list_p = asub.add_parser("list", help="List attention items")
+    list_p.add_argument("--kind", choices=["failed_job", "approval", "low_quality"])
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+
+def _add_operations_parsers(sub: argparse._SubParsersAction) -> None:
+    ops = sub.add_parser(
+        "operations",
+        help="Operational dashboards for Routines and Projects",
+        description="View operational success rates and metrics for Routines and Projects.",
+    )
+    osub = ops.add_subparsers(dest="operations_command", required=True)
+    osub.add_parser("routines", help="Show Routine dashboard").add_argument("--machine", action="store_true")
+    osub.add_parser("projects", help="Show Project dashboard").add_argument("--machine", action="store_true")
+
+
+def _add_notify_parsers(sub: argparse._SubParsersAction) -> None:
+    notif = sub.add_parser(
+        "notify",
+        help="Test notification webhooks",
+        description="Test delivery of a webhook notification payload.",
+    )
+    nsub = notif.add_subparsers(dest="notify_command", required=True)
+    test_p = nsub.add_parser("test", help="Test a webhook sink")
+    test_p.add_argument("--url", required=True)
+    test_p.add_argument("--secret")
+    test_p.add_argument("--machine", action="store_true")
+
+
+def _attention_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    path = "/v1/attention"
+    if args.kind:
+        path += f"?kind={args.kind}"
+    return client.request("GET", path)
+
+
+def _operations_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.operations_command
+    if cmd == "routines":
+        return client.request("GET", "/v1/operations/routines")
+    if cmd == "projects":
+        return client.request("GET", "/v1/operations/projects")
+    raise RelayError("INVALID_REQUEST", f"Unknown operations command: {cmd}")
+
+
+def _notify_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.notify_command
+    if cmd == "test":
+        payload = {"url": args.url}
+        if args.secret:
+            payload["secret"] = args.secret
+        return client.request("POST", "/v1/notifications/test", payload)
+    raise RelayError("INVALID_REQUEST", f"Unknown notify command: {cmd}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",
@@ -1141,6 +1210,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_compare_parsers(sub)
     _add_quality_parsers(sub)
     _add_search_semantic_parsers(sub)
+    _add_attention_parsers(sub)
+    _add_operations_parsers(sub)
+    _add_notify_parsers(sub)
     project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
     _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
@@ -1825,6 +1897,12 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_quality_cli_request(args, config), machine)
         elif args.command == "search-semantic":
             _emit(_search_semantic_cli_request(args, config), machine)
+        elif args.command == "attention":
+            _emit(_attention_cli_request(args, config), machine)
+        elif args.command == "operations":
+            _emit(_operations_cli_request(args, config), machine)
+        elif args.command == "notify":
+            _emit(_notify_cli_request(args, config), machine)
         elif args.command == "project-run":
             _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":

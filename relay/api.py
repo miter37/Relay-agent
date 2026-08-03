@@ -832,3 +832,42 @@ def quality_attention_api(engine, status_filter: str = "low", limit: int = 50) -
     qs = QualityService(engine.db)
     items = qs.attention_runs(status_filter=status_filter, limit=limit)
     return {"ok": True, "status": status_filter, "items": items}
+
+
+# --- Phase 6d Observability ---
+
+
+def attention_inbox_api(engine, kind: str | None = None, limit: int = 50) -> dict[str, Any]:
+    from .attention.service import AttentionService
+
+    svc = AttentionService(engine.db)
+    items = svc.list_items(kind=kind, limit=limit)
+    return {"ok": True, "items": items}
+
+
+def operations_routines_api(engine, limit: int = 50) -> dict[str, Any]:
+    from .operations.service import OperationsDashboardService
+
+    svc = OperationsDashboardService(engine.db)
+    return {"ok": True, "routines": svc.routine_dashboard(limit=limit)}
+
+
+def operations_projects_api(engine, limit: int = 50) -> dict[str, Any]:
+    from .operations.service import OperationsDashboardService
+
+    svc = OperationsDashboardService(engine.db)
+    return {"ok": True, "projects": svc.project_dashboard(limit=limit)}
+
+
+def notify_test_api(engine, payload: dict[str, Any]) -> dict[str, Any]:
+    from .notifications.sink import WebhookSink
+
+    url = str(payload.get("url") or "")
+    secret = payload.get("secret")
+    data = payload.get("payload") or {"test": True}
+    sink = WebhookSink(engine.config)
+    try:
+        res = sink.deliver(url, secret, data)
+    except RelayError as exc:
+        res = {"ok": False, "status_code": None, "error": exc.message}
+    return {"ok": True, "delivery": res}

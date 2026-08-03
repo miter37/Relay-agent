@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from ..db import Database
@@ -23,20 +22,22 @@ class OperationsDashboardService:
             success_rate = (completed / total * 100.0) if total > 0 else 100.0
 
             last_run = runs[0] if runs else None
-            results.append({
-                "routine_id": rid,
-                "name": r["name"],
-                "target_type": r["target_type"],
-                "target_id": r["target_id"],
-                "enabled": bool(r.get("enabled", 1)),
-                "total_runs": total,
-                "completed_runs": completed,
-                "failed_runs": failed,
-                "success_rate_percent": round(success_rate, 1),
-                "last_run_status": last_run["status"] if last_run else None,
-                "last_run_at": last_run["created_at"] if last_run else None,
-                "next_run_at_utc": r.get("next_run_at_utc"),
-            })
+            results.append(
+                {
+                    "routine_id": rid,
+                    "name": r["name"],
+                    "target_type": r["target_type"],
+                    "target_id": r["target_id"],
+                    "enabled": bool(r.get("enabled", 1)),
+                    "total_runs": total,
+                    "completed_runs": completed,
+                    "failed_runs": failed,
+                    "success_rate_percent": round(success_rate, 1),
+                    "last_run_status": last_run["status"] if last_run else None,
+                    "last_run_at": last_run["created_at"] if last_run else None,
+                    "next_run_at_utc": r.get("next_run_at_utc"),
+                }
+            )
         return results
 
     def project_dashboard(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -52,15 +53,17 @@ class OperationsDashboardService:
             success_rate = (completed / total * 100.0) if total > 0 else 100.0
 
             last_run = runs[0] if runs else None
-            results.append({
-                "project_id": pid,
-                "name": p["name"],
-                "version": p["version"],
-                "total_runs": total,
-                "completed_runs": completed,
-                "failed_runs": failed,
-                "success_rate_percent": round(success_rate, 1),
-                "last_run_status": last_run["status"] if last_run else None,
-                "last_run_at": last_run["created_at"] if last_run else None,
-            })
+            results.append(
+                {
+                    "project_id": pid,
+                    "name": p["name"],
+                    "version": p["version"],
+                    "total_runs": total,
+                    "completed_runs": completed,
+                    "failed_runs": failed,
+                    "success_rate_percent": round(success_rate, 1),
+                    "last_run_status": last_run["status"] if last_run else None,
+                    "last_run_at": last_run["created_at"] if last_run else None,
+                }
+            )
         return results

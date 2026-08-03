@@ -16,6 +16,7 @@ from .api import (
     artifact_content,
     artifact_detail,
     artifact_lineage,
+    attention_inbox_api,
     check_job_progress,
     compare_runs,
     create_project,
@@ -43,6 +44,9 @@ from .api import (
     list_routines,
     list_runs,
     list_tasks,
+    notify_test_api,
+    operations_projects_api,
+    operations_routines_api,
     partial_reexecute_project_run,
     preview_routine,
     project_run,
@@ -361,6 +365,19 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, project_run(self.daemon.engine, suffix))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path == "/v1/attention":
+            kind = (params.get("kind") or [None])[0]
+            limit = int((params.get("limit") or ["50"])[0])
+            self._json(HTTPStatus.OK, attention_inbox_api(self.daemon.engine, kind=kind, limit=limit))
+            return
+        if path == "/v1/operations/routines":
+            limit = int((params.get("limit") or ["50"])[0])
+            self._json(HTTPStatus.OK, operations_routines_api(self.daemon.engine, limit=limit))
+            return
+        if path == "/v1/operations/projects":
+            limit = int((params.get("limit") or ["50"])[0])
+            self._json(HTTPStatus.OK, operations_projects_api(self.daemon.engine, limit=limit))
             return
         if path == "/v1/jobs":
             try:
@@ -734,6 +751,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         return
             if path == "/v1/search/semantic":
                 self._json(HTTPStatus.OK, semantic_search_api(self.daemon.engine, self._body()))
+                return
+            if path == "/v1/notifications/test":
+                self._json(HTTPStatus.OK, notify_test_api(self.daemon.engine, self._body()))
                 return
             if path == "/v1/agent-apps":
                 self._json(

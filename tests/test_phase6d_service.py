@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from relay.config import Config
 from relay.db import Database
-from relay.errors import RelayError
 from relay.notifications.service import NotificationService
 from relay.notifications.sink import WebhookSink
 
@@ -32,11 +29,7 @@ class Phase6dNotificationTests(unittest.TestCase):
         self.assertFalse(sink.validate_url("http://external-malicious.com/hook"))
 
     def test_notification_service_dispatches_and_logs(self):
-        policy = {
-            "on_failure": [
-                {"kind": "webhook", "url": "http://127.0.0.1:9999/hook", "secret": "sec123"}
-            ]
-        }
+        policy = {"on_failure": [{"kind": "webhook", "url": "http://127.0.0.1:9999/hook", "secret": "sec123"}]}
         # In test, mock webhook delivery to avoid actual network call
         events = self.service.notify(
             routine_id="r-1",
