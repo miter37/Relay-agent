@@ -4,14 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from relay.comparison.service import ComparisonService
 from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
-from relay.errors import RelayError
-from relay.models import JobRequest
-from relay.comparison.service import ComparisonService
+from relay.models import JobRequest, TaskSpec
 from relay.projects.service import ProjectService
-from relay.models import TaskSpec
 
 
 class Phase6bServiceTests(unittest.TestCase):
@@ -51,8 +49,26 @@ class Phase6bServiceTests(unittest.TestCase):
         f2 = art2_dir / "report.md"
         f2.write_text("Line 1\nLine 2 modified\nLine 3\n", encoding="utf-8")
 
-        self.db.add_artifact(job1["job_id"], relative_path="report.md", final_path=str(f1), mime_type="text/markdown", size=f1.stat().st_size, sha256="h1", artifact_uid="art-1", role="output")
-        self.db.add_artifact(job2["job_id"], relative_path="report.md", final_path=str(f2), mime_type="text/markdown", size=f2.stat().st_size, sha256="h2", artifact_uid="art-2", role="output")
+        self.db.add_artifact(
+            job1["job_id"],
+            relative_path="report.md",
+            final_path=str(f1),
+            mime_type="text/markdown",
+            size=f1.stat().st_size,
+            sha256="h1",
+            artifact_uid="art-1",
+            role="output",
+        )
+        self.db.add_artifact(
+            job2["job_id"],
+            relative_path="report.md",
+            final_path=str(f2),
+            mime_type="text/markdown",
+            size=f2.stat().st_size,
+            sha256="h2",
+            artifact_uid="art-2",
+            role="output",
+        )
 
         diff = self.comparison_service.diff_artifacts("art-1", "art-2")
         self.assertEqual(diff["a_artifact_uid"], "art-1")
@@ -82,17 +98,19 @@ class Phase6bPartialReexecuteTests(unittest.TestCase):
     def test_partial_reexecute_resets_downstream_nodes(self):
         t1 = self.engine.create_task(TaskSpec(name="T1", instructions="step 1"))
         t2 = self.engine.create_task(TaskSpec(name="T2", instructions="step 2"))
-        proj = self.project_service.create_project({
-            "name": "Flow",
-            "nodes": [
-                {"node_id": "step1", "task_id": t1["task_id"]},
-                {"node_id": "step2", "task_id": t2["task_id"]},
-            ],
-            "connections": [
-                {"from_node": "step1", "from_role": "out", "to_node": "step2", "to_alias": "A1"},
-            ],
-            "output_selection": [],
-        })
+        proj = self.project_service.create_project(
+            {
+                "name": "Flow",
+                "nodes": [
+                    {"node_id": "step1", "task_id": t1["task_id"]},
+                    {"node_id": "step2", "task_id": t2["task_id"]},
+                ],
+                "connections": [
+                    {"from_node": "step1", "from_role": "out", "to_node": "step2", "to_alias": "A1"},
+                ],
+                "output_selection": [],
+            }
+        )
         prun = self.project_service.create_project_run(proj["project_id"])
         prid = prun["project_run_id"]
 

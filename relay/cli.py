@@ -54,6 +54,7 @@ COMMANDS = {
     "run-lineage",
     "task",
     "approval",
+    "compare",
     "project",
     "project-run",
     "routine",
@@ -361,6 +362,12 @@ def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
+    reexec = run_sub.add_parser("reexecute", help="Partially re-execute from a node")
+    reexec.add_argument("project_run_id")
+    reexec.add_argument("--from-node", required=True)
+    reexec.add_argument("--no-cascade", action="store_false", dest="cascade")
+    reexec.add_argument("--worker")
+    reexec.add_argument("--machine", action="store_true")
     show = run_sub.add_parser("show", help="Show a Project Run")
     show.add_argument("project_run_id")
     show.add_argument("--machine", action="store_true")
@@ -433,6 +440,11 @@ def _project_run_cli_request(args, config: Config) -> Any:
         return client.request("GET", f"/v1/project-runs/{prid}/steps")
     if cmd == "receipt":
         return client.request("GET", f"/v1/project-runs/{prid}/receipt")
+    if cmd == "reexecute":
+        payload = {"from_node": args.from_node, "cascade": args.cascade}
+        if args.worker:
+            payload["worker"] = args.worker
+        return client.request("POST", f"/v1/project-runs/{prid}/partial-reexecute", payload)
     if cmd == "retry":
         payload: dict[str, Any] = {}
         if args.from_node:
@@ -670,6 +682,37 @@ def _approval_cli_request(args, config: Config) -> Any:
             {"reviewer": args.reviewer, "file": args.file, "role": args.role},
         )
     raise RelayError("INVALID_REQUEST", f"Unknown approval command: {cmd}")
+
+
+def _add_compare_parsers(sub: argparse._SubParsersAction) -> None:
+    compare = sub.add_parser(
+        "compare",
+        help="Compare Runs or diff Artifacts",
+        description="Compare two Task/Project Runs or inspect diffs between two Artifacts.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    comp_sub = compare.add_subparsers(dest="compare_command", required=True)
+
+    runs = comp_sub.add_parser("runs", help="Compare two Runs")
+    runs.add_argument("a_run_id")
+    runs.add_argument("b_run_id")
+    runs.add_argument("--machine", action="store_true")
+
+    artifacts = comp_sub.add_parser("artifacts", help="Diff two Artifacts")
+    artifacts.add_argument("a_uid")
+    artifacts.add_argument("b_uid")
+    artifacts.add_argument("--max-bytes", type=int, default=262144)
+    artifacts.add_argument("--machine", action="store_true")
+
+
+def _compare_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.compare_command
+    if cmd == "runs":
+        return client.request("GET", f"/v1/runs/compare?a={args.a_run_id}&b={args.b_run_id}")
+    if cmd == "artifacts":
+        return client.request("GET", f"/v1/artifacts/diff?a={args.a_uid}&b={args.b_uid}&max_bytes={args.max_bytes}")
+    raise RelayError("INVALID_REQUEST", f"Unknown compare command: {cmd}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1044,6 +1087,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_parsers(sub)
     _add_routine_parsers(sub)
     _add_approval_parsers(sub)
+    _add_compare_parsers(sub)
     project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
     _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
@@ -1722,6 +1766,8 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_routine_cli_request(args, config), machine)
         elif args.command == "approval":
             _emit(_approval_cli_request(args, config), machine)
+        elif args.command == "compare":
+            _emit(_compare_cli_request(args, config), machine)
         elif args.command == "project-run":
             _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":

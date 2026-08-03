@@ -17,12 +17,14 @@ from .api import (
     artifact_detail,
     artifact_lineage,
     check_job_progress,
+    compare_runs,
     create_project,
     create_routine,
     create_task,
     delete_project,
     delete_routine,
     delete_task,
+    diff_artifacts,
     edit_checkpoint,
     get_agent,
     get_approval,
@@ -41,6 +43,7 @@ from .api import (
     list_routines,
     list_runs,
     list_tasks,
+    partial_reexecute_project_run,
     preview_routine,
     project_run,
     project_run_cancel,
@@ -344,6 +347,10 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 elif suffix.endswith("/retry"):
                     prid = suffix[: -len("/retry")]
                     self._json(HTTPStatus.OK, project_run_retry(self.daemon.engine, prid, self._body()))
+                elif suffix.endswith("/partial-reexecute"):
+                    prid = suffix[: -len("/partial-reexecute")]
+                    self._json(HTTPStatus.OK, partial_reexecute_project_run(self.daemon.engine, prid, self._body()))
+                    return
                 elif suffix.endswith("/cancel"):
                     prid = suffix[: -len("/cancel")]
                     self._json(HTTPStatus.OK, project_run_cancel(self.daemon.engine, prid))
@@ -429,6 +436,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 message = err.message if isinstance(err, RelayError) else str(err)
                 self._api_error(HTTPStatus.BAD_REQUEST, code, message)
             return
+        if path == "/v1/runs/compare":
+            try:
+                a_id = (params.get("a") or [None])[0]
+                b_id = (params.get("b") or [None])[0]
+                if not a_id or not b_id:
+                    raise RelayError("INVALID_REQUEST", "Parameters 'a' and 'b' are required.")
+                self._json(HTTPStatus.OK, compare_runs(self.daemon.engine, a_id, b_id))
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
         if path == "/v1/runs":
             try:
 
@@ -512,6 +529,18 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, {"ok": True, "schedule": self.daemon.schedule_service.show(suffix)})
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path == "/v1/artifacts/diff":
+            try:
+                a_uid = (params.get("a") or [None])[0]
+                b_uid = (params.get("b") or [None])[0]
+                if not a_uid or not b_uid:
+                    raise RelayError("INVALID_REQUEST", "Parameters 'a' and 'b' are required.")
+                mb_str = (params.get("max_bytes") or ["262144"])[0]
+                max_bytes = int(mb_str) if mb_str and mb_str.isdigit() else 262144
+                self._json(HTTPStatus.OK, diff_artifacts(self.daemon.engine, a_uid, b_uid, max_bytes=max_bytes))
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
             return
         if path.startswith("/v1/artifacts/"):
             suffix = path[len("/v1/artifacts/") :]

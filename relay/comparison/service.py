@@ -42,7 +42,17 @@ class ComparisonService:
         a_id = job_a["job_id"]
         b_id = job_b["job_id"]
 
-        meta_keys = ["caller", "submitted_via", "trigger_type", "requested_worker", "actual_worker", "format", "profile", "status", "result_status"]
+        meta_keys = [
+            "caller",
+            "submitted_via",
+            "trigger_type",
+            "requested_worker",
+            "actual_worker",
+            "format",
+            "profile",
+            "status",
+            "result_status",
+        ]
         metadata_diff = {}
         for key in meta_keys:
             val_a = job_a.get(key)
@@ -62,7 +72,9 @@ class ComparisonService:
             if k in arts_b:
                 b = arts_b[k]
                 if a["sha256"] != b["sha256"]:
-                    shared_different_hash.append({"key": k, "a_uid": a.get("artifact_uid"), "b_uid": b.get("artifact_uid")})
+                    shared_different_hash.append(
+                        {"key": k, "a_uid": a.get("artifact_uid"), "b_uid": b.get("artifact_uid")}
+                    )
                 else:
                     identical.append(k)
 

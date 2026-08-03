@@ -773,3 +773,32 @@ def edit_checkpoint(engine, project_run_id: str, token: str, payload: dict[str, 
     role = str(payload.get("role") or "output")
     res = service.approve_with_edits(project_run_id, token, reviewer=reviewer, edit_file_path=edit_file_path, role=role)
     return {"ok": True, **res}
+
+
+# --- Phase 6b Comparison ---
+
+
+def compare_runs(engine, a_run_id: str, b_run_id: str) -> dict[str, Any]:
+    from .comparison.service import ComparisonService
+
+    service = ComparisonService(engine.db, engine.config)
+    res = service.compare_runs(a_run_id, b_run_id)
+    return {"ok": True, "comparison": res}
+
+
+def diff_artifacts(engine, a_uid: str, b_uid: str, max_bytes: int = 262144) -> dict[str, Any]:
+    from .comparison.service import ComparisonService
+
+    service = ComparisonService(engine.db, engine.config)
+    res = service.diff_artifacts(a_uid, b_uid, max_bytes=max_bytes)
+    return {"ok": True, "diff": res}
+
+
+def partial_reexecute_project_run(engine, project_run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from_node = str(payload.get("from_node") or "")
+    if not from_node:
+        raise RelayError("INVALID_REQUEST", "from_node is required for partial_reexecute")
+    cascade = bool(payload.get("cascade", True))
+    worker = payload.get("worker")
+    res = engine.project_service.partial_reexecute(project_run_id, from_node=from_node, cascade=cascade, worker=worker)
+    return {"ok": True, **res}
