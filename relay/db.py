@@ -1365,10 +1365,16 @@ class Database:
                 (task_id, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+
     def create_project(self, row: dict[str, Any]) -> None:
         now = utc_now()
-        values = {"version": 1, **row, "deleted_at": None,
-                  "created_at": row.get("created_at", now), "updated_at": row.get("updated_at", now)}
+        values = {
+            "version": 1,
+            **row,
+            "deleted_at": None,
+            "created_at": row.get("created_at", now),
+            "updated_at": row.get("updated_at", now),
+        }
         keys = list(values)
         with self.connect() as conn:
             conn.execute(
@@ -1381,7 +1387,9 @@ class Database:
             row = conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
             return dict(row) if row else None
 
-    def list_projects(self, *, name: str | None = None, include_deleted: bool = False, limit: int = 50) -> list[dict[str, Any]]:
+    def list_projects(
+        self, *, name: str | None = None, include_deleted: bool = False, limit: int = 50
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM projects"
         params: list[Any] = []
         where: list[str] = []
@@ -1453,7 +1461,9 @@ class Database:
                 [changes[key] for key in keys] + [project_run_id],
             )
 
-    def list_project_runs(self, *, project_id: str | None = None, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_project_runs(
+        self, *, project_id: str | None = None, status: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM project_runs"
         params: list[Any] = []
         where: list[str] = []
@@ -1470,7 +1480,7 @@ class Database:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(query, params).fetchall()]
 
-    def create_or_update_project_step(self, row: dict[str, Any]) -> None:
+    def create_or_update_project_step(self, row: dict[str, Any]) -> dict[str, Any]:
         now = utc_now()
         values = {"updated_at": now, **row}
         keys = list(values)
@@ -1482,6 +1492,7 @@ class Database:
                 f"ON CONFLICT(project_run_id, node_id) DO UPDATE SET {update_clause}",
                 [values[k] for k in keys],
             )
+        return self.get_project_step(row["project_run_id"], row["node_id"])
 
     def get_project_step(self, project_run_id: str, node_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -1508,11 +1519,11 @@ class Database:
                 [changes[key] for key in keys] + [project_run_id, node_id],
             )
 
-    def append_project_step_run(self, project_run_id: str, node_id: str, task_run_id: str, worker_override: str | None) -> int:
+    def append_project_step_run(
+        self, project_run_id: str, node_id: str, task_run_id: str, worker_override: str | None
+    ) -> int:
         with self.connect() as conn:
-            existing = conn.execute(
-                "SELECT 1 FROM project_step_runs WHERE task_run_id=?", (task_run_id,)
-            ).fetchone()
+            existing = conn.execute("SELECT 1 FROM project_step_runs WHERE task_run_id=?", (task_run_id,)).fetchone()
             if existing:
                 raise RelayError("STEP_RUN_DUPLICATE", f"Task Run already attached: {task_run_id}")
             attempt_row = conn.execute(
@@ -1527,7 +1538,9 @@ class Database:
             )
             return attempt
 
-    def list_project_step_runs(self, project_run_id: str | None = None, node_id: str | None = None, *, task_run_id: str | None = None) -> list[dict[str, Any]]:
+    def list_project_step_runs(
+        self, project_run_id: str | None = None, node_id: str | None = None, *, task_run_id: str | None = None
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM project_step_runs"
         params: list[Any] = []
         where: list[str] = []

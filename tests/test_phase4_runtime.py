@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,12 +31,11 @@ class ProjectRuntimeTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-
     def _complete_step_with_artifact(self, project_run_id, node_id, role):
         step = self.db.get_project_step(project_run_id, node_id)
         job_id = step["active_task_run_id"]
         self.db.update_job(job_id, status="COMPLETED", result_status="complete")
-        existing = [a for a in self.db.artifacts_for_job(job_id) if a.get('role') == role]
+        existing = [a for a in self.db.artifacts_for_job(job_id) if a.get("role") == role]
         if existing:
             return
         artifact_dir = self.config.path_value("artifact_root") / job_id
@@ -60,17 +58,19 @@ class ProjectRuntimeTests(unittest.TestCase):
     def _make_linear_project(self) -> dict:
         task_a = _task(self.engine, "TA")
         task_b = _task(self.engine, "TB")
-        project = self.service.create_project({
-            "name": "Linear",
-            "nodes": [
-                {"node_id": "a", "task_id": task_a["task_id"]},
-                {"node_id": "b", "task_id": task_b["task_id"]},
-            ],
-            "connections": [
-                {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
-            ],
-            "output_selection": [],
-        })
+        project = self.service.create_project(
+            {
+                "name": "Linear",
+                "nodes": [
+                    {"node_id": "a", "task_id": task_a["task_id"]},
+                    {"node_id": "b", "task_id": task_b["task_id"]},
+                ],
+                "connections": [
+                    {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
+                ],
+                "output_selection": [],
+            }
+        )
         return self.service.create_project_run(project["project_id"])
 
     def test_root_nodes_are_ready(self):
@@ -111,7 +111,9 @@ class ProjectRuntimeTests(unittest.TestCase):
         project_run = self._make_linear_project()
         self.runtime.tick_once()
         step_a = self.db.get_project_step(project_run["project_run_id"], "a")
-        self.db.update_job(step_a["active_task_run_id"], status="FAILED", error_code="ALL_WORKERS_FAILED", error_message="boom")
+        self.db.update_job(
+            step_a["active_task_run_id"], status="FAILED", error_code="ALL_WORKERS_FAILED", error_message="boom"
+        )
         for _ in range(5):
             self.runtime.tick_once()
         final_run = self.db.get_project_run(project_run["project_run_id"])

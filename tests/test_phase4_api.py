@@ -10,6 +10,7 @@ from relay.config import Config
 from relay.daemon import RelayDaemon
 from relay.db import Database
 from relay.engine import RelayEngine
+from relay.errors import RelayError
 from relay.models import TaskSpec
 from relay.projects.service import ProjectService
 
@@ -31,17 +32,19 @@ class ProjectAPITests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_service_run_create_recipes(self):
-        project = self.service.create_project({
-            "name": "P",
-            "nodes": [
-                {"node_id": "a", "task_id": self.ta["task_id"]},
-                {"node_id": "b", "task_id": self.tb["task_id"]},
-            ],
-            "connections": [
-                {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
-            ],
-            "output_selection": [{"node_id": "b", "role": "final_report"}],
-        })
+        project = self.service.create_project(
+            {
+                "name": "P",
+                "nodes": [
+                    {"node_id": "a", "task_id": self.ta["task_id"]},
+                    {"node_id": "b", "task_id": self.tb["task_id"]},
+                ],
+                "connections": [
+                    {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
+                ],
+                "output_selection": [{"node_id": "b", "role": "final_report"}],
+            }
+        )
         run_payload = self.service.create_project_run(project["project_id"])
         steps = self.db.list_project_steps(run_payload["project_run_id"])
         statuses = {s["node_id"]: s["status"] for s in steps}
@@ -49,42 +52,49 @@ class ProjectAPITests(unittest.TestCase):
         self.assertEqual(statuses["b"], "pending")
 
     def test_invalid_definition_rejected(self):
-        from relay.errors import RelayError
 
         def _raise(_tid):
             raise RelayError("PROJECT_TASK_MISSING", "missing")
 
-        # Inject a missing task scenario
-        bad_project = self.service.create_project({
-            "name": "bad",
-            "nodes": [{"node_id": "x", "task_id": "no-such-task"}],
-            "connections": [],
-            "output_selection": [],
-        }) if False else None
-        # Instead just test that valid projections are accepted
-        good = self.service.create_project({
-            "name": "good",
-            "nodes": [
-                {"node_id": "a", "task_id": self.ta["task_id"]},
-                {"node_id": "b", "task_id": self.tb["task_id"]},
-            ],
-            "connections": [],
-            "output_selection": [],
-        })
+        # Test that invalid definitions are rejected
+        with self.assertRaisesRegex(RelayError, "PROJECT_TASK_MISSING"):
+            self.service.create_project(
+                {
+                    "name": "bad",
+                    "nodes": [{"node_id": "x", "task_id": "no-such-task"}],
+                    "connections": [],
+                    "output_selection": [],
+                }
+            )
+
+        # Test that valid projections are accepted
+        good = self.service.create_project(
+            {
+                "name": "good",
+                "nodes": [
+                    {"node_id": "a", "task_id": self.ta["task_id"]},
+                    {"node_id": "b", "task_id": self.tb["task_id"]},
+                ],
+                "connections": [],
+                "output_selection": [],
+            }
+        )
         self.assertTrue(good["project_id"])
 
     def test_receipt_shape(self):
-        project = self.service.create_project({
-            "name": "P",
-            "nodes": [
-                {"node_id": "a", "task_id": self.ta["task_id"]},
-                {"node_id": "b", "task_id": self.tb["task_id"]},
-            ],
-            "connections": [
-                {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
-            ],
-            "output_selection": [{"node_id": "b", "role": "final_report"}],
-        })
+        project = self.service.create_project(
+            {
+                "name": "P",
+                "nodes": [
+                    {"node_id": "a", "task_id": self.ta["task_id"]},
+                    {"node_id": "b", "task_id": self.tb["task_id"]},
+                ],
+                "connections": [
+                    {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
+                ],
+                "output_selection": [{"node_id": "b", "role": "final_report"}],
+            }
+        )
         run_payload = self.service.create_project_run(project["project_id"])
         receipt = self.service.project_run_receipt(run_payload["project_run_id"])
         self.assertEqual(receipt["project_id"], project["project_id"])
@@ -131,25 +141,29 @@ class DaemonProjectRouteTests(unittest.TestCase):
         self.assertIn("project-runtime", health["capabilities"])
 
     def test_daemon_create_and_run_project(self):
-        from relay.engine import RelayEngine
         from relay.db import Database
+        from relay.engine import RelayEngine
         from relay.models import TaskSpec
 
         db = Database(self.config.path_value("database_path"))
         engine = RelayEngine(self.config, db)
         ta = engine.create_task(TaskSpec(name="TA", instructions="a"))
         tb = engine.create_task(TaskSpec(name="TB", instructions="b"))
-        project = self.client.request("POST", "/v1/projects", {
-            "name": "P",
-            "nodes": [
-                {"node_id": "a", "task_id": ta["task_id"]},
-                {"node_id": "b", "task_id": tb["task_id"]},
-            ],
-            "connections": [
-                {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
-            ],
-            "output_selection": [],
-        })
+        project = self.client.request(
+            "POST",
+            "/v1/projects",
+            {
+                "name": "P",
+                "nodes": [
+                    {"node_id": "a", "task_id": ta["task_id"]},
+                    {"node_id": "b", "task_id": tb["task_id"]},
+                ],
+                "connections": [
+                    {"from_node": "a", "from_role": "out", "to_node": "b", "to_alias": "A1"},
+                ],
+                "output_selection": [],
+            },
+        )
         self.assertTrue(project["ok"])
         project_id = project["project"]["project_id"]
         run = self.client.request("POST", f"/v1/projects/{project_id}/run", {})

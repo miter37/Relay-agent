@@ -1,24 +1,22 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
-import sqlite3
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
-from ..util import canonical_json, new_artifact_uid, new_job_id, sha256_file, utc_now
+from ..util import canonical_json, new_job_id, sha256_file, utc_now
 from .models import (
-    ProjectConnection,
-    ProjectNode,
-    ProjectOutputSelection,
     ProjectSpec,
 )
 
 _PROJECT_TERMINAL = {"completed", "failed", "cancelled"}
+
+_ALIAS_PATTERN = re.compile(r"^A[1-9][0-9]*$")
 
 
 def _now() -> str:
@@ -84,7 +82,9 @@ class ProjectService:
     def _task_snapshot(self, task_id: str) -> dict[str, Any]:
         return self.engine.load_task_for_snapshot(task_id)
 
-    def _stage_external_input(self, project_id: str, project_run_id: str, node_id: str, alias: str, artifact: dict[str, Any]) -> dict[str, Any]:
+    def _stage_external_input(
+        self, project_id: str, project_run_id: str, node_id: str, alias: str, artifact: dict[str, Any]
+    ) -> dict[str, Any]:
         snapshot_root = self.engine.config.path_value("input_snapshot_root") / project_run_id
         snapshot_root.mkdir(parents=True, exist_ok=True)
         source = Path(str(artifact["final_path"]))
@@ -158,8 +158,9 @@ class ProjectService:
             if not target_node:
                 raise RelayError("PROJECT_INVALID", f"External input targets unknown node: {node_id}")
             if alias in {c.to_alias for c in spec.connections if c.to_node == node_id}:
-                raise RelayError("PROJECT_INPUT_CONFLICT",
-                                 f"External input collides with connection alias ({node_id}, {alias})")
+                raise RelayError(
+                    "PROJECT_INPUT_CONFLICT", f"External input collides with connection alias ({node_id}, {alias})"
+                )
             staged_inputs.append(self._stage_external_input(project_id, project_run_id, node_id, alias, artifact))
 
         project_snapshot = {
@@ -172,15 +173,17 @@ class ProjectService:
             "output_selection": list(spec.output_selection.items),
         }
 
-        self.db.create_project_run({
-            "project_run_id": project_run_id,
-            "project_id": project_id,
-            "project_version": project["version"],
-            "project_snapshot_json": canonical_json(project_snapshot),
-            "status": "running",
-            "trigger_type": trigger_type,
-            "submitted_via": submitted_via,
-        })
+        self.db.create_project_run(
+            {
+                "project_run_id": project_run_id,
+                "project_id": project_id,
+                "project_version": project["version"],
+                "project_snapshot_json": canonical_json(project_snapshot),
+                "status": "running",
+                "trigger_type": trigger_type,
+                "submitted_via": submitted_via,
+            }
+        )
 
         steps: list[dict[str, Any]] = []
         external_by_node: dict[str, list[dict[str, Any]]] = {}
@@ -199,13 +202,15 @@ class ProjectService:
             connections_to = spec.connections_to(node.node_id)
             for conn in connections_to:
                 # connection's UID resolution is owned by runtime; we just record the manifest.
-                inputs_by_node[node.node_id].append({
-                    "from_node": conn.from_node,
-                    "from_role": conn.from_role,
-                    "to_alias": conn.to_alias,
-                    "artifact_uid": None,
-                    "snapshot": None,
-                })
+                inputs_by_node[node.node_id].append(
+                    {
+                        "from_node": conn.from_node,
+                        "from_role": conn.from_role,
+                        "to_alias": conn.to_alias,
+                        "artifact_uid": None,
+                        "snapshot": None,
+                    }
+                )
             inputs_by_node[node.node_id].extend(external_by_node.get(node.node_id, []))
 
         for node in spec.nodes:
@@ -218,18 +223,26 @@ class ProjectService:
                 status = "ready"
             else:
                 status = "pending"
-            step = self.db.create_or_update_project_step({
-                "project_run_id": project_run_id,
-                "node_id": node.node_id,
-                "task_id": task_snapshots[node.task_id]["task_id"],
-                "task_version": task_snapshots[node.task_id]["version"],
-                "status": status,
-                "input_manifest_json": canonical_json(inputs_by_node[node.node_id]) if inputs_by_node[node.node_id] else None,
-                "resolved_connections_json": canonical_json([]),
-            })
+            step = self.db.create_or_update_project_step(
+                {
+                    "project_run_id": project_run_id,
+                    "node_id": node.node_id,
+                    "task_id": task_snapshots[node.task_id]["task_id"],
+                    "task_version": task_snapshots[node.task_id]["version"],
+                    "status": status,
+                    "input_manifest_json": canonical_json(inputs_by_node[node.node_id])
+                    if inputs_by_node[node.node_id]
+                    else None,
+                    "resolved_connections_json": canonical_json([]),
+                }
+            )
             steps.append(step)
 
-        return {"project_run": self.db.get_project_run(project_run_id), "steps": steps, "project_run_id": project_run_id}
+        return {
+            "project_run": self.db.get_project_run(project_run_id),
+            "steps": steps,
+            "project_run_id": project_run_id,
+        }
 
     def get_step_inputs(self, project_run_id: str, node_id: str) -> dict[str, Any]:
         step = self.db.get_project_step(project_run_id, node_id)
@@ -246,16 +259,23 @@ class ProjectService:
         if not project_run:
             raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
         snapshot = json.loads(project_run["project_snapshot_json"])
-        task_snapshots = snapshot["task_snapshots"]
-        spec = self._project_spec_from_snapshot(snapshot)
-        manifest = json.loads((self.db.get_project_step(project_run_id, node_id) or {}).get("input_manifest_json") or "[]")
+        manifest = json.loads(
+            (self.db.get_project_step(project_run_id, node_id) or {}).get("input_manifest_json") or "[]"
+        )
         resolved: list[dict[str, Any]] = []
         for entry in manifest:
             if entry.get("artifact_uid") and entry.get("snapshot"):
                 resolved.append(entry)
                 continue
             # External input lookup.
-            external = next((e for e in snapshot.get("external_inputs", []) if e["node_id"] == node_id and e["to_alias"] == entry["to_alias"]), None)
+            external = next(
+                (
+                    e
+                    for e in snapshot.get("external_inputs", [])
+                    if e["node_id"] == node_id and e["to_alias"] == entry["to_alias"]
+                ),
+                None,
+            )
             if external:
                 resolved.append(external)
                 continue
@@ -264,18 +284,24 @@ class ProjectService:
             from_role = entry["from_role"]
             source_step = self.db.get_project_step(project_run_id, source_node)
             if not source_step or not source_step.get("active_task_run_id"):
-                raise RelayError("PROJECT_ARTIFACT_MISSING",
-                                 f"Upstream Task Run missing for {source_node}->{node_id}.{entry['to_alias']}")
+                raise RelayError(
+                    "PROJECT_ARTIFACT_MISSING",
+                    f"Upstream Task Run missing for {source_node}->{node_id}.{entry['to_alias']}",
+                )
             artifacts = self.engine.db.artifacts_for_job(source_step["active_task_run_id"])
             matches = [a for a in artifacts if a.get("role") == from_role]
             if not matches:
-                raise RelayError("PROJECT_ARTIFACT_MISSING",
-                                 f"Source Artifact for role {from_role} missing in {source_node}")
+                raise RelayError(
+                    "PROJECT_ARTIFACT_MISSING", f"Source Artifact for role {from_role} missing in {source_node}"
+                )
             if len(matches) > 1:
-                raise RelayError("PROJECT_ARTIFACT_AMBIGUOUS",
-                                 f"Multiple source Artifacts for role {from_role} in {source_node}")
+                raise RelayError(
+                    "PROJECT_ARTIFACT_AMBIGUOUS", f"Multiple source Artifacts for role {from_role} in {source_node}"
+                )
             src = matches[0]
-            snapshot_staged = self._stage_external_input(snapshot["project_id"], project_run_id, node_id, entry["to_alias"], src)
+            snapshot_staged = self._stage_external_input(
+                snapshot["project_id"], project_run_id, node_id, entry["to_alias"], src
+            )
             resolved.append(snapshot_staged)
         return resolved
 
@@ -310,7 +336,9 @@ class ProjectService:
                     payload["resolved_connections_json"] = canonical_json({"worker_override": worker})
                 self.db.update_project_step(project_run_id, s["node_id"], **payload)
             elif s["status"] == "blocked":
-                self.db.update_project_step(project_run_id, s["node_id"], status="pending", error_code=None, error_message=None)
+                self.db.update_project_step(
+                    project_run_id, s["node_id"], status="pending", error_code=None, error_message=None
+                )
         self.db.update_project_run(project_run_id, status="running", completed_at=None)
         return {"project_run": self.db.get_project_run(project_run_id), "target_node": target_node}
 
@@ -358,17 +386,19 @@ class ProjectService:
             resolved = json.loads(s.get("resolved_connections_json") or "[]")
             if isinstance(resolved, dict):
                 resolved = []
-            step_receipts.append({
-                "node_id": s["node_id"],
-                "task_id": s["task_id"],
-                "task_version": s["task_version"],
-                "status": s["status"],
-                "active_task_run_id": s.get("active_task_run_id"),
-                "task_runs": step_runs,
-                "resolved_inputs": resolved,
-                "error_code": s.get("error_code"),
-                "error_message": s.get("error_message"),
-            })
+            step_receipts.append(
+                {
+                    "node_id": s["node_id"],
+                    "task_id": s["task_id"],
+                    "task_version": s["task_version"],
+                    "status": s["status"],
+                    "active_task_run_id": s.get("active_task_run_id"),
+                    "task_runs": step_runs,
+                    "resolved_inputs": resolved,
+                    "error_code": s.get("error_code"),
+                    "error_message": s.get("error_message"),
+                }
+            )
         snapshot = json.loads(run["project_snapshot_json"])
         return {
             "project_run_id": project_run_id,
@@ -384,8 +414,3 @@ class ProjectService:
             "warnings": json.loads(run.get("warnings_json") or "[]"),
             "final_artifact_ids": json.loads(run.get("final_artifact_ids_json") or "[]"),
         }
-
-
-import re as _re
-
-_ALIAS_PATTERN = _re.compile(r"^A[1-9][0-9]*$")

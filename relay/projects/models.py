@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from ..errors import RelayError
 from ..util import canonical_json
-
 
 _ALIAS_PATTERN = re.compile(r"^A[1-9][0-9]*$")
 _POLICY_VALUES = {"stop"}
@@ -62,8 +62,7 @@ class ProjectSpec:
                 for c in self.connections
             ],
             "output_selection": [
-                {"node_id": item["node_id"], "role": item["role"]}
-                for item in self.output_selection.items
+                {"node_id": item["node_id"], "role": item["role"]} for item in self.output_selection.items
             ],
         }
 
@@ -175,8 +174,7 @@ class ProjectSpec:
             for c in payload.get("connections", [])
         ]
         output_items = [
-            {"node_id": str(o["node_id"]), "role": str(o["role"])}
-            for o in payload.get("output_selection", [])
+            {"node_id": str(o["node_id"]), "role": str(o["role"])} for o in payload.get("output_selection", [])
         ]
         return cls(
             nodes=nodes,
@@ -190,7 +188,5 @@ class ProjectSpec:
         )
 
 
-def collect_required_bindings(
-    node_id: str, connections: Iterable[ProjectConnection]
-) -> list[ProjectConnection]:
+def collect_required_bindings(node_id: str, connections: Iterable[ProjectConnection]) -> list[ProjectConnection]:
     return [c for c in connections if c.to_node == node_id]

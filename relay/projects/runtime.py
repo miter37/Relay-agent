@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
-from datetime import UTC
 from typing import Any
 
 from ..db import Database
@@ -98,8 +96,15 @@ class ProjectRuntime:
                     active_task_run_id=task_run_id,
                     completed_at=utc_now(),
                     resolved_connections_json=json.dumps(
-                        [{"step_attempt": a.get("task_run_id"), "artifact_uid": a.get("artifact_uid"),
-                          "role": a.get("role"), "relative_path": a.get("relative_path")} for a in artifacts]
+                        [
+                            {
+                                "step_attempt": a.get("task_run_id"),
+                                "artifact_uid": a.get("artifact_uid"),
+                                "role": a.get("role"),
+                                "relative_path": a.get("relative_path"),
+                            }
+                            for a in artifacts
+                        ]
                     ),
                 )
             elif job_status in {"FAILED", "CANCELLED"}:
@@ -124,15 +129,13 @@ class ProjectRuntime:
             if deps_ok:
                 self.db.update_project_step(project_run_id, step["node_id"], status="ready")
 
-        # 3. Claim ready steps atomically.
-        #    Note: the DB method claims per project_run_id, but multiple runs can co-exist.
-        #    To minimize contention across runs we process runs one at a time and
-        #    rely on the claim-level conditional UPDATE.
+        # 3. Atomically claim every ready step and dispatch each in turn.
         ready_step_ids = [s["node_id"] for s in self.db.list_project_steps(project_run_id) if s["status"] == "ready"]
-        for node_id in sorted(ready_step_ids):
+        if ready_step_ids:
             claimed = self.db.claim_ready_steps(project_run_id, "ready", "queued")
-            if any(nid == node_id for _, nid in claimed):
-                self._dispatch_step(project_run_id, node_id, snapshot)
+            for _prid, node_id in claimed:
+                if node_id in ready_step_ids:
+                    self._dispatch_step(project_run_id, node_id, snapshot)
 
         # 4. After dispatch, any descendants whose deps are satisfied become ready.
         steps = self.db.list_project_steps(project_run_id)
@@ -161,7 +164,9 @@ class ProjectRuntime:
         task_snapshot = project_snapshot.get("task_snapshots", {}).get(task_id)
         if not task_snapshot:
             self.db.update_project_step(
-                project_run_id, node_id, status="failed",
+                project_run_id,
+                node_id,
+                status="failed",
                 error_code="PROJECT_TASK_MISSING",
                 error_message=f"Task snapshot missing for {task_id}",
             )
@@ -172,7 +177,9 @@ class ProjectRuntime:
             self.service.resolve_step_inputs(project_run_id, node_id)
         except RelayError as exc:
             self.db.update_project_step(
-                project_run_id, node_id, status="failed",
+                project_run_id,
+                node_id,
+                status="failed",
                 error_code=exc.code,
                 error_message=exc.message,
             )
@@ -184,7 +191,9 @@ class ProjectRuntime:
             )
         except RelayError as exc:
             self.db.update_project_step(
-                project_run_id, node_id, status="failed",
+                project_run_id,
+                node_id,
+                status="failed",
                 error_code=exc.code,
                 error_message=exc.message,
             )
@@ -192,7 +201,8 @@ class ProjectRuntime:
 
         self.db.append_project_step_run(project_run_id, node_id, job["job_id"], worker_override=None)
         self.db.update_project_step(
-            project_run_id, node_id,
+            project_run_id,
+            node_id,
             status="running",
             active_task_run_id=job["job_id"],
             started_at=utc_now(),
@@ -221,12 +231,9 @@ class ProjectRuntime:
                     self.db.update_project_step(project_run_id, nxt, status="blocked", completed_at=utc_now())
                 stack.append(nxt)
 
-    def _maybe_finalize(
-        self, project_run_id: str, steps: list[dict[str, Any]], spec: ProjectSpec
-    ) -> None:
+    def _maybe_finalize(self, project_run_id: str, steps: list[dict[str, Any]], spec: ProjectSpec) -> None:
         if not steps:
             return
-        statuses = {s["status"] for s in steps}
         non_terminal = [s for s in steps if s["status"] not in _STEP_TERMINAL]
         if non_terminal:
             return
@@ -250,13 +257,20 @@ class ProjectRuntime:
             role = entry["role"]
             step = next((s for s in steps if s["node_id"] == node_id), None)
             if not step or not step.get("active_task_run_id"):
-                self._mark_run_completed(project_run_id, steps, final_ids, [{"node_id": node_id, "role": role, "error": "PROJECT_ARTIFACT_MISSING"}])
+                self._mark_run_completed(
+                    project_run_id,
+                    steps,
+                    final_ids,
+                    [{"node_id": node_id, "role": role, "error": "PROJECT_ARTIFACT_MISSING"}],
+                )
                 return
             artifacts = self.engine.db.artifacts_for_job(step["active_task_run_id"])
             matches = [a for a in artifacts if a.get("role") == role]
             if len(matches) != 1:
                 self._mark_run_completed(
-                    project_run_id, steps, final_ids,
+                    project_run_id,
+                    steps,
+                    final_ids,
                     [{"node_id": node_id, "role": role, "matches": len(matches)}],
                 )
                 return
@@ -285,11 +299,13 @@ class ProjectRuntime:
         failed = next((s for s in steps if s["status"] == "failed"), None)
         warnings = []
         if failed:
-            warnings.append({
-                "node_id": failed["node_id"],
-                "error_code": failed.get("error_code"),
-                "error_message": failed.get("error_message"),
-            })
+            warnings.append(
+                {
+                    "node_id": failed["node_id"],
+                    "error_code": failed.get("error_code"),
+                    "error_message": failed.get("error_message"),
+                }
+            )
         self.db.update_project_run(
             project_run_id,
             status="failed",

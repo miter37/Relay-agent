@@ -20,12 +20,18 @@ class ProjectCLITests(unittest.TestCase):
         self.assertTrue(ns_list.machine)
 
     def test_project_run_with_inputs(self):
-        ns = build_parser().parse_args([
-            "project", "run", "p-1",
-            "--input", "collect:A1=ARTIFACT-UID",
-            "--input", "analyze:A2=ARTIFACT-2",
-            "--machine",
-        ])
+        ns = build_parser().parse_args(
+            [
+                "project",
+                "run",
+                "p-1",
+                "--input",
+                "collect:A1=ARTIFACT-UID",
+                "--input",
+                "analyze:A2=ARTIFACT-2",
+                "--machine",
+            ]
+        )
         self.assertEqual(ns.project_command, "run")
         self.assertEqual(ns.input, ["collect:A1=ARTIFACT-UID", "analyze:A2=ARTIFACT-2"])
 

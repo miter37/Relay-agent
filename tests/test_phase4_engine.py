@@ -34,8 +34,17 @@ class Phase4EngineTests(unittest.TestCase):
     def test_load_task_for_snapshot_returns_full_definition(self):
         task = self._create_task(name="HBM report", instructions="summarize HBM supply")
         snap = self.engine.load_task_for_snapshot(task["task_id"])
-        for key in ("task_id", "name", "version", "instructions", "default_worker", "fallback_enabled",
-                     "timeout_seconds", "profile", "result_format"):
+        for key in (
+            "task_id",
+            "name",
+            "version",
+            "instructions",
+            "default_worker",
+            "fallback_enabled",
+            "timeout_seconds",
+            "profile",
+            "result_format",
+        ):
             self.assertIn(key, snap)
         self.assertEqual(snap["name"], "HBM report")
         self.assertEqual(snap["instructions"], "summarize HBM supply")

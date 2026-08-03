@@ -562,6 +562,7 @@ def save_run_as_task(engine, run_id: str, payload: dict[str, Any]) -> dict[str, 
     )
     return {"ok": True, "task": _task_public(task)}
 
+
 def _project_public(project: dict[str, Any]) -> dict[str, Any]:
     return {**project, "deleted_at": project.get("deleted_at")}
 
@@ -609,28 +610,41 @@ def delete_project(engine, project_id: str) -> dict[str, Any]:
 def run_project(engine, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     inputs = payload.get("inputs") or []
     project_run = engine.project_service.create_project_run(project_id, external_inputs=inputs)
-    return {"ok": True, "project_run": _project_run_public(project_run["project_run"], None),
-            "project_run_id": project_run["project_run_id"],
-            "steps": [_step_public(s) for s in project_run["steps"]]}
+    return {
+        "ok": True,
+        "project_run": _project_run_public(project_run["project_run"], None),
+        "project_run_id": project_run["project_run_id"],
+        "steps": [_step_public(s) for s in project_run["steps"]],
+    }
 
 
 def project_runs(engine, project_id: str) -> dict[str, Any]:
     rows = engine.db.list_project_runs(project_id=project_id, limit=50)
-    return {"ok": True, "project_id": project_id,
-            "project_runs": [_project_run_public(r, json.loads(r["project_snapshot_json"]) if r.get("project_snapshot_json") else None) for r in rows]}
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "project_runs": [
+            _project_run_public(r, json.loads(r["project_snapshot_json"]) if r.get("project_snapshot_json") else None)
+            for r in rows
+        ],
+    }
 
 
 def project_run(engine, project_run_id: str) -> dict[str, Any]:
     run = engine.db.get_project_run(project_run_id)
     if not run:
         raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
-    return {"ok": True, "project_run": _project_run_public(run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None)}
+    return {
+        "ok": True,
+        "project_run": _project_run_public(
+            run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None
+        ),
+    }
 
 
 def project_run_steps(engine, project_run_id: str) -> dict[str, Any]:
     steps = engine.db.list_project_steps(project_run_id)
-    return {"ok": True, "project_run_id": project_run_id,
-            "steps": [_step_public(s) for s in steps]}
+    return {"ok": True, "project_run_id": project_run_id, "steps": [_step_public(s) for s in steps]}
 
 
 def project_run_receipt(engine, project_run_id: str) -> dict[str, Any]:
@@ -644,10 +658,14 @@ def project_run_retry(engine, project_run_id: str, payload: dict[str, Any]) -> d
         from_node=payload.get("from_node"),
         worker=payload.get("worker"),
     )
-    return {"ok": True, "project_run": _project_run_public(res["project_run"], None),
-            "target_node": res["target_node"]}
+    return {"ok": True, "project_run": _project_run_public(res["project_run"], None), "target_node": res["target_node"]}
 
 
 def project_run_cancel(engine, project_run_id: str) -> dict[str, Any]:
     run = engine.project_service.cancel_project_run(project_run_id)
-    return {"ok": True, "project_run": _project_run_public(run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None)}
+    return {
+        "ok": True,
+        "project_run": _project_run_public(
+            run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None
+        ),
+    }

@@ -9,12 +9,6 @@ from relay.db import Database
 from relay.engine import RelayEngine
 from relay.errors import RelayError
 from relay.models import TaskSpec
-from relay.projects.models import (
-    ProjectConnection,
-    ProjectNode,
-    ProjectOutputSelection,
-    ProjectSpec,
-)
 from relay.projects.service import ProjectService
 
 

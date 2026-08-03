@@ -312,7 +312,6 @@ def _task_cli_request(args, config: Config) -> Any:
     raise RelayError("INVALID_REQUEST", f"Unknown task command: {cmd}")
 
 
-
 def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
     project = sub.add_parser(
         "project",
@@ -348,8 +347,9 @@ def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
 
     run_p = proj_sub.add_parser("run", help="Execute a Project")
     run_p.add_argument("project_id")
-    run_p.add_argument("--input", action="append", default=[],
-                       help="External input binding node:alias=ARTIFACT_UID (repeatable)")
+    run_p.add_argument(
+        "--input", action="append", default=[], help="External input binding node:alias=ARTIFACT_UID (repeatable)"
+    )
     run_p.add_argument("--machine", action="store_true")
 
     runs_p = proj_sub.add_parser("runs", help="List Project Runs")
