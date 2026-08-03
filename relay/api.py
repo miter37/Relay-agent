@@ -669,3 +669,56 @@ def project_run_cancel(engine, project_run_id: str) -> dict[str, Any]:
             run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None
         ),
     }
+
+
+def _routine_public(routine):
+    out = {**routine, "enabled": bool(routine.get("enabled", 1))}
+    return out
+
+
+def list_routines(engine, *, name=None, limit=200):
+    return {
+        "ok": True,
+        "routines": [_routine_public(r) for r in engine.routine_service.list_routines(name=name, limit=limit)],
+    }
+
+
+def create_routine(engine, payload):
+    routine = engine.routine_service.create_routine(payload)
+    return {"ok": True, "routine": _routine_public(routine)}
+
+
+def get_routine(engine, routine_id):
+    routine = engine.routine_service.get_routine(routine_id)
+    return {"ok": True, "routine": _routine_public(routine)}
+
+
+def update_routine(engine, routine_id, payload):
+    routine = engine.routine_service.update_routine(routine_id, payload)
+    return {"ok": True, "routine": _routine_public(routine)}
+
+
+def delete_routine(engine, routine_id):
+    engine.routine_service.soft_delete_routine(routine_id)
+    return {"ok": True, "routine_id": routine_id, "deleted": True}
+
+
+def run_routine_now(engine, routine_id):
+    run = engine.routine_service.run_now(routine_id)
+    return {"ok": True, "run": run}
+
+
+def routine_runs(engine, routine_id):
+    if not engine.db.get_routine(routine_id):
+        raise RelayError("ROUTINE_NOT_FOUND", f"Routine not found: {routine_id}")
+    return {"ok": True, "routine_id": routine_id, "runs": engine.db.list_routine_runs(routine_id=routine_id, limit=100)}
+
+
+def routine_receipt(engine, routine_id):
+    receipt = engine.routine_service.routine_receipt(routine_id)
+    return {"ok": True, "receipt": receipt}
+
+
+def preview_routine(engine, payload):
+    result = engine.routine_service.preview(payload)
+    return {"ok": True, **result}

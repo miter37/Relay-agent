@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Any
 
 from ..errors import RelayError
-
 
 _VALID_TARGET_TYPES = {"task", "project"}
 _VALID_OVERLAP = {"skip", "queue", "cancel_previous", "allow_parallel"}
@@ -56,7 +55,8 @@ class RoutineSpec:
         if self.starts_at_utc and self.ends_at_utc and self.starts_at_utc > self.ends_at_utc:
             raise RelayError("ROUTINE_INVALID", "starts_at_utc must not exceed ends_at_utc")
         # Delegate rule validation to schedules.rules (reused).
-        from ..schedules.rules import validate_rule, _timezone
+        from ..schedules.rules import _timezone, validate_rule
+
         _timezone(self.timezone)
         # validate_rule expects timezone inside the rule dict.
         rule_with_tz = dict(self.rule)
@@ -65,6 +65,7 @@ class RoutineSpec:
 
     def to_row(self) -> dict[str, Any]:
         from ..util import canonical_json
+
         return {
             "name": self.name,
             "target_type": self.target_type,
@@ -85,6 +86,7 @@ class RoutineSpec:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> RoutineSpec:
         import json
+
         rule = payload.get("rule") or payload.get("rule_json")
         if isinstance(rule, str):
             rule = json.loads(rule)

@@ -17,11 +17,14 @@ from .api import (
     artifact_lineage,
     check_job_progress,
     create_project,
+    create_routine,
     create_task,
     delete_project,
+    delete_routine,
     delete_task,
     get_agent,
     get_project,
+    get_routine,
     get_task,
     job_artifacts,
     job_detail,
@@ -31,14 +34,17 @@ from .api import (
     list_agents,
     list_jobs,
     list_projects,
+    list_routines,
     list_runs,
     list_tasks,
+    preview_routine,
     project_run,
     project_run_cancel,
     project_run_receipt,
     project_run_retry,
     project_run_steps,
     project_runs,
+    routine_runs,
     run_artifacts,
     run_detail,
     run_events,
@@ -47,12 +53,14 @@ from .api import (
     run_progress,
     run_project,
     run_result,
+    run_routine_now,
     run_task,
     runs_for_task,
     save_run_as_task,
     search_artifacts,
     search_runs,
     update_project,
+    update_routine,
     update_task,
 )
 from .autostart import AutoStartManager
@@ -65,6 +73,8 @@ from .errors import RelayError
 from .models import JobRequest
 from .projects.runtime import ProjectRuntime
 from .projects.service import ProjectService
+from .routines.runtime import RoutineRuntime
+from .routines.service import RoutineService
 from .schedules.retention import ScheduleRetentionManager
 from .schedules.runtime import ScheduleRuntime
 from .schedules.service import ScheduleService
@@ -254,6 +264,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         "task-registry",
                         "task-run",
                         "project-runtime",
+                        "routine-runtime",
                     ],
                     "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
@@ -277,6 +288,15 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path == "/v1/projects":
             self._json(HTTPStatus.OK, list_projects(self.daemon.engine))
             return
+        if path == "/v1/routines":
+            self._json(HTTPStatus.OK, list_routines(self.daemon.engine))
+            return
+        if path == "/v1/routines/preview":
+            try:
+                self._json(HTTPStatus.OK, preview_routine(self.daemon.engine, self._body()))
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/projects/"):
             suffix = path[len("/v1/projects/") :]
             try:
@@ -285,6 +305,17 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, project_runs(self.daemon.engine, pid))
                 else:
                     self._json(HTTPStatus.OK, get_project(self.daemon.engine, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
+        if path.startswith("/v1/routines/"):
+            suffix = path[len("/v1/routines/") :]
+            try:
+                if suffix.endswith("/runs"):
+                    rid = suffix[: -len("/runs")]
+                    self._json(HTTPStatus.OK, routine_runs(self.daemon.engine, rid))
+                else:
+                    self._json(HTTPStatus.OK, get_routine(self.daemon.engine, suffix))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
@@ -613,6 +644,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             if path == "/v1/projects":
                 self._json(HTTPStatus.OK, create_project(self.daemon.engine, self._body()))
                 return
+            if path == "/v1/routines":
+                self._json(HTTPStatus.OK, create_routine(self.daemon.engine, self._body()))
+                return
+            if path.startswith("/v1/routines/") and path.endswith("/run-now"):
+                rid = path[len("/v1/routines/") : -len("/run-now")]
+                self._json(HTTPStatus.OK, run_routine_now(self.daemon.engine, rid))
+                return
             if path.startswith("/v1/projects/") and path.endswith("/run"):
                 pid = path[len("/v1/projects/") : -len("/run")]
                 self._json(HTTPStatus.OK, run_project(self.daemon.engine, pid, self._body()))
@@ -620,6 +658,10 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/v1/projects/"):
                 pid = path[len("/v1/projects/") :]
                 self._json(HTTPStatus.OK, update_project(self.daemon.engine, pid, self._body()))
+                return
+            if path.startswith("/v1/routines/"):
+                rid = path[len("/v1/routines/") :]
+                self._json(HTTPStatus.OK, update_routine(self.daemon.engine, rid, self._body()))
                 return
             if path == "/v1/agent-apps":
                 self._json(
@@ -788,6 +830,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
+        if path.startswith("/v1/routines/"):
+            try:
+                rid = path[len("/v1/routines/") :]
+                self._json(HTTPStatus.OK, delete_routine(self.daemon.engine, rid))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/agent-apps/"):
             try:
                 agent_id = path[len("/v1/agent-apps/") :]
@@ -819,6 +868,8 @@ class RelayDaemon:
         self.schedule_service = ScheduleService(self.config, self.db, self.engine)
         self.project_service = ProjectService(self.db, self.engine)
         self.project_runtime = ProjectRuntime(self.db, self.engine, self.project_service)
+        self.routine_service = RoutineService(self.config, self.db, self.engine)
+        self.routine_runtime = RoutineRuntime(self.config, self.db, self.engine, self.routine_service)
         self.autostart_manager = AutoStartManager(self.config)
         self.schedule_runtime = ScheduleRuntime(self.config, self.db, self.engine)
         self.scheduler = Scheduler(self.engine)
@@ -860,11 +911,13 @@ class RelayDaemon:
         self.schedule_loop.start()
         self.maintenance.start()
         self.project_runtime.start()
+        self.routine_runtime.start()
         try:
             self.server.serve_forever(poll_interval=0.5)
         finally:
             self.maintenance.stop()
             self.project_runtime.stop()
+            self.routine_runtime.stop()
             self.schedule_loop.stop()
             self.scheduler.stop()
             self.pid_path.unlink(missing_ok=True)

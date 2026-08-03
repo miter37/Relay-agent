@@ -55,6 +55,7 @@ COMMANDS = {
     "task",
     "project",
     "project-run",
+    "routine",
 }
 
 
@@ -454,6 +455,155 @@ def _load_project_payload(args) -> dict[str, Any]:
     return payload
 
 
+def _add_routine_parsers(sub):
+    routine = sub.add_parser(
+        "routine",
+        help="Create and manage Routines that run Tasks or Projects on a schedule",
+        description="Schedule Tasks or Projects to run automatically on a deterministic timezone-aware rule.",
+    )
+    rsub = routine.add_subparsers(dest="routine_command", required=True)
+
+    create = rsub.add_parser("create", help="Create a Routine")
+    create.add_argument("--name", required=True)
+    create.add_argument("--target-type", choices=["task", "project"], required=True)
+    create.add_argument("--target-id", required=True)
+    create.add_argument("--type", choices=["daily", "weekly", "monthly", "once", "ndays"], required=True)
+    create.add_argument("--time", action="append", default=[])
+    create.add_argument("--weekday", type=int, action="append", default=[])
+    create.add_argument("--month-day", type=int, action="append", default=[])
+    create.add_argument("--n-days", type=int)
+    create.add_argument("--timezone", default="UTC")
+    create.add_argument("--overlap", choices=["skip", "queue", "cancel_previous", "allow_parallel"], default="skip")
+    create.add_argument("--missed", choices=["skip", "run_once_on_recovery", "replay_all"], default="skip")
+    create.add_argument("--missed-grace-seconds", type=int, default=43200)
+    create.add_argument("--version-policy", choices=["latest", "pinned"], default="latest")
+    create.add_argument("--pinned-version", type=int)
+    create.add_argument("--starts-at")
+    create.add_argument("--ends-at")
+    create.add_argument("--machine", action="store_true")
+
+    list_p = rsub.add_parser("list", help="List Routines")
+    list_p.add_argument("--name")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = rsub.add_parser("show", help="Show a Routine")
+    show_p.add_argument("routine_id")
+    show_p.add_argument("--machine", action="store_true")
+
+    update = rsub.add_parser("update", help="Update a Routine")
+    update.add_argument("routine_id")
+    update.add_argument("--name")
+    update.add_argument("--timezone")
+    update.add_argument("--overlap", choices=["skip", "queue", "cancel_previous", "allow_parallel"])
+    update.add_argument("--missed", choices=["skip", "run_once_on_recovery", "replay_all"])
+    update.add_argument("--missed-grace-seconds", type=int)
+    update.add_argument("--enabled", choices=["true", "false"])
+    update.add_argument("--machine", action="store_true")
+
+    delete_p = rsub.add_parser("delete", help="Soft-delete a Routine")
+    delete_p.add_argument("routine_id")
+    delete_p.add_argument("--machine", action="store_true")
+
+    run_now = rsub.add_parser("run-now", help="Trigger a Routine immediately")
+    run_now.add_argument("routine_id")
+    run_now.add_argument("--machine", action="store_true")
+
+    runs_p = rsub.add_parser("runs", help="List Routine Runs")
+    runs_p.add_argument("routine_id")
+    runs_p.add_argument("--limit", type=int, default=50)
+    runs_p.add_argument("--machine", action="store_true")
+
+    receipt = rsub.add_parser("receipt", help="Show a Routine receipt")
+    receipt.add_argument("routine_id")
+    receipt.add_argument("--machine", action="store_true")
+
+    preview = rsub.add_parser("preview", help="Preview occurrences without persisting")
+    preview.add_argument("--type", choices=["daily", "weekly", "monthly", "once", "ndays"], required=True)
+    preview.add_argument("--time", action="append", default=[])
+    preview.add_argument("--weekday", type=int, action="append", default=[])
+    preview.add_argument("--month-day", type=int, action="append", default=[])
+    preview.add_argument("--n-days", type=int)
+    preview.add_argument("--timezone", default="UTC")
+    preview.add_argument("--limit", type=int, default=5)
+    preview.add_argument("--machine", action="store_true")
+
+
+def _routine_cli_request(args, config):
+    client = _ensure_daemon(config)
+    cmd = args.routine_command
+    if cmd == "create":
+        rule: dict[str, Any] = {"type": args.type}
+        if args.time:
+            rule["times"] = list(args.time)
+        if args.weekday:
+            rule["weekdays"] = sorted(args.weekday)
+        if args.month_day:
+            rule["month_days"] = sorted(args.month_day)
+        if args.n_days:
+            rule["n_days"] = args.n_days
+        payload = {
+            "name": args.name,
+            "target_type": args.target_type,
+            "target_id": args.target_id,
+            "rule": rule,
+            "timezone": args.timezone,
+            "overlap_policy": args.overlap,
+            "missed_policy": args.missed,
+            "missed_grace_seconds": args.missed_grace_seconds,
+            "version_policy": args.version_policy,
+            "pinned_version": args.pinned_version,
+            "starts_at_utc": args.starts_at,
+            "ends_at_utc": args.ends_at,
+        }
+        return client.request("POST", "/v1/routines", payload)
+    if cmd == "list":
+        path = "/v1/routines"
+        if args.name:
+            path += f"?name={args.name}&limit={args.limit}"
+        elif args.limit:
+            path += f"?limit={args.limit}"
+        return client.request("GET", path)
+    if cmd == "show":
+        return client.request("GET", f"/v1/routines/{args.routine_id}")
+    if cmd == "update":
+        payload = {}
+        if args.name is not None:
+            payload["name"] = args.name
+        if args.timezone is not None:
+            payload["timezone"] = args.timezone
+        if args.overlap is not None:
+            payload["overlap_policy"] = args.overlap
+        if args.missed is not None:
+            payload["missed_policy"] = args.missed
+        if args.missed_grace_seconds is not None:
+            payload["missed_grace_seconds"] = args.missed_grace_seconds
+        if args.enabled is not None:
+            payload["enabled"] = args.enabled == "true"
+        return client.request("POST", f"/v1/routines/{args.routine_id}", payload)
+    if cmd == "delete":
+        return client.request("DELETE", f"/v1/routines/{args.routine_id}")
+    if cmd == "run-now":
+        return client.request("POST", f"/v1/routines/{args.routine_id}/run-now", {})
+    if cmd == "runs":
+        return client.request("GET", f"/v1/routines/{args.routine_id}/runs?limit={args.limit}")
+    if cmd == "receipt":
+        return client.request("GET", f"/v1/routines/{args.routine_id}/receipt")
+    if cmd == "preview":
+        rule = {"type": args.type}
+        if args.time:
+            rule["times"] = list(args.time)
+        if args.weekday:
+            rule["weekdays"] = sorted(args.weekday)
+        if args.month_day:
+            rule["month_days"] = sorted(args.month_day)
+        if args.n_days:
+            rule["n_days"] = args.n_days
+        payload = {"rule": rule, "timezone": args.timezone, "limit": args.limit}
+        return client.request("POST", "/v1/routines/preview", payload)
+    raise RelayError("INVALID_REQUEST", f"Unknown routine command: {cmd}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",
@@ -824,6 +974,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_schedule_parsers(sub)
     _add_task_parsers(sub)
     _add_project_parsers(sub)
+    _add_routine_parsers(sub)
     project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
     _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
@@ -1498,6 +1649,8 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_task_cli_request(args, config), machine)
         elif args.command == "project":
             _emit(_project_cli_request(args, config), machine)
+        elif args.command == "routine":
+            _emit(_routine_cli_request(args, config), machine)
         elif args.command == "project-run":
             _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":

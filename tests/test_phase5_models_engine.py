@@ -8,9 +8,8 @@ from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
 from relay.errors import RelayError
-from relay.models import TaskSpec, JobRequest
+from relay.models import TaskSpec
 from relay.routines.models import RoutineSpec
-from relay.schedules.rules import next_occurrences, Occurrence
 
 
 class RoutineSpecTests(unittest.TestCase):
@@ -18,47 +17,74 @@ class RoutineSpecTests(unittest.TestCase):
         def task_lookup(tid):
             return {"name": "T", "version": 1} if tid == "T-1" else None
 
-        spec = RoutineSpec.from_dict({
-            "name": "Daily HBM",
-            "target_type": "task",
-            "target_id": "T-1",
-            "rule": {"type": "daily", "times": ["09:00"]},
-            "timezone": "Asia/Seoul",
-        })
+        spec = RoutineSpec.from_dict(
+            {
+                "name": "Daily HBM",
+                "target_type": "task",
+                "target_id": "T-1",
+                "rule": {"type": "daily", "times": ["09:00"]},
+                "timezone": "Asia/Seoul",
+            }
+        )
         spec.validate(task_lookup=task_lookup, project_lookup=lambda _p: None)
         self.assertEqual(spec.target_type, "task")
 
     def test_invalid_target_type_rejected(self):
-        def task_lookup(_t): return {"name": "T", "version": 1}
-        spec = RoutineSpec.from_dict({
-            "name": "X", "target_type": "garbage", "target_id": "T-1",
-            "rule": {"type": "daily", "times": ["09:00"]}, "timezone": "Asia/Seoul",
-        })
+        def task_lookup(_t):
+            return {"name": "T", "version": 1}
+
+        spec = RoutineSpec.from_dict(
+            {
+                "name": "X",
+                "target_type": "garbage",
+                "target_id": "T-1",
+                "rule": {"type": "daily", "times": ["09:00"]},
+                "timezone": "Asia/Seoul",
+            }
+        )
         with self.assertRaisesRegex(RelayError, "ROUTINE_INVALID"):
             spec.validate(task_lookup=task_lookup, project_lookup=lambda _p: None)
 
     def test_missing_task_target_rejected(self):
-        spec = RoutineSpec.from_dict({
-            "name": "X", "target_type": "task", "target_id": "no-such",
-            "rule": {"type": "daily", "times": ["09:00"]}, "timezone": "Asia/Seoul",
-        })
+        spec = RoutineSpec.from_dict(
+            {
+                "name": "X",
+                "target_type": "task",
+                "target_id": "no-such",
+                "rule": {"type": "daily", "times": ["09:00"]},
+                "timezone": "Asia/Seoul",
+            }
+        )
         with self.assertRaisesRegex(RelayError, "ROUTINE_TARGET_MISSING"):
             spec.validate(task_lookup=lambda _t: None, project_lookup=lambda _p: None)
 
     def test_pinned_requires_pinned_version(self):
-        def task_lookup(_t): return {"name": "T", "version": 1}
+        def task_lookup(_t):
+            return {"name": "T", "version": 1}
+
         # pinned without version
-        spec = RoutineSpec.from_dict({
-            "name": "X", "target_type": "task", "target_id": "T-1",
-            "rule": {"type": "daily", "times": ["09:00"]}, "timezone": "Asia/Seoul",
-            "version_policy": "pinned", "pinned_version": 1,
-        })
+        RoutineSpec.from_dict(
+            {
+                "name": "X",
+                "target_type": "task",
+                "target_id": "T-1",
+                "rule": {"type": "daily", "times": ["09:00"]},
+                "timezone": "Asia/Seoul",
+                "version_policy": "pinned",
+                "pinned_version": 1,
+            }
+        )
         # Also missing pinned_version
-        spec2 = RoutineSpec.from_dict({
-            "name": "X", "target_type": "task", "target_id": "T-1",
-            "rule": {"type": "daily", "times": ["09:00"]}, "timezone": "Asia/Seoul",
-            "version_policy": "pinned",
-        })
+        spec2 = RoutineSpec.from_dict(
+            {
+                "name": "X",
+                "target_type": "task",
+                "target_id": "T-1",
+                "rule": {"type": "daily", "times": ["09:00"]},
+                "timezone": "Asia/Seoul",
+                "version_policy": "pinned",
+            }
+        )
         with self.assertRaisesRegex(RelayError, "ROUTINE_INVALID"):
             spec2.validate(task_lookup=task_lookup, project_lookup=lambda _p: None)
 

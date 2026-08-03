@@ -1720,6 +1720,7 @@ class Database:
 
     def create_routine(self, row):
         from .util import utc_now
+
         now = utc_now()
         values = {
             "enabled": 1,
@@ -1762,6 +1763,7 @@ class Database:
 
     def update_routine(self, routine_id, **changes):
         from .util import utc_now
+
         if not changes:
             return
         changes["updated_at"] = utc_now()
@@ -1774,9 +1776,11 @@ class Database:
 
     def soft_delete_routine(self, routine_id):
         from .util import utc_now
+
         existing = self.get_routine(routine_id)
         if not existing:
             from .errors import RelayError
+
             raise RelayError("ROUTINE_NOT_FOUND", f"Routine not found: {routine_id}")
         if existing.get("deleted_at") is not None:
             return False
@@ -1789,7 +1793,9 @@ class Database:
 
     def claim_routine_occurrence(self, routine_id, run_row):
         import sqlite3 as _sq
+
         from .util import utc_now
+
         now = utc_now()
         values = {**run_row, "routine_id": routine_id, "created_at": now, "updated_at": now}
         keys = list(values)
@@ -1810,6 +1816,7 @@ class Database:
 
     def update_routine_run(self, run_id, **changes):
         from .util import utc_now
+
         if not changes:
             return
         changes["updated_at"] = utc_now()

@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 
 from relay.db import CURRENT_SCHEMA_VERSION, Database
-from relay.errors import RelayError
 
 
 class RoutineDBTests(unittest.TestCase):
@@ -26,20 +25,22 @@ class RoutineDBTests(unittest.TestCase):
             self.assertTrue({"routines", "routine_runs"} <= tables)
 
     def test_routine_crud_and_soft_delete(self):
-        self.db.create_routine({
-            "routine_id": "r-1",
-            "name": "Daily HBM",
-            "target_type": "task",
-            "target_id": "T-1",
-            "rule_json": "{}",
-            "timezone": "Asia/Seoul",
-            "enabled": 1,
-            "overlap_policy": "skip",
-            "missed_policy": "skip",
-            "missed_grace_seconds": 43200,
-            "version_policy": "latest",
-            "next_run_at_utc": None,
-        })
+        self.db.create_routine(
+            {
+                "routine_id": "r-1",
+                "name": "Daily HBM",
+                "target_type": "task",
+                "target_id": "T-1",
+                "rule_json": "{}",
+                "timezone": "Asia/Seoul",
+                "enabled": 1,
+                "overlap_policy": "skip",
+                "missed_policy": "skip",
+                "missed_grace_seconds": 43200,
+                "version_policy": "latest",
+                "next_run_at_utc": None,
+            }
+        )
         self.assertEqual(self.db.get_routine("r-1")["name"], "Daily HBM")
         self.assertEqual([r["routine_id"] for r in self.db.list_routines()], ["r-1"])
         self.db.update_routine("r-1", name="Renamed")
@@ -50,20 +51,22 @@ class RoutineDBTests(unittest.TestCase):
         self.assertFalse(self.db.soft_delete_routine("r-1"))
 
     def test_claim_routine_occurrence_is_atomic(self):
-        self.db.create_routine({
-            "routine_id": "r-1",
-            "name": "R",
-            "target_type": "task",
-            "target_id": "T-1",
-            "rule_json": "{}",
-            "timezone": "Asia/Seoul",
-            "enabled": 1,
-            "overlap_policy": "skip",
-            "missed_policy": "skip",
-            "missed_grace_seconds": 43200,
-            "version_policy": "latest",
-            "next_run_at_utc": None,
-        })
+        self.db.create_routine(
+            {
+                "routine_id": "r-1",
+                "name": "R",
+                "target_type": "task",
+                "target_id": "T-1",
+                "rule_json": "{}",
+                "timezone": "Asia/Seoul",
+                "enabled": 1,
+                "overlap_policy": "skip",
+                "missed_policy": "skip",
+                "missed_grace_seconds": 43200,
+                "version_policy": "latest",
+                "next_run_at_utc": None,
+            }
+        )
         run = {
             "run_id": "rr-1",
             "occurrence_key": "2026-08-04T00:00",
@@ -79,20 +82,22 @@ class RoutineDBTests(unittest.TestCase):
         self.assertEqual(len(runs), 1)
 
     def test_active_runs_for_routine(self):
-        self.db.create_routine({
-            "routine_id": "r-1",
-            "name": "R",
-            "target_type": "task",
-            "target_id": "T-1",
-            "rule_json": "{}",
-            "timezone": "Asia/Seoul",
-            "enabled": 1,
-            "overlap_policy": "skip",
-            "missed_policy": "skip",
-            "missed_grace_seconds": 43200,
-            "version_policy": "latest",
-            "next_run_at_utc": None,
-        })
+        self.db.create_routine(
+            {
+                "routine_id": "r-1",
+                "name": "R",
+                "target_type": "task",
+                "target_id": "T-1",
+                "rule_json": "{}",
+                "timezone": "Asia/Seoul",
+                "enabled": 1,
+                "overlap_policy": "skip",
+                "missed_policy": "skip",
+                "missed_grace_seconds": 43200,
+                "version_policy": "latest",
+                "next_run_at_utc": None,
+            }
+        )
         run_pending = {
             "run_id": "rr-1",
             "occurrence_key": "a",

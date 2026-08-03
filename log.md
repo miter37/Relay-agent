@@ -1,3 +1,4 @@
+- 2026-08-04 02:00 | Implemented Phase 5 Routine integration: schema v8 with routines/routine_runs tables, RoutineSpec model with role-based rule reuse, persistent RoutineRuntime that dispatches ordinary Task Run/Project Run with trigger_type=routine, daemon API/CLI, coexistence with Schedule.
 - 2026-08-04 00:30 | Implemented Phase 4 Project MVP: schema v7, ProjectSpec DAG validation, snapshot-based Task execution, persistent Project runtime with daemon wiring, project APIs/CLI, acceptance flow + restart safety.
 - 2026-08-03 22:30 | Implemented Phase 3 Task registration: schema v6 tasks table, TaskSpec model, Task CRUD, run_task with immutable snapshots, save-as-task promotion, daemon APIs and CLI.
 - 2026-08-03 18:14 | Clarified product direction: any human, Agent, or service may call Relay; any enabled, currently health-verified backend may be a Worker.
