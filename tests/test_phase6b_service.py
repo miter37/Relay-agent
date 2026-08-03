@@ -10,6 +10,8 @@ from relay.engine import RelayEngine
 from relay.errors import RelayError
 from relay.models import JobRequest
 from relay.comparison.service import ComparisonService
+from relay.projects.service import ProjectService
+from relay.models import TaskSpec
 
 
 class Phase6bServiceTests(unittest.TestCase):
@@ -62,3 +64,53 @@ class Phase6bServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Phase6bPartialReexecuteTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = Path(self.temp.name) / "home"
+        self.config = Config(self.home)
+        self.config.init()
+        self.db = Database(self.config.path_value("database_path"))
+        self.engine = RelayEngine(self.config, self.db)
+        self.project_service = ProjectService(self.db, self.engine)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_partial_reexecute_resets_downstream_nodes(self):
+        t1 = self.engine.create_task(TaskSpec(name="T1", instructions="step 1"))
+        t2 = self.engine.create_task(TaskSpec(name="T2", instructions="step 2"))
+        proj = self.project_service.create_project({
+            "name": "Flow",
+            "nodes": [
+                {"node_id": "step1", "task_id": t1["task_id"]},
+                {"node_id": "step2", "task_id": t2["task_id"]},
+            ],
+            "connections": [
+                {"from_node": "step1", "from_role": "out", "to_node": "step2", "to_alias": "A1"},
+            ],
+            "output_selection": [],
+        })
+        prun = self.project_service.create_project_run(proj["project_id"])
+        prid = prun["project_run_id"]
+
+        # Simulate step1 & step2 completing
+        self.db.update_project_step(prid, "step1", status="completed", active_task_run_id="job-1")
+        self.db.update_project_step(prid, "step2", status="completed", active_task_run_id="job-2")
+        self.db.update_project_run(prid, status="completed")
+
+        # Call partial_reexecute from step2
+        res = self.project_service.partial_reexecute(prid, from_node="step2", cascade=True)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["target_node"], "step2")
+
+        # Verify step1 remains completed, step2 is reset to pending, project_run is running
+        s1 = self.db.get_project_step(prid, "step1")
+        s2 = self.db.get_project_step(prid, "step2")
+        self.assertEqual(s1["status"], "completed")
+        self.assertEqual(s1["active_task_run_id"], "job-1")
+        self.assertEqual(s2["status"], "pending")
+        self.assertIsNone(s2["active_task_run_id"])
+        self.assertEqual(self.db.get_project_run(prid)["status"], "running")

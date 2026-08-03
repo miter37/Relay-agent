@@ -332,7 +332,7 @@ class ProjectService:
             raise RelayError("PROJECT_RETRY_INVALID", "No failed steps to retry.")
         target_node = from_node or failed[0]["node_id"]
         # Reset descendants to pending; keep upstream successful steps and their snapshots.
-        descendants = self._collect_descendants(target_node, set(s["node_id"] for s in steps))
+        descendants = self._collect_descendants(project_run_id, target_node, set(s["node_id"] for s in steps))
         for s in steps:
             if s["node_id"] == target_node or s["node_id"] in descendants:
                 payload = {"status": "pending", "active_task_run_id": None, "error_code": None, "error_message": None}
@@ -346,8 +346,11 @@ class ProjectService:
         self.db.update_project_run(project_run_id, status="running", completed_at=None)
         return {"project_run": self.db.get_project_run(project_run_id), "target_node": target_node}
 
-    def _collect_descendants(self, node_id: str, all_nodes: set[str]) -> set[str]:
-        snapshot = json.loads(self.db.get_project_run(self._pr_id_for_descendants)["project_snapshot_json"])
+    def _collect_descendants(self, project_run_id: str, node_id: str, all_nodes: set[str]) -> set[str]:
+        project_run = self.db.get_project_run(project_run_id)
+        if not project_run:
+            return set()
+        snapshot = json.loads(project_run["project_snapshot_json"])
         spec = ProjectSpec.from_dict(snapshot["project_definition"])
         adjacency: dict[str, list[str]] = {n.node_id: [] for n in spec.nodes}
         for conn in spec.connections:
@@ -417,4 +420,39 @@ class ProjectService:
             "steps": step_receipts,
             "warnings": json.loads(run.get("warnings_json") or "[]"),
             "final_artifact_ids": json.loads(run.get("final_artifact_ids_json") or "[]"),
+        }
+
+    def partial_reexecute(
+        self,
+        project_run_id: str,
+        from_node: str,
+        cascade: bool = True,
+        worker: str | None = None,
+    ) -> dict[str, Any]:
+        run = self.db.get_project_run(project_run_id)
+        if not run:
+            raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
+
+        steps = self.db.list_project_steps(project_run_id)
+        step_nodes = {s["node_id"] for s in steps}
+        if from_node not in step_nodes:
+            raise RelayError("PARTIAL_REEXECUTE_INVALID", f"Node not found in project run: {from_node}")
+
+        targets = {from_node}
+        if cascade:
+            targets |= self._collect_descendants(project_run_id, from_node, step_nodes)
+
+        for s in steps:
+            if s["node_id"] in targets:
+                payload = {"status": "pending", "active_task_run_id": None, "error_code": None, "error_message": None}
+                if s["node_id"] == from_node and worker is not None:
+                    payload["resolved_connections_json"] = canonical_json({"worker_override": worker})
+                self.db.update_project_step(project_run_id, s["node_id"], **payload)
+
+        self.db.update_project_run(project_run_id, status="running", completed_at=None)
+        return {
+            "ok": True,
+            "project_run": self.db.get_project_run(project_run_id),
+            "target_node": from_node,
+            "reexecuted_nodes": sorted(targets),
         }
