@@ -52,12 +52,15 @@ COMMANDS = {
     "search",
     "artifact",
     "run-lineage",
+    "task",
 }
 
 
 def _preprocess(argv: list[str]) -> list[str]:
     if not argv:
         return argv
+    if len(argv) >= 2 and argv[0] == "run" and argv[1] == "save-as-task":
+        return ["task", "save-as-task", *argv[2:]]
     if argv[0] not in COMMANDS and not argv[0].startswith("-"):
         return ["run", *argv]
     return argv
@@ -178,6 +181,133 @@ def _add_schedule_parsers(sub: argparse._SubParsersAction) -> None:
         action.add_argument("schedule_id")
         _add_schedule_machine_arg(action)
 
+
+def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
+    task = sub.add_parser(
+        "task",
+        help="Create and manage reusable Tasks",
+        description="Define reusable Tasks, list registered Tasks, update Task definitions, and run stored Tasks.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+
+    create = task_sub.add_parser("create", help="Create a reusable Task")
+    create.add_argument("--name", required=True)
+    create.add_argument("--instructions", default="")
+    create.add_argument("--task-file")
+    create.add_argument("--worker", default="auto")
+    fallback = create.add_mutually_exclusive_group()
+    fallback.add_argument("--fallback", action="store_true", default=None)
+    fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
+    create.add_argument("--timeout", type=int)
+    create.add_argument("--profile", default="web-research")
+    create.add_argument("--format", default="json", choices=["json", "txt"])
+    create.add_argument("--description")
+    create.add_argument("--machine", action="store_true")
+
+    list_p = task_sub.add_parser("list", help="List registered Tasks")
+    list_p.add_argument("--name")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = task_sub.add_parser("show", help="Show a Task definition")
+    show_p.add_argument("task_id")
+    show_p.add_argument("--machine", action="store_true")
+
+    update = task_sub.add_parser("update", help="Update a Task definition")
+    update.add_argument("task_id")
+    update.add_argument("--name")
+    update.add_argument("--instructions")
+    update.add_argument("--task-file")
+    update.add_argument("--worker")
+    up_fallback = update.add_mutually_exclusive_group()
+    up_fallback.add_argument("--fallback", action="store_true", default=None)
+    up_fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
+    update.add_argument("--timeout", type=int)
+    update.add_argument("--profile")
+    update.add_argument("--format", choices=["json", "txt"])
+    update.add_argument("--description")
+    update.add_argument("--machine", action="store_true")
+
+    delete_p = task_sub.add_parser("delete", help="Delete a Task definition")
+    delete_p.add_argument("task_id")
+    delete_p.add_argument("--machine", action="store_true")
+
+    run_p = task_sub.add_parser("run", help="Run a stored Task")
+    run_p.add_argument("task_id")
+    _add_request_args(run_p, task_required=False)
+
+    runs_p = task_sub.add_parser("runs", help="List Run history for a Task")
+    runs_p.add_argument("task_id")
+    runs_p.add_argument("--limit", type=int, default=50)
+    runs_p.add_argument("--machine", action="store_true")
+
+    sat = task_sub.add_parser("save-as-task", help="Promote a Run into a stored Task")
+    sat.add_argument("job_id")
+    sat.add_argument("--name", required=True)
+    sat.add_argument("--description")
+    sat.add_argument("--machine", action="store_true")
+
+
+def _task_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.task_command
+    if cmd == "create":
+        instructions = args.instructions
+        if args.task_file:
+            instructions = Path(args.task_file).read_text(encoding="utf-8")
+        payload = {
+            "name": args.name,
+            "instructions": instructions,
+            "description": args.description,
+            "worker": args.worker,
+            "fallback_enabled": args.fallback if args.fallback is not None else True,
+            "timeout_seconds": args.timeout,
+            "profile": args.profile,
+            "result_format": args.format,
+        }
+        return client.request("POST", "/v1/tasks", payload)
+    if cmd == "list":
+        path = "/v1/tasks"
+        if args.name:
+            path += f"?name={args.name}"
+        return client.request("GET", path)
+    if cmd == "show":
+        return client.request("GET", f"/v1/tasks/{args.task_id}")
+    if cmd == "update":
+        instructions = args.instructions
+        if args.task_file:
+            instructions = Path(args.task_file).read_text(encoding="utf-8")
+        payload = {}
+        if args.name:
+            payload["name"] = args.name
+        if instructions:
+            payload["instructions"] = instructions
+        if args.description is not None:
+            payload["description"] = args.description
+        if args.worker:
+            payload["default_worker"] = args.worker
+        if args.fallback is not None:
+            payload["fallback_enabled"] = args.fallback
+        if args.timeout is not None:
+            payload["timeout_seconds"] = args.timeout
+        if args.profile:
+            payload["profile"] = args.profile
+        if args.format:
+            payload["result_format"] = args.format
+        return client.request("POST", f"/v1/tasks/{args.task_id}", payload)
+    if cmd == "delete":
+        return client.request("DELETE", f"/v1/tasks/{args.task_id}")
+    if cmd == "run":
+        request = _request_from_args(args, config)
+        payload = {"queued": False, "submitted_via": "cli", "request": request.to_dict()}
+        return client.request("POST", f"/v1/tasks/{args.task_id}/run", payload)
+    if cmd == "runs":
+        return client.request("GET", f"/v1/tasks/{args.task_id}/runs?limit={args.limit}")
+    if cmd == "save-as-task":
+        payload = {"run_id": args.job_id, "name": args.name, "description": args.description}
+        return client.request("POST", "/v1/runs/save-as-task", payload)
+    raise RelayError("INVALID_REQUEST", f"Unknown task command: {cmd}")
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -547,6 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("agent_id")
 
     _add_schedule_parsers(sub)
+    _add_task_parsers(sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
     search.add_argument("query", nargs="?", default="")
     search.add_argument("--kind", choices=["runs", "artifacts"], default="runs")
@@ -1215,6 +1346,8 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(manager.run(override_days=args.days, dry_run=args.dry_run), machine)
         elif args.command == "schedule":
             _emit(_schedule_cli_request(args, config), machine)
+        elif args.command == "task":
+            _emit(_task_cli_request(args, config), machine)
         elif args.command == "daemon":
             if args.daemon_command == "serve":
                 RelayDaemon(config).serve()
