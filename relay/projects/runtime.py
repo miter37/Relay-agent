@@ -8,6 +8,7 @@ from typing import Any
 from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
+from ..models import JobRequest
 from ..util import utc_now
 from .models import ProjectSpec
 from .service import ProjectService
@@ -205,7 +206,7 @@ class ProjectRuntime:
 
         # Resolve artifact inputs (connection-based and external).
         try:
-            self.service.resolve_step_inputs(project_run_id, node_id)
+            resolved_inputs = self.service.resolve_step_inputs(project_run_id, node_id)
         except RelayError as exc:
             self.db.update_project_step(
                 project_run_id,
@@ -217,8 +218,27 @@ class ProjectRuntime:
             return
 
         try:
+            worker_override = None
+            try:
+                prior_resolution = json.loads(step.get("resolved_connections_json") or "{}")
+                if isinstance(prior_resolution, dict):
+                    worker_override = prior_resolution.get("worker_override")
+            except (TypeError, json.JSONDecodeError):
+                pass
+            request = JobRequest(
+                task=task_snapshot.get("instructions") or "",
+                caller="service",
+                worker=worker_override or task_snapshot.get("default_worker") or "auto",
+                artifact_inputs=[
+                    {"artifact_uid": item["artifact_uid"], "alias": item["to_alias"]} for item in resolved_inputs
+                ],
+            )
             job, _reused = self.engine.run_task_from_snapshot(
-                task_snapshot, queued=True, submitted_via="project", caller="service"
+                task_snapshot,
+                request=request,
+                queued=True,
+                submitted_via="project",
+                caller="service",
             )
         except RelayError as exc:
             self.db.update_project_step(
@@ -237,6 +257,7 @@ class ProjectRuntime:
             status="running",
             active_task_run_id=job["job_id"],
             started_at=utc_now(),
+            resolved_connections_json=json.dumps(resolved_inputs),
         )
         self.wake()
 
@@ -302,7 +323,14 @@ class ProjectRuntime:
                     project_run_id,
                     steps,
                     final_ids,
-                    [{"node_id": node_id, "role": role, "matches": len(matches)}],
+                    [
+                        {
+                            "node_id": node_id,
+                            "role": role,
+                            "matches": len(matches),
+                            "error": "PROJECT_ARTIFACT_MISSING" if not matches else "PROJECT_ARTIFACT_AMBIGUOUS",
+                        }
+                    ],
                 )
                 return
             uid = matches[0].get("artifact_uid") or matches[0].get("relative_path")
@@ -317,7 +345,7 @@ class ProjectRuntime:
         warnings: list[dict[str, Any]],
     ) -> None:
         failed = next((s for s in steps if s["status"] == "failed"), None)
-        status = "failed" if failed else "completed"
+        status = "failed" if failed or warnings else "completed"
         self.db.update_project_run(
             project_run_id,
             status=status,
@@ -343,6 +371,24 @@ class ProjectRuntime:
             warnings_json=json.dumps(warnings),
             completed_at=utc_now(),
         )
+        try:
+            from ..notifications.service import NotificationService
+
+            run = self.db.get_project_run(project_run_id)
+            snapshot = json.loads(run["project_snapshot_json"]) if run else {}
+            definition = snapshot.get("project_definition", {})
+            NotificationService(self.db, self.engine.config).notify(
+                project_run_id=project_run_id,
+                trigger="on_failure",
+                payload={
+                    "project_run_id": project_run_id,
+                    "status": "failed",
+                    "warnings": warnings,
+                },
+                policy=definition.get("notification_policy") or {},
+            )
+        except Exception:  # notification delivery is best-effort
+            logger.exception("project failure notification failed for %s", project_run_id)
 
     # --- daemon helpers ---------------------------------------------------------
 

@@ -31,7 +31,7 @@ class ProjectService:
 
     def create_project(self, definition: dict[str, Any]) -> dict[str, Any]:
         spec = ProjectSpec.from_dict(definition)
-        spec.validate(self._task_snapshot)
+        spec.validate(self._task_snapshot, allow_roots=self._delivery_roots())
         project_id = new_job_id()
         project_row = {
             "project_id": project_id,
@@ -48,7 +48,7 @@ class ProjectService:
         if not existing or existing.get("deleted_at") is not None:
             raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
         spec = ProjectSpec.from_dict(definition)
-        spec.validate(self._task_snapshot)
+        spec.validate(self._task_snapshot, allow_roots=self._delivery_roots())
         snapshot = spec.to_snapshot()
         self.db.update_project(
             project_id,
@@ -81,6 +81,9 @@ class ProjectService:
 
     def _task_snapshot(self, task_id: str) -> dict[str, Any]:
         return self.engine.load_task_for_snapshot(task_id)
+
+    def _delivery_roots(self) -> list[str]:
+        return [str(root) for root in self.engine.config.get("allowed_delivery_roots", [])]
 
     def _stage_external_input(
         self, project_id: str, project_run_id: str, node_id: str, alias: str, artifact: dict[str, Any]
@@ -294,6 +297,20 @@ class ProjectService:
                 )
             artifacts = self.engine.db.artifacts_for_job(source_step["active_task_run_id"])
             matches = [a for a in artifacts if a.get("role") == from_role]
+            edited_uid = next(
+                (
+                    approval.get("edited_artifact_uid")
+                    for approval in reversed(self.db.list_approvals(project_run_id))
+                    if approval["node_id"] == source_node
+                    and approval["status"] == "approved"
+                    and approval.get("edited_artifact_uid")
+                ),
+                None,
+            )
+            if edited_uid:
+                edited = self.engine.db.artifact_by_uid(edited_uid)
+                if edited and edited.get("role") == from_role:
+                    matches = [edited]
             if not matches:
                 raise RelayError(
                     "PROJECT_ARTIFACT_MISSING", f"Source Artifact for role {from_role} missing in {source_node}"

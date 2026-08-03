@@ -10,7 +10,7 @@ from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
 from ..target_workspace import safe_resolve
-from ..util import new_artifact_uid, new_job_id, sha256_file, utc_now
+from ..util import is_within, new_artifact_uid, new_job_id, sha256_file, utc_now
 
 
 class ApprovalService:
@@ -25,7 +25,7 @@ class ApprovalService:
             raise RelayError("PROJECT_NOT_FOUND", f"Step not found: {project_run_id}/{node_id}")
         approval_id = new_job_id()
         token = new_job_id()
-        self.db.create_approval(
+        approval = self.db.get_or_create_pending_approval(
             {
                 "approval_id": approval_id,
                 "project_run_id": project_run_id,
@@ -35,7 +35,7 @@ class ApprovalService:
             }
         )
         self.db.update_project_step(project_run_id, node_id, status="awaiting_approval")
-        return self.db.get_approval(token)  # type: ignore[return-value]
+        return approval
 
     def _get_pending_approval(self, project_run_id: str, token: str) -> dict[str, Any]:
         app = self.db.get_approval(token)
@@ -90,7 +90,31 @@ class ApprovalService:
             artifact_uid=edited_uid,
             role=role,
             producer_attempt_id=None,
+            producer="human",
         )
+
+        originals = [
+            artifact
+            for artifact in self.db.artifacts_for_job(job_id)
+            if artifact.get("role") == role and artifact.get("artifact_uid") != edited_uid
+        ]
+        if len(originals) == 1:
+            original = originals[0]
+            self.db.add_lineage(
+                {
+                    "consumer_job_id": job_id,
+                    "source_artifact_uid": original["artifact_uid"],
+                    "source_job_id": job_id,
+                    "alias": f"HUMAN_EDIT_{app['approval_id']}",
+                    "binding_mode": "human-edit",
+                    "source_relative_path": original["relative_path"],
+                    "source_sha256": original["sha256"],
+                    "source_size": original["size"],
+                    "snapshot_relative_path": dest_file.name,
+                    "snapshot_sha256": digest,
+                    "snapshot_size": size,
+                }
+            )
 
         now = utc_now()
         self.db.update_approval(
@@ -158,6 +182,9 @@ class ApprovalService:
                 continue
 
             target_path = safe_resolve(Path(target_str))
+            allowed_roots = [safe_resolve(Path(root)) for root in self.config.get("allowed_delivery_roots", [])]
+            if not any(is_within(target_path, root) for root in allowed_roots):
+                raise RelayError("DELIVERY_PATH_NOT_ALLOWED", f"Delivery path is not in allow-list: {target_path}")
 
             # Determine target file destination
             if target_path.suffix:

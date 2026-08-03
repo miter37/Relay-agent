@@ -61,15 +61,15 @@ class RoutineService:
             "name": payload.get("name", existing["name"]),
             "target_type": payload.get("target_type", existing["target_type"]),
             "target_id": payload.get("target_id", existing["target_id"]),
-            "rule": payload.get("rule"),
+            "rule": payload.get("rule", existing["rule_json"]),
             "timezone": payload.get("timezone", existing["timezone"]),
             "overlap_policy": payload.get("overlap_policy", existing["overlap_policy"]),
             "missed_policy": payload.get("missed_policy", existing["missed_policy"]),
             "missed_grace_seconds": payload.get("missed_grace_seconds", existing["missed_grace_seconds"]),
             "version_policy": payload.get("version_policy", existing["version_policy"]),
             "pinned_version": payload.get("pinned_version", existing.get("pinned_version")),
-            "input_policy": payload.get("input_policy"),
-            "notification_policy": payload.get("notification_policy"),
+            "input_policy": payload.get("input_policy", existing.get("input_policy_json")),
+            "notification_policy": payload.get("notification_policy", existing.get("notification_policy_json")),
             "starts_at_utc": payload.get("starts_at_utc", existing.get("starts_at_utc")),
             "ends_at_utc": payload.get("ends_at_utc", existing.get("ends_at_utc")),
             "enabled": bool(payload.get("enabled", existing["enabled"])),
@@ -126,8 +126,8 @@ class RoutineService:
         ends = payload.get("ends_at_utc")
         anchor = datetime.now(UTC)
         items = next_occurrences(
-            rule,
-            anchor - _utc_to_dt(starts) + _utc_to_dt(starts),
+            rule_with_tz,
+            anchor,
             limit=limit,
             starts_at_utc=_utc_to_dt(starts),
             ends_at_utc=_utc_to_dt(ends),
@@ -187,7 +187,28 @@ class RoutineService:
         if error_message is not None:
             changes["error_message"] = error_message
         self.db.update_routine_run(run_id, **changes)
-        return self.db.get_routine_run(run_id)
+        updated = self.db.get_routine_run(run_id)
+        if status in {"completed", "failed"}:
+            routine = self.db.get_routine(run["routine_id"])
+            policy = json.loads(routine.get("notification_policy_json") or "{}") if routine else {}
+            trigger = "on_failure" if status == "failed" else None
+            if trigger:
+                from ..notifications.service import NotificationService
+
+                NotificationService(self.db, self.config).notify(
+                    routine_id=run["routine_id"],
+                    project_run_id=run.get("project_run_id"),
+                    trigger=trigger,
+                    payload={
+                        "routine_id": run["routine_id"],
+                        "routine_run_id": run_id,
+                        "status": status,
+                        "error_code": error_code,
+                        "error_message": error_message,
+                    },
+                    policy=policy,
+                )
+        return updated
 
     # ---- Receipt ----
 

@@ -8,6 +8,7 @@ from typing import Any
 from ..config import Config
 from ..db import Database
 from ..engine import RelayEngine
+from ..errors import RelayError
 from ..schedules.rules import Occurrence, next_occurrences
 from ..util import new_job_id
 from .service import RoutineService
@@ -86,19 +87,25 @@ class RoutineRuntime:
         rule.setdefault("timezone", routine["timezone"])
         starts = self._parse_dt(routine.get("starts_at_utc"))
         ends = self._parse_dt(routine.get("ends_at_utc"))
-        anchor = self._parse_dt(routine.get("next_run_at_utc"))
-        if anchor is None or anchor < now:
-            anchor = now
-        occurrences = next_occurrences(rule, anchor, limit=1, starts_at_utc=starts, ends_at_utc=ends)
+        next_due = self._parse_dt(routine.get("next_run_at_utc"))
+        if next_due is None or next_due > now:
+            return result
+        occurrences = next_occurrences(
+            rule,
+            next_due - timedelta(microseconds=1),
+            limit=100,
+            starts_at_utc=starts,
+            ends_at_utc=ends,
+        )
         if not occurrences:
             return result
-        # Dispatch every occurrence produced from this anchor; the runtime will claim
-        # them and the caller (now) acts as the catch-up boundary. We do not filter
-        # by `now` because future times in the next_run_at_utc-based anchor may be
-        # slightly ahead of wall-clock when the system is being caught up.
-        pending = occurrences
+        # Dispatch only occurrences that are due. The stored next_run_at_utc is the
+        # inclusive catch-up boundary; future occurrences remain untouched.
+        pending = [occ for occ in occurrences if occ.instant_utc <= now]
         if not pending:
             return result
+        if routine.get("missed_policy", "skip") == "run_once_on_recovery" and len(pending) > 1:
+            pending = [pending[-1]]
         # Apply overlap policy
         if routine.get("overlap_policy", "skip") == "skip" and self.db.active_runs_for_routine(routine["routine_id"]):
             self._advance(routine, pending[-1])
@@ -130,6 +137,17 @@ class RoutineRuntime:
 
     def _dispatch(self, routine: dict[str, Any], run_id: str) -> None:
         try:
+            if routine.get("version_policy") == "pinned":
+                target = (
+                    self.db.get_task(routine["target_id"])
+                    if routine["target_type"] == "task"
+                    else self.db.get_project(routine["target_id"])
+                )
+                if not target or int(target["version"]) != int(routine["pinned_version"]):
+                    raise RelayError(
+                        "ROUTINE_VERSION_PIN_INVALID",
+                        f"Pinned version {routine['pinned_version']} is not current for {routine['target_id']}",
+                    )
             if routine["target_type"] == "task":
                 job, _, _ = self.engine.run_task(
                     routine["target_id"],
@@ -137,6 +155,7 @@ class RoutineRuntime:
                     submitted_via="routine",
                     trigger_type="routine",
                     routine_id=routine["routine_id"],
+                    caller="service",
                 )
                 self.db.update_routine_run(run_id, task_run_id=job["job_id"], status="running")
             else:
@@ -148,6 +167,8 @@ class RoutineRuntime:
                     routine_id=routine["routine_id"],
                 )
                 self.db.update_routine_run(run_id, project_run_id=project_run["project_run_id"], status="running")
+        except RelayError as exc:
+            self.db.update_routine_run(run_id, status="failed", error_code=exc.code, error_message=exc.message)
         except Exception as exc:
             logger.exception("dispatch error for routine %s: %s", routine["routine_id"], exc)
             self.db.update_routine_run(

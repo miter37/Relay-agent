@@ -46,7 +46,22 @@ class MigrationTests(unittest.TestCase):
                 <= columns
             )
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            self.assertTrue({"schedules", "schedule_runs"} <= tables)
+            self.assertTrue(
+                {
+                    "schedules",
+                    "schedule_runs",
+                    "tasks",
+                    "projects",
+                    "project_runs",
+                    "routines",
+                    "routine_runs",
+                    "approvals",
+                    "deliveries",
+                    "notification_events",
+                }
+                <= tables
+            )
+            self.assertIn("receipt_schema_version", columns)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
         self.assertIsNotNone(db.last_backup_path)
         self.assertTrue(db.last_backup_path and db.last_backup_path.exists())
@@ -64,7 +79,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0], 4)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0], 1)
             artifact_columns = {row[1] for row in conn.execute("PRAGMA table_info(artifacts)")}
-            self.assertTrue({"artifact_uid", "role", "producer_attempt_id"} <= artifact_columns)
+            self.assertTrue({"artifact_uid", "role", "producer_attempt_id", "producer"} <= artifact_columns)
             self.assertEqual(
                 conn.execute(
                     "SELECT trigger_type,task_id,task_snapshot_json FROM jobs WHERE job_id='fixture-completed'"

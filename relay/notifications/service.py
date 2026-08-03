@@ -46,29 +46,32 @@ class NotificationService:
             if not url:
                 continue
 
-            if mock_success:
-                res = {"ok": True, "status_code": 200, "error": None}
-            else:
-                try:
-                    res = self.sink.deliver(url, secret, payload)
-                except RelayError as exc:
-                    res = {"ok": False, "status_code": None, "error": exc.message}
+            max_attempts = 1 if mock_success else max(1, int(self.config.get("notification_retry_attempts", 3)))
+            for attempt in range(1, max_attempts + 1):
+                if mock_success:
+                    res = {"ok": True, "status_code": 200, "error": None}
+                else:
+                    try:
+                        res = self.sink.deliver(url, secret, payload)
+                    except RelayError as exc:
+                        res = {"ok": False, "status_code": None, "error": exc.message}
 
-            event_id = new_job_id()
-            event_row = {
-                "event_id": event_id,
-                "routine_id": routine_id,
-                "project_run_id": project_run_id,
-                "trigger_type": trigger,
-                "sink_url": url,
-                "status": "delivered" if res["ok"] else "failed",
-                "status_code": res["status_code"],
-                "attempt": 1,
-                "error": res["error"],
-                "payload_hash": payload_hash,
-                "created_at": utc_now(),
-            }
-            self.db.create_notification_event(event_row)
-            events.append(event_row)
+                event_row = {
+                    "event_id": new_job_id(),
+                    "routine_id": routine_id,
+                    "project_run_id": project_run_id,
+                    "trigger_type": trigger,
+                    "sink_url": url,
+                    "status": "delivered" if res["ok"] else "failed",
+                    "status_code": res["status_code"],
+                    "attempt": attempt,
+                    "error": res["error"],
+                    "payload_hash": payload_hash,
+                    "created_at": utc_now(),
+                }
+                self.db.create_notification_event(event_row)
+                events.append(event_row)
+                if res["ok"]:
+                    break
 
         return events

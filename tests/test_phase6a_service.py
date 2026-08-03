@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from relay.approvals.service import ApprovalService
@@ -27,6 +28,7 @@ class Phase6aServiceTests(unittest.TestCase):
         self.config.init()
         self.allow_dir = self.root / "deliveries"
         self.allow_dir.mkdir(parents=True, exist_ok=True)
+        self.config.set("allowed_delivery_roots", [str(self.allow_dir)])
         self.db = Database(self.config.path_value("database_path"))
         self.engine = RelayEngine(self.config, self.db)
         self.project_service = ProjectService(self.db, self.engine)
@@ -90,6 +92,47 @@ class Phase6aServiceTests(unittest.TestCase):
         step = self.db.get_project_step(prid, node_id)
         self.assertEqual(step["status"], "awaiting_approval")
 
+    def test_project_rejects_checkpoint_delivery_outside_allowlist(self):
+        task = self.engine.create_task(TaskSpec(name="Unsafe", instructions="draft"))
+        with self.assertRaisesRegex(Exception, "DELIVERY_PATH_NOT_ALLOWED"):
+            self.project_service.create_project(
+                {
+                    "name": "Unsafe delivery",
+                    "nodes": [
+                        {
+                            "node_id": "review",
+                            "task_id": task["task_id"],
+                            "checkpoint": {
+                                "enabled": True,
+                                "deliver_to": [{"kind": "folder", "path": str(self.root / "outside" / "out.txt")}],
+                            },
+                        }
+                    ],
+                    "connections": [],
+                    "output_selection": [],
+                }
+            )
+
+    def test_create_pending_approval_is_idempotent_for_same_step(self):
+        prid, node_id, _job_id, _target_out = self._setup_project_run_at_checkpoint()
+
+        first = self.approval_service.create_pending_approval(prid, node_id)
+        second = self.approval_service.create_pending_approval(prid, node_id)
+
+        self.assertEqual(second["approval_id"], first["approval_id"])
+        self.assertEqual(len(self.db.list_approvals(prid)), 1)
+
+    def test_concurrent_pending_approval_creation_is_atomic(self):
+        prid, node_id, _job_id, _target_out = self._setup_project_run_at_checkpoint()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            approvals = list(
+                pool.map(lambda _unused: self.approval_service.create_pending_approval(prid, node_id), range(2))
+            )
+
+        self.assertEqual(approvals[0]["approval_id"], approvals[1]["approval_id"])
+        self.assertEqual(len(self.db.list_approvals(prid)), 1)
+
     def test_approve_completes_step_and_delivers(self):
         prid, node_id, job_id, target_out = self._setup_project_run_at_checkpoint()
         app = self.approval_service.create_pending_approval(prid, node_id)
@@ -115,6 +158,12 @@ class Phase6aServiceTests(unittest.TestCase):
         )
         self.assertEqual(result["approval"]["status"], "approved")
         self.assertIsNotNone(result["approval"]["edited_artifact_uid"])
+        edited = self.db.artifact_by_uid(result["approval"]["edited_artifact_uid"])
+        self.assertEqual(edited["producer"], "human")
+        edit_lineage = [
+            item for item in self.db.lineage_for_job(job_id) if item["source_artifact_uid"] == "art-draft-1"
+        ]
+        self.assertEqual(edit_lineage[0]["snapshot_sha256"], edited["sha256"])
 
         # Check delivered content is the edited text
         self.assertTrue(target_out.exists())

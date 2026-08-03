@@ -38,6 +38,7 @@ class ProjectSpec:
     connections: list[ProjectConnection]
     output_selection: ProjectOutputSelection
     failure_policy: str = "stop"
+    notification_policy: dict[str, Any] | None = None
     description: str | None = None
     name: str | None = None
     project_id: str | None = None
@@ -52,6 +53,7 @@ class ProjectSpec:
             "description": self.description,
             "version": self.version,
             "failure_policy": self.failure_policy,
+            **({"notification_policy": self.notification_policy} if self.notification_policy else {}),
             "nodes": [
                 {"node_id": n.node_id, "task_id": n.task_id, **({"checkpoint": n.checkpoint} if n.checkpoint else {})}
                 for n in self.nodes
@@ -194,6 +196,11 @@ class ProjectSpec:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ProjectSpec:
+        import json
+
+        notification_policy = payload.get("notification_policy") or payload.get("notification_policy_json")
+        if isinstance(notification_policy, str):
+            notification_policy = json.loads(notification_policy)
         nodes = [
             ProjectNode(node_id=str(n["node_id"]), task_id=str(n["task_id"]), checkpoint=n.get("checkpoint"))
             for n in payload.get("nodes", [])
@@ -215,6 +222,7 @@ class ProjectSpec:
             connections=connections,
             output_selection=ProjectOutputSelection(items=output_items),
             failure_policy=str(payload.get("failure_policy", "stop")),
+            notification_policy=notification_policy,
             description=payload.get("description"),
             name=payload.get("name"),
             project_id=payload.get("project_id"),

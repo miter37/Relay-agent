@@ -9,6 +9,7 @@ from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
 from relay.models import JobRequest, TaskSpec
+from relay.projects.runtime import ProjectRuntime
 from relay.projects.service import ProjectService
 
 
@@ -18,6 +19,7 @@ class Phase6bServiceTests(unittest.TestCase):
         self.home = Path(self.temp.name) / "home"
         self.config = Config(self.home)
         self.config.init()
+        self.config.set("service_isolation_acknowledged", True)
         self.db = Database(self.config.path_value("database_path"))
         self.engine = RelayEngine(self.config, self.db)
         self.comparison_service = ComparisonService(self.db, self.config)
@@ -88,6 +90,7 @@ class Phase6bPartialReexecuteTests(unittest.TestCase):
         self.home = Path(self.temp.name) / "home"
         self.config = Config(self.home)
         self.config.init()
+        self.config.set("service_isolation_acknowledged", True)
         self.db = Database(self.config.path_value("database_path"))
         self.engine = RelayEngine(self.config, self.db)
         self.project_service = ProjectService(self.db, self.engine)
@@ -132,3 +135,32 @@ class Phase6bPartialReexecuteTests(unittest.TestCase):
         self.assertEqual(s2["status"], "pending")
         self.assertIsNone(s2["active_task_run_id"])
         self.assertEqual(self.db.get_project_run(prid)["status"], "running")
+
+    def test_partial_reexecute_worker_override_reaches_child_run(self):
+        task = self.engine.create_task(TaskSpec(name="Worker override", instructions="step"))
+        project = self.project_service.create_project(
+            {
+                "name": "Worker flow",
+                "nodes": [{"node_id": "step", "task_id": task["task_id"]}],
+                "connections": [],
+                "output_selection": [],
+            }
+        )
+        run_id = self.project_service.create_project_run(project["project_id"])["project_run_id"]
+        runtime = ProjectRuntime(self.db, self.engine, self.project_service)
+        runtime.tick_once()
+        first_job = self.db.get_project_step(run_id, "step")["active_task_run_id"]
+        self.db.update_job(first_job, status="COMPLETED", result_status="complete")
+        self.db.update_project_run(run_id, status="completed")
+
+        self.project_service.partial_reexecute(run_id, from_node="step", worker="codex")
+        runtime.tick_once()
+        second_job = self.db.get_job(self.db.get_project_step(run_id, "step")["active_task_run_id"])
+
+        self.assertEqual(second_job["requested_worker"], "codex")
+        self.db.update_job(second_job["job_id"], status="COMPLETED", result_status="complete")
+        self.db.update_project_run(run_id, status="completed")
+        self.project_service.partial_reexecute(run_id, from_node="step")
+        runtime.tick_once()
+        third_job = self.db.get_job(self.db.get_project_step(run_id, "step")["active_task_run_id"])
+        self.assertEqual(third_job["requested_worker"], "auto")

@@ -35,10 +35,12 @@ class Phase6aAPITests(unittest.TestCase):
         self.home = self.root / "home"
         self.config = Config(self.home)
         self.config.init()
+        self.config.set("service_isolation_acknowledged", True)
         self.config.set("daemon_port", self._free_port())
 
         self.allow_dir = self.root / "deliveries"
         self.allow_dir.mkdir(parents=True, exist_ok=True)
+        self.config.set("allowed_delivery_roots", [str(self.allow_dir)])
 
         self.daemon = RelayDaemon(self.config)
         self.thread = threading.Thread(target=self.daemon.serve, daemon=True)

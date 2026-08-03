@@ -2,6 +2,15 @@
 
 ## Active
 
+- **Phases 0–6 are CLI/daemon-core first.** Task, Project, Routine, approval, comparison, operations, and lifecycle GUI surfaces remain deferred.
+- **Compatibility is additive.** Existing Job IDs, Schedules, Runs, outputs, and Relay Home databases are preserved; schema v12 migrates forward with backups.
+- **Artifact handoff is immutable and executable.** Project edges and explicit inputs resolve Artifact UIDs into verified snapshots and lineage before child execution.
+- **Projects and Routines are daemon-owned persistent state machines.** Claims are short atomic DB operations; Worker execution never holds a DB transaction.
+- **Internal orchestration is a service caller.** Project/Routine child Runs must satisfy service-isolation acknowledgement and never masquerade as human submissions.
+- **Human edits are first-class Artifacts.** They record `producer=human`, preserve draft lineage, and override the original role for downstream checkpoint consumers.
+- **Operational delivery is best-effort and observable.** Webhooks are allowlisted, signed when configured, retried, and logged per attempt.
+- **Lifecycle archives are deterministic and integrity checked.** Entry hashes are verified before import and notification secrets are excluded.
+
 - **Relay 1.1.0 represents G5 Custom Agent Apps.** One Agent registry serves CLI, GUI, Jobs, and Schedules.
 - **Custom Agent execution is shell-free.** Manifests provide argv tokens; shell operators and command substitution are rejected.
 - **Enablement is audit-bound.** Executable version and runtime definition hash must match a successful deep audit.

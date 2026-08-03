@@ -55,7 +55,7 @@ class QualityService:
             score = "medium"
         elif status_ok and uncertainty_count == 0 and missing_count == 0 and artifact_count > 0:
             score = "high"
-        elif status_ok and (uncertainty_count <= 2 or missing_count <= 2):
+        elif status_ok and uncertainty_count <= 2 and missing_count <= 2:
             score = "medium"
         else:
             score = "low"
@@ -100,7 +100,7 @@ class QualityService:
         }
 
     def attention_runs(self, status_filter: str = "low", limit: int = 50) -> list[dict[str, Any]]:
-        # Fetch failed/low-quality jobs and project_runs
+        # Fetch failed/low-quality Task Runs and Project Runs.
         jobs = self.db.list_jobs_page(bucket="finished", limit=limit)
         items = []
         for job in jobs:
@@ -119,4 +119,24 @@ class QualityService:
                 )
                 if len(items) >= limit:
                     break
+        if len(items) < limit:
+            for project_run in self.db.list_project_runs(limit=limit):
+                sc = self._score_project_run(project_run)
+                if status_filter != "all" and sc["score"] != status_filter:
+                    continue
+                project = self.db.get_project(project_run["project_id"])
+                items.append(
+                    {
+                        "run_id": project_run["project_run_id"],
+                        "kind": "project_run",
+                        "title": project.get("name") if project else project_run["project_run_id"],
+                        "status": project_run.get("status"),
+                        "score": sc["score"],
+                        "reason": f"Quality score: {sc['score']}",
+                        "created_at": project_run.get("completed_at") or project_run.get("created_at"),
+                    }
+                )
+                if len(items) >= limit:
+                    break
+        items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return items

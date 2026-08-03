@@ -12,7 +12,7 @@ from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     artifact_uid TEXT,
     role TEXT NOT NULL DEFAULT 'output',
     producer_attempt_id INTEGER,
+    producer TEXT NOT NULL DEFAULT 'worker',
     created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_uid
@@ -466,6 +467,10 @@ MIGRATION_10_TO_11 = """
 ALTER TABLE jobs ADD COLUMN receipt_schema_version INTEGER NOT NULL DEFAULT 1;
 """
 
+MIGRATION_11_TO_12 = """
+ALTER TABLE artifacts ADD COLUMN producer TEXT NOT NULL DEFAULT 'worker';
+"""
+
 MIGRATION_9_TO_10 = """
 CREATE TABLE IF NOT EXISTS notification_events (
     event_id TEXT PRIMARY KEY,
@@ -743,6 +748,20 @@ class Database:
                     for statement in MIGRATION_6_TO_7.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for migration in (
+                        MIGRATION_7_TO_8,
+                        MIGRATION_8_TO_9,
+                        MIGRATION_9_TO_10,
+                        MIGRATION_10_TO_11,
+                        MIGRATION_11_TO_12,
+                    ):
+                        for statement in migration.split(";"):
+                            if statement.strip():
+                                try:
+                                    conn.execute(statement)
+                                except sqlite3.OperationalError as exc:
+                                    if "duplicate column" not in str(exc):
+                                        raise
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     self._backfill_job_metadata(conn)
@@ -751,7 +770,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}:
+            elif version in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -812,6 +831,13 @@ class Database:
                             except sqlite3.OperationalError as exc:
                                 if "duplicate column" not in str(exc):
                                     raise
+                    for statement in MIGRATION_11_TO_12.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
@@ -846,6 +872,13 @@ class Database:
                                 if "duplicate column" not in str(exc):
                                     raise
                     for statement in MIGRATION_10_TO_11.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_11_TO_12.split(";"):
                         if statement.strip():
                             try:
                                 conn.execute(statement)
@@ -2009,6 +2042,41 @@ class Database:
                 f"INSERT INTO approvals ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
                 [values[key] for key in keys],
             )
+
+    def get_or_create_pending_approval(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Atomically return the pending approval for a Project step, creating it once."""
+        now = utc_now()
+        values = {
+            "status": "pending",
+            "reviewer": None,
+            "reason": None,
+            "edited_artifact_uid": None,
+            "decided_at": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM approvals WHERE project_run_id=? AND node_id=? AND status='pending' "
+                    "ORDER BY created_at LIMIT 1",
+                    (values["project_run_id"], values["node_id"]),
+                ).fetchone()
+                if existing:
+                    conn.execute("COMMIT")
+                    return dict(existing)
+                keys = list(values)
+                conn.execute(
+                    f"INSERT INTO approvals ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                    [values[key] for key in keys],
+                )
+                created = conn.execute("SELECT * FROM approvals WHERE token=?", (values["token"],)).fetchone()
+                conn.execute("COMMIT")
+                return dict(created)
+            except Exception:
+                conn.rollback()
+                raise
 
     def get_approval(self, token: str) -> dict[str, Any] | None:
         with self.connect() as conn:

@@ -29,6 +29,20 @@ class AttentionService:
                     }
                 )
 
+            failed_projects = self.db.list_project_runs(status="failed", limit=limit)
+            for run in failed_projects:
+                project = self.db.get_project(run["project_id"])
+                items.append(
+                    {
+                        "item_id": f"project-{run['project_run_id']}",
+                        "kind": "failed_project",
+                        "title": project.get("name") if project else run["project_run_id"],
+                        "reference_id": run["project_run_id"],
+                        "reason": "Project Run failed",
+                        "created_at": run.get("completed_at") or run.get("created_at"),
+                    }
+                )
+
         # 2. Checkpoint Approvals
         if kind in {None, "approval"}:
             with self.db.connect() as conn:

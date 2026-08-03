@@ -52,6 +52,7 @@ class Phase6dAttentionDashboardsTests(unittest.TestCase):
                 "submitted_via": "cli",
             }
         )
+        self.db.update_project_run("pr-1", status="failed")
         self.db.create_approval(
             {
                 "approval_id": "app-1",
@@ -66,6 +67,7 @@ class Phase6dAttentionDashboardsTests(unittest.TestCase):
         self.assertGreaterEqual(len(items), 2)
         kinds = {i["kind"] for i in items}
         self.assertIn("failed_job", kinds)
+        self.assertIn("failed_project", kinds)
         self.assertIn("approval", kinds)
 
     def test_dashboards_compute_stats(self):

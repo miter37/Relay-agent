@@ -180,6 +180,7 @@ class Config:
             "allowed_input_roots": [str(self.home / "input"), str(self.home / "requests")],
             "allowed_output_roots": [str(self.home / "results")],
             "allowed_artifact_roots": [str(self.home / "artifacts")],
+            "allowed_delivery_roots": [str(self.home / "deliveries")],
         }
         for key, value in defaults.items():
             self.data.setdefault(key, value)
@@ -200,6 +201,8 @@ class Config:
         ):
             ensure_dir(Path(self.data[key]))
         for root in self.data.get("allowed_input_roots", []):
+            ensure_dir(Path(root))
+        for root in self.data.get("allowed_delivery_roots", []):
             ensure_dir(Path(root))
         return self.path
 

@@ -21,6 +21,7 @@ class Phase4AcceptanceTests(unittest.TestCase):
         self.home = Path(self.temp.name) / "home"
         self.config = Config(self.home)
         self.config.init()
+        self.config.set("service_isolation_acknowledged", True)
         self.db = Database(self.config.path_value("database_path"))
         self.engine = RelayEngine(self.config, self.db)
         self.service = ProjectService(self.db, self.engine)
@@ -193,6 +194,54 @@ class Phase4AcceptanceTests(unittest.TestCase):
         self.assertEqual(second_collect["active_task_run_id"], first_active)
         second_step_runs = self.db.list_project_step_runs(project_run_id, "collect")
         self.assertEqual(len(second_step_runs), 1)
+
+    def test_connection_artifact_is_passed_to_downstream_task_run(self):
+        source = self._create_task("source")
+        consumer = self._create_task("consumer")
+        project = self.service.create_project(
+            {
+                "name": "Artifact handoff",
+                "nodes": [
+                    {"node_id": "source", "task_id": source["task_id"]},
+                    {"node_id": "consumer", "task_id": consumer["task_id"]},
+                ],
+                "connections": [
+                    {"from_node": "source", "from_role": "report", "to_node": "consumer", "to_alias": "A1"}
+                ],
+                "output_selection": [],
+            }
+        )
+        project_run_id = self.service.create_project_run(project["project_id"])["project_run_id"]
+        self.runtime.tick_once()
+        source_step = self.db.get_project_step(project_run_id, "source")
+        source_job_id = source_step["active_task_run_id"]
+        artifact_dir = self.config.path_value("artifact_root") / source_job_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_file = artifact_dir / "report.md"
+        artifact_file.write_text("handoff", encoding="utf-8")
+        self.db.add_artifact(
+            source_job_id,
+            relative_path="report.md",
+            final_path=str(artifact_file),
+            mime_type="text/markdown",
+            size=artifact_file.stat().st_size,
+            sha256=hashlib.sha256(artifact_file.read_bytes()).hexdigest(),
+            artifact_uid="artifact-handoff",
+            role="report",
+        )
+        self.db.update_job(source_job_id, status="COMPLETED", result_status="complete")
+
+        self.runtime.tick_once()
+        self.runtime.tick_once()
+
+        consumer_step = self.db.get_project_step(project_run_id, "consumer")
+        consumer_job = self.db.get_job(consumer_step["active_task_run_id"])
+        self.assertEqual(consumer_job["caller"], "service")
+        manifest = __import__("json").loads(consumer_job["input_manifest_json"])
+        self.assertEqual(manifest[0]["alias"], "A1")
+        self.assertEqual(manifest[0]["artifact_uid"], "artifact-handoff")
+        lineage = self.db.lineage_for_job(consumer_job["job_id"])
+        self.assertEqual(lineage[0]["source_artifact_uid"], "artifact-handoff")
 
 
 if __name__ == "__main__":

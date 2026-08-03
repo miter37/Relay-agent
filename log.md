@@ -1,6 +1,6 @@
-- 2026-08-04 04:00 | Implemented Phase 6 operations and quality hardening (6a-6e): Human checkpoints with awaiting_approval pause and folder delivery, Run/Artifact comparison and diff, semantic search with FTS5 fallback, quality scoring and attention inbox, webhook notifications, routine/project dashboards, deterministic export/import, and receipt schema v1 (383 tests pass, ruff clean).
-- 2026-08-04 02:00 | Implemented Phase 5 Routine integration: schema v8 with routines/routine_runs tables, RoutineSpec model with role-based rule reuse, persistent RoutineRuntime that dispatches ordinary Task Run/Project Run with trigger_type=routine, daemon API/CLI, coexistence with Schedule.
-- 2026-08-04 00:30 | Implemented Phase 4 Project MVP: schema v7, ProjectSpec DAG validation, snapshot-based Task execution, persistent Project runtime with daemon wiring, project APIs/CLI, acceptance flow + restart safety.
+- 2026-08-04 04:00 | Implemented Phase 6 approvals, comparison, quality, attention, notifications, dashboards, lifecycle archives, and receipt schema v1.
+- 2026-08-04 02:00 | Implemented Phase 5 Routine CRUD, persistent Task/Project dispatch, daemon API/CLI, policies, history, and Schedule coexistence.
+- 2026-08-04 00:30 | Implemented Phase 4 Project DAGs, immutable Task snapshots, persistent runtime, Artifact connections, API/CLI, and restart recovery.
 - 2026-08-03 22:30 | Implemented Phase 3 Task registration: schema v6 tasks table, TaskSpec model, Task CRUD, run_task with immutable snapshots, save-as-task promotion, daemon APIs and CLI.
 - 2026-08-03 18:14 | Clarified product direction: any human, Agent, or service may call Relay; any enabled, currently health-verified backend may be a Worker.
 - 2026-08-03 19:30 | Implemented Phase 0 domain compatibility: schema v3 metadata, artifact identity, Run API aliases, and additive compatibility capabilities.
@@ -19,3 +19,5 @@
 - 2026-07-24 11:06 | Fixed live Job polling and CP949 JSON output; added a Markdown Answer tab with copy support; 197 tests pass.
 - 2026-07-24 10:33 | Established the fixed project-memory structure and documented the current Relay v1.1.0/G5 state.
 - 2026-07-24 10:33 | Current G5 branch passes 191 local tests and the full Windows, Ubuntu, macOS PR #14 CI matrix.
+- 2026-08-04 06:55 | Audited Phases 0–6 and fixed migration, Artifact handoff, Routine timing, approvals, notifications, quality, and archive integrity; 398 tests pass.
+- 2026-08-04 07:10 | Final audit fixed delivery allow-lists, missed-run recovery, Project notifications/attention, reexecute worker overrides, and archive/reference integrity; 406 tests pass.

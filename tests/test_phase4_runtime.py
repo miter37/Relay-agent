@@ -23,6 +23,7 @@ class ProjectRuntimeTests(unittest.TestCase):
         self.home = Path(self.temp.name) / "home"
         self.config = Config(self.home)
         self.config.init()
+        self.config.set("service_isolation_acknowledged", True)
         self.db = Database(self.config.path_value("database_path"))
         self.engine = RelayEngine(self.config, self.db)
         self.service = ProjectService(self.db, self.engine)
@@ -119,6 +120,28 @@ class ProjectRuntimeTests(unittest.TestCase):
         final_run = self.db.get_project_run(project_run["project_run_id"])
         self.assertEqual(final_run["status"], "failed")
         self.assertIn("ALL_WORKERS_FAILED", final_run["warnings_json"])
+
+    def test_missing_selected_final_artifact_fails_project_run(self):
+        task = _task(self.engine, "Final")
+        project = self.service.create_project(
+            {
+                "name": "Strict final output",
+                "nodes": [{"node_id": "final", "task_id": task["task_id"]}],
+                "connections": [],
+                "output_selection": [{"node_id": "final", "role": "report"}],
+            }
+        )
+        project_run_id = self.service.create_project_run(project["project_id"])["project_run_id"]
+        self.runtime.tick_once()
+        step = self.db.get_project_step(project_run_id, "final")
+        self.db.update_job(step["active_task_run_id"], status="COMPLETED", result_status="complete")
+
+        for _ in range(3):
+            self.runtime.tick_once()
+
+        run = self.db.get_project_run(project_run_id)
+        self.assertEqual(run["status"], "failed")
+        self.assertIn("PROJECT_ARTIFACT_MISSING", run["warnings_json"])
 
     def test_runtime_does_not_double_dispatch_after_restart(self):
         project_run = self._make_linear_project()

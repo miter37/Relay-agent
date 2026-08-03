@@ -1078,6 +1078,7 @@ class RelayEngine:
         submitted_via: str | None = None,
         trigger_type: str | None = None,
         routine_id: str | None = None,
+        caller: str = "human",
     ) -> tuple[dict[str, Any], bool, dict[str, Any]]:
         task = self.db.get_task(task_id)
         if not task:
@@ -1090,6 +1091,7 @@ class RelayEngine:
             timeout_seconds=task.get("timeout_seconds"),
             profile=task.get("profile") or "web-research",
             result_format=task.get("result_format") or "json",
+            caller=caller,
         )
         if request:
             base.task = request.task or instructions
@@ -1159,7 +1161,7 @@ class RelayEngine:
         request: JobRequest | None = None,
         queued: bool = False,
         submitted_via: str | None = None,
-        caller: str = "service",
+        caller: str = "human",
     ) -> tuple[dict[str, Any], bool]:
         instructions = task_snapshot.get("instructions") or ""
         base = JobRequest(
@@ -1171,6 +1173,7 @@ class RelayEngine:
             timeout_seconds=task_snapshot.get("timeout_seconds"),
             profile=task_snapshot.get("profile") or "web-research",
             result_format=task_snapshot.get("result_format") or "json",
+            caller=caller,
         )
         if request:
             base.task = request.task or instructions

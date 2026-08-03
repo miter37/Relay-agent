@@ -2,57 +2,37 @@
 
 ## Actors and entry points
 
-- Humans and external agents submit work through `relay`, the daemon API, or the GUI.
-- The daemon authenticates local requests, owns scheduling and maintenance loops, and queues Jobs.
-- `RelayEngine` resolves Agent definitions, enforces readiness, supervises processes, validates results, and records history.
+- Humans and external agents submit work through `relay`, the authenticated daemon API, or the GUI.
+- The daemon owns Job queues plus Schedule, Project, and Routine reconciliation loops.
+- `RelayEngine` resolves Agent definitions, enforces readiness and service isolation, snapshots inputs, supervises workers, validates results, and records history.
+- Internal Project/Routine execution records `caller=service`; `trigger_type` explains why a Run exists and `submitted_via` records its entry surface.
 
-## Main components
+## Durable objects
 
-- Built-in adapters support Claude, Codex, and Antigravity.
-- `AgentRegistry` combines built-ins, legacy configured workers, and manifest-backed Agent Apps.
-- Agent App manifests live under `Relay Home/config/agent-apps/`; capability specs bind executable version and definition hash.
-- Schedules snapshot replayable Job inputs and create ordinary linked Jobs for each occurrence.
-- SQLite stores Jobs, attempts, events, artifacts, Artifact lineage, Schedules, Schedule runs, and capability audit history.
-- `/health` includes manual-check results for all enabled Agents; the GUI presents unhealthy Agent IDs in its header badge.
-- Running Job diagnostics use in-memory supervisor telemetry; manual Check results are persisted as `PROGRESS_CHECKED` events and rendered separately from Agent stdout/stderr.
+| Product object | Persistence and rule |
+|---|---|
+| Task Run / Run | Existing `jobs` row; `run_id` aliases immutable `job_id` for compatibility. |
+| Task | Versioned mutable definition in `tasks`; every Run keeps an immutable Task snapshot. |
+| Attempt | `attempts` child row with the actual Worker and audit-bound execution metadata. |
+| Artifact | Immutable UID, role, SHA-256, producer, and Relay-managed file. |
+| Lineage | `artifact_lineage` records source Artifact, consumer Run, alias, and verified snapshot hashes. |
+| Project | Versioned DAG definition containing Task nodes, Artifact-to-input connections, and final-output selection. |
+| Project Run | Persistent state machine with immutable Project/Task snapshots and child Task Runs. |
+| Routine | Timezone-aware recurring Task/Project target with overlap, missed-run, version, input, and notification policies. |
+| Approval | Persistent checkpoint decision; human edits are new `producer=human` Artifacts linked to the original. |
 
-## Phase 0 domain compatibility
-
-Phase 0 adds the domain vocabulary without renaming or replacing existing stored objects:
-
-| Product term | Current persisted object | Compatibility rule |
-|---|---|---|
-| Task Run / Run | `jobs` row | `run_id` is an API alias for the existing immutable `job_id`; existing Job IDs remain valid forever. |
-| Task | No separate persisted object yet | Phase 0 Jobs are ad-hoc Runs with `task_id = NULL`; Task CRUD begins in Phase 3. |
-| Attempt | `attempts` row | One Run may have multiple Attempts because of fallback; each Attempt keeps its worker and audit-bound execution metadata. |
-| Artifact | `artifacts` row | New rows receive an immutable external UID, role, and producer Attempt reference; legacy rows remain readable. |
-| Project Run | No separate persisted object yet | Not introduced in Phase 0. |
-| Routine | `schedules` and `schedule_runs` | Existing Schedule tables remain canonical; Routine is a future product alias, not a table rename. |
-
-The database column names and foreign keys remain unchanged. In particular, `jobs.job_id` remains the storage key referenced by `schedules.source_job_id` and `schedule_runs.job_id`; API and GUI terminology may use Run, but storage compatibility does not depend on a rename.
-
-A Run records both **why it ran** (`trigger_type`: manual, api, schedule, or rerun) and **where it was submitted** (`submitted_via`: cli, gui, hermes, schedule, or legacy). These fields are intentionally separate. The immutable `task_snapshot_json` records the normalized execution definition at creation time; the existing `request_json` remains the replayable request payload for backward-compatible reruns.
-
-## Data flow
+## Execution flow
 
 ```text
-CLI / GUI / external caller
-        ↓
-authenticated daemon API
-        ↓
-Job queue → Agent registry → verified adapter → supervised process
-        ↓
-result and artifact validation → SQLite history and delivered outputs
+caller → Task Run → Attempt(s) → Artifact(s)
+                    ↑              ↓ immutable UID + hash snapshot
+Project/Routine ────┘        next Task Run input manifest + lineage
 ```
 
-Phase 1 Artifact inputs are selected by immutable Artifact UID and copied into a Relay Home snapshot before execution. A consumer Run stores its canonical input manifest and `artifact_lineage` rows; the worker receives only the snapshot copy, not an arbitrary source path.
+Project connections are resolved strictly by `(source node, Artifact role)` and passed into child Task Runs as A1/A2-style Artifact inputs. The engine copies each input into Relay Home, verifies size and SHA-256, and records consumer lineage before a Worker receives it. Missing or ambiguous selected final Artifacts fail the Project Run.
 
-Phase 2 adds a derived SQLite FTS5 index for Run summaries and eligible text Artifact content. The existing Jobs and Artifacts tables remain authoritative; the index can be rebuilt and never determines whether execution or delivery succeeds. Search returns candidate summaries and IDs first, while Artifact content is read explicitly by UID with byte limits. Raw logs and scrubbed non-replayable task text are not indexed.
+Routine ticks execute only due occurrences. Atomic occurrence claims prevent duplicate dispatch; pinned-version mismatches fail instead of silently running a newer Task/Project. Existing Schedules remain independent and continue producing ordinary linked Jobs.
 
-Registered Task definitions do not exist yet. Phase 2 searches ad-hoc Runs (`task_id` may remain NULL); Task CRUD and versioning remain Phase 3 work.
+Checkpoint nodes pause in `awaiting_approval`. Approval resumes descendants, rejection fails the run, and approved human edits take precedence for downstream role resolution. Folder delivery is restricted to configured `allowed_delivery_roots` at both definition and delivery time.
 
-The synchronous CLI path uses the same engine and validation contracts without requiring the daemon.
-
-For interactive file-writing Jobs, `target_path` identifies the real Working folder while `artifact_path` remains
-the Relay-managed copy destination. Agents edit an isolated `target/` copy; Relay applies its verified delta to the
-real folder and copies changed/created files to artifacts. Target-writing Jobs are not Schedule-eligible.
+FTS5 indexes are derived and rebuildable. Semantic search currently uses the pluggable embedding interface and explicitly falls back to FTS5 when no backend is configured. Quality attention covers Task and Project Runs. Export archives are deterministic, hash-manifested, redact notification secrets and local Artifact paths, and optionally round-trip Task Runs, Artifacts, and lineage.

@@ -2,14 +2,22 @@
 
 ## Verified facts
 
-- Relay version is 1.1.0 and the daemon health contract reports API schema revision 5 with minimum GUI version 1.1.0. Source: current code and tests.
-- G5 Agent Apps use normalized JSON manifests, argv execution without shell reparsing, definition-bound deep audits, and recoverable deletion. Source: `relay/agent_apps.py`, adapters, and G5 tests.
-- Pre-save GUI tests do not persist an Agent App; successful definitions receive an expiring one-use token. Source: current Agent App service and GUI tests.
-- Custom manifest subprocesses inherit operational and explicitly declared environment variables; built-in and legacy behavior remains compatible. Source: adapter and supervisor tests.
-- CI checks Ruff, release building, the full unit suite on three OSes and three Python versions, plus GUI smoke on all three OSes. Source: `.github/workflows/ci.yml`.
+- Relay version remains 1.1.0; daemon API schema revision remains 5 with minimum GUI 1.1.0. Source: current code and tests.
+- Current SQLite schema is v12. Legacy v0 databases now receive the complete additive migration chain through Tasks, Projects, Routines, approvals, notifications, receipt versioning, and Artifact producer metadata. Source: `relay/db.py` and migration fixtures.
+- Project Artifact connections become real child Run input manifests and lineage rows, not display-only metadata. Source: Project runtime acceptance regression.
+- Project and Routine child Runs use `caller=service` and therefore enforce service-isolation acknowledgement. Source: engine/runtime tests.
+- Routine ticks do not dispatch future occurrences; pinned mismatches fail with `ROUTINE_VERSION_PIN_INVALID`. Source: Routine runtime regressions.
+- Pending checkpoint creation is atomic per Project step; human edits are producer=human Artifacts with original-draft lineage. Source: approval concurrency and edit tests.
+- Checkpoint delivery paths are validated against `allowed_delivery_roots` when Projects are created/updated and again immediately before copy-out. Source: Phase 6a path-boundary tests.
+- Routine failure policies invoke webhook notifications, retry up to the configured attempt count, and log every attempt. Source: Phase 6d service tests.
+- Project failure notification policies and Project Runs are included in quality/attention views. Source: Phase 6c/6d regression tests.
+- Export manifests carry per-entry SHA-256 values, redact webhook secrets, and optional import restores Task Runs and Artifact bytes under constrained paths. Source: Phase 6e round-trip/security tests.
+- Import rename conflicts rewrite Task IDs inside Project definitions and Project IDs inside Routine targets. Source: lifecycle reference-integrity regression.
+- The full local suite has 398 tests; the final verification also runs Ruff, format check, compileall, and the release builder. CI status is not inferred from local results.
 
-## Current uncertainty
+## Current uncertainty and deferred scope
 
-- Draft PR #14 is not yet merged, so G5 remains development-branch truth rather than the released `master` baseline.
-- Real provider CLI behavior on Linux and macOS is not field-validated by CI.
-- README's `relay add-agent` section still primarily describes the legacy registration path and needs reconciliation with Agent Apps.
+- GUI management surfaces for Phase 3–6 domain objects are deferred; the CLI and daemon API are the complete interfaces today.
+- No concrete embedding provider ships with Relay; semantic queries use the documented FTS5 fallback unless an operator supplies one.
+- Export/import currently focuses Run restoration on Task Runs and their Artifacts/lineage; full Project/Routine operational-history restoration remains follow-up work.
+- The Phase 0–6 branch is local and ahead of its remote; no push, PR, merge, or release cut is implied.
