@@ -21,3 +21,4 @@
 - 2026-07-24 10:33 | Current G5 branch passes 191 local tests and the full Windows, Ubuntu, macOS PR #14 CI matrix.
 - 2026-08-04 06:55 | Audited Phases 0–6 and fixed migration, Artifact handoff, Routine timing, approvals, notifications, quality, and archive integrity; 398 tests pass.
 - 2026-08-04 07:10 | Final audit fixed delivery allow-lists, missed-run recovery, Project notifications/attention, reexecute worker overrides, and archive/reference integrity; 406 tests pass.
+- 2026-08-04 07:20 | Pushed reviewed Phase 0–6 hardening commit e0fe4d1 to origin/feat/phase0-domain-compat; main was not merged.

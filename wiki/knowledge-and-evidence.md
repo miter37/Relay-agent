@@ -20,4 +20,4 @@
 - GUI management surfaces for Phase 3–6 domain objects are deferred; the CLI and daemon API are the complete interfaces today.
 - No concrete embedding provider ships with Relay; semantic queries use the documented FTS5 fallback unless an operator supplies one.
 - Export/import currently focuses Run restoration on Task Runs and their Artifacts/lineage; full Project/Routine operational-history restoration remains follow-up work.
-- The Phase 0–6 branch is local and ahead of its remote; no push, PR, merge, or release cut is implied.
+- The Phase 0–6 branch `feat/phase0-domain-compat` is pushed to origin at the reviewed commit; no main merge, PR, or release cut is implied.

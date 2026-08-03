@@ -5,4 +5,3 @@
 - [ ] Add a production embedding backend; current semantic search intentionally falls back to FTS5.
 - [ ] Extend lifecycle import/export from Task Runs to full Project/Routine operational-history restoration.
 - [ ] Define and implement overlap `queue`/`cancel_previous` semantics for Routines; current tested behavior is `skip`, `allow_parallel`, and due/recovery handling.
-- [ ] Decide whether to push, open a PR, or locally merge `feat/phase0-domain-compat`; the branch remains unpublished from this review.
