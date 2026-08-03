@@ -133,5 +133,27 @@ class Phase6aServiceTests(unittest.TestCase):
         self.assertFalse(target_out.exists())
 
 
+    def test_project_runtime_pauses_at_checkpoint_node(self):
+        from relay.projects.runtime import ProjectRuntime
+        runtime = ProjectRuntime(self.db, self.engine, self.project_service)
+
+        prid, node_id, job_id, target_out = self._setup_project_run_at_checkpoint()
+
+        # Step is running; complete the job
+        self.db.update_job(job_id, status="COMPLETED", result_status="complete")
+
+        # Tick runtime
+        runtime.tick_once()
+
+        # Step should be awaiting_approval
+        step = self.db.get_project_step(prid, node_id)
+        self.assertEqual(step["status"], "awaiting_approval")
+
+        # Approval token should exist in DB
+        apps = self.db.list_approvals(prid)
+        self.assertEqual(len(apps), 1)
+        self.assertEqual(apps[0]["status"], "pending")
+
+
 if __name__ == "__main__":
     unittest.main()

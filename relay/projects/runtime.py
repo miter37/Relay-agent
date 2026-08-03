@@ -89,24 +89,50 @@ class ProjectRuntime:
             job_status = job.get("status")
             if job_status in {"COMPLETED"}:
                 artifacts = self.engine.db.artifacts_for_job(task_run_id)
-                self.db.update_project_step(
-                    project_run_id,
-                    step["node_id"],
-                    status="completed",
-                    active_task_run_id=task_run_id,
-                    completed_at=utc_now(),
-                    resolved_connections_json=json.dumps(
-                        [
-                            {
-                                "step_attempt": a.get("task_run_id"),
-                                "artifact_uid": a.get("artifact_uid"),
-                                "role": a.get("role"),
-                                "relative_path": a.get("relative_path"),
-                            }
-                            for a in artifacts
-                        ]
-                    ),
-                )
+                # Check if step has a checkpoint
+                nodes = snapshot.get("project_definition", {}).get("nodes", [])
+                node_def = next((n for n in nodes if n["node_id"] == step["node_id"]), None)
+                has_checkpoint = bool(node_def and node_def.get("checkpoint", {}).get("enabled"))
+
+                if has_checkpoint:
+                    from ..approvals.service import ApprovalService
+                    approval_service = ApprovalService(self.db, self.engine, self.engine.config)
+                    approval_service.create_pending_approval(project_run_id, step["node_id"])
+                    self.db.update_project_step(
+                        project_run_id,
+                        step["node_id"],
+                        active_task_run_id=task_run_id,
+                        resolved_connections_json=json.dumps(
+                            [
+                                {
+                                    "step_attempt": a.get("task_run_id"),
+                                    "artifact_uid": a.get("artifact_uid"),
+                                    "role": a.get("role"),
+                                    "relative_path": a.get("relative_path"),
+                                }
+                                for a in artifacts
+                            ]
+                        ),
+                    )
+                else:
+                    self.db.update_project_step(
+                        project_run_id,
+                        step["node_id"],
+                        status="completed",
+                        active_task_run_id=task_run_id,
+                        completed_at=utc_now(),
+                        resolved_connections_json=json.dumps(
+                            [
+                                {
+                                    "step_attempt": a.get("task_run_id"),
+                                    "artifact_uid": a.get("artifact_uid"),
+                                    "role": a.get("role"),
+                                    "relative_path": a.get("relative_path"),
+                                }
+                                for a in artifacts
+                            ]
+                        ),
+                    )
             elif job_status in {"FAILED", "CANCELLED"}:
                 self.db.update_project_step(
                     project_run_id,
