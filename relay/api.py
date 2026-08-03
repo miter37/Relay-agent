@@ -12,6 +12,8 @@ from .progress import diagnose_progress
 from .schedules.snapshots import validate_source_job
 from .search import normalize_limit, normalize_max_bytes, result_summary, snippet
 
+RECEIPT_SCHEMA_VERSION = 1
+
 RESULT_STATUS = {
     "completed": "COMPLETED",
     "partial": "PARTIAL",
@@ -168,6 +170,7 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             schedule_reason = exc.code
     else:
         schedule_reason = "SCHEDULE_NOT_ELIGIBLE"
+    detail["receipt_schema_version"] = RECEIPT_SCHEMA_VERSION
     detail["actions"] = {
         "can_cancel": status in {"QUEUED", "PREPARING", "RUNNING", "VALIDATING", "DELIVERING"},
         "can_check_progress": status
@@ -871,3 +874,6 @@ def notify_test_api(engine, payload: dict[str, Any]) -> dict[str, Any]:
     except RelayError as exc:
         res = {"ok": False, "status_code": None, "error": exc.message}
     return {"ok": True, "delivery": res}
+
+def get_receipt_schema_version() -> dict[str, Any]:
+    return {"ok": True, "receipt_schema_version": RECEIPT_SCHEMA_VERSION}
