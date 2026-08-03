@@ -12,7 +12,7 @@ from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
 from .util import new_artifact_uid, utc_now
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -203,6 +203,70 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    definition_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_projects_created ON projects(created_at);
+
+CREATE TABLE IF NOT EXISTS project_runs (
+    project_run_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    project_version INTEGER NOT NULL,
+    project_snapshot_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    submitted_via TEXT NOT NULL,
+    final_artifact_ids_json TEXT,
+    warnings_json TEXT,
+    receipt_json TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_runs_status ON project_runs(status);
+
+CREATE TABLE IF NOT EXISTS project_run_steps (
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    active_task_run_id TEXT,
+    input_manifest_json TEXT,
+    resolved_connections_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_run_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_steps_active ON project_run_steps(active_task_run_id);
+
+CREATE TABLE IF NOT EXISTS project_step_runs (
+    project_run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    step_attempt INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL,
+    worker_override TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY (project_run_id, node_id, step_attempt),
+    UNIQUE (task_run_id),
+    FOREIGN KEY (project_run_id, node_id) REFERENCES project_run_steps(project_run_id, node_id) ON DELETE CASCADE
+);
+
 """
 
 MIGRATION_0_TO_1 = """
@@ -302,8 +366,72 @@ MIGRATION_4_TO_5 = """
 -- FTS5 tables are created opportunistically after the schema migration.
 """
 
-MIGRATION_5_TO_6 = """
-CREATE TABLE IF NOT EXISTS tasks (
+MIGRATION_6_TO_7 = """
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    definition_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_projects_created ON projects(created_at);
+
+CREATE TABLE IF NOT EXISTS project_runs (
+    project_run_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    project_version INTEGER NOT NULL,
+    project_snapshot_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    submitted_via TEXT NOT NULL,
+    final_artifact_ids_json TEXT,
+    warnings_json TEXT,
+    receipt_json TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_runs_status ON project_runs(status);
+
+CREATE TABLE IF NOT EXISTS project_run_steps (
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    active_task_run_id TEXT,
+    input_manifest_json TEXT,
+    resolved_connections_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_run_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_steps_active ON project_run_steps(active_task_run_id);
+
+CREATE TABLE IF NOT EXISTS project_step_runs (
+    project_run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    step_attempt INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL,
+    worker_override TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY (project_run_id, node_id, step_attempt),
+    UNIQUE (task_run_id),
+    FOREIGN KEY (project_run_id, node_id) REFERENCES project_run_steps(project_run_id, node_id) ON DELETE CASCADE
+);
+"""
+
+MIGRATION_5_TO_6 = """CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
@@ -411,6 +539,9 @@ class Database:
                     for statement in MIGRATION_5_TO_6.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for statement in MIGRATION_6_TO_7.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     self._backfill_job_metadata(conn)
@@ -419,7 +550,7 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version in {1, 2, 3, 4, 5}:
+            elif version in {1, 2, 3, 4, 5, 6}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
@@ -439,6 +570,9 @@ class Database:
                         if statement.strip():
                             conn.execute(statement)
                     for statement in MIGRATION_5_TO_6.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_6_TO_7.split(";"):
                         if statement.strip():
                             conn.execute(statement)
                     self._backfill_artifact_uids(conn)
@@ -1231,3 +1365,206 @@ class Database:
                 (task_id, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+    def create_project(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"version": 1, **row, "deleted_at": None,
+                  "created_at": row.get("created_at", now), "updated_at": row.get("updated_at", now)}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO projects ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_project(self, project_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_projects(self, *, name: str | None = None, include_deleted: bool = False, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM projects"
+        params: list[Any] = []
+        where: list[str] = []
+        if not include_deleted:
+            where.append("deleted_at IS NULL")
+        if name:
+            where.append("name LIKE ?")
+            params.append(f"%{name}%")
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def update_project(self, project_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        existing = self.get_project(project_id)
+        if not existing:
+            raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
+        if existing.get("deleted_at") is not None:
+            raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
+        changes["version"] = existing["version"] + 1
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE projects SET {','.join(f'{key}=?' for key in keys)} WHERE project_id=?",
+                [changes[key] for key in keys] + [project_id],
+            )
+
+    def soft_delete_project(self, project_id: str) -> bool:
+        existing = self.get_project(project_id)
+        if not existing:
+            raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
+        if existing.get("deleted_at") is not None:
+            return False
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE projects SET deleted_at=?, version=version+1, updated_at=? WHERE project_id=?",
+                (utc_now(), utc_now(), project_id),
+            )
+        return True
+
+    def create_project_run(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"status": "accepted", **row, "created_at": row.get("created_at", now), "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO project_runs ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_project_run(self, project_run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM project_runs WHERE project_run_id=?", (project_run_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_project_run(self, project_run_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE project_runs SET {','.join(f'{key}=?' for key in keys)} WHERE project_run_id=?",
+                [changes[key] for key in keys] + [project_run_id],
+            )
+
+    def list_project_runs(self, *, project_id: str | None = None, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM project_runs"
+        params: list[Any] = []
+        where: list[str] = []
+        if project_id:
+            where.append("project_id=?")
+            params.append(project_id)
+        if status:
+            where.append("status=?")
+            params.append(status)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def create_or_update_project_step(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"updated_at": now, **row}
+        keys = list(values)
+        placeholders = ",".join("?" for _ in keys)
+        update_clause = ",".join(f"{k}=excluded.{k}" for k in keys if k != "project_run_id" and k != "node_id")
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO project_run_steps ({','.join(keys)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(project_run_id, node_id) DO UPDATE SET {update_clause}",
+                [values[k] for k in keys],
+            )
+
+    def get_project_step(self, project_run_id: str, node_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM project_run_steps WHERE project_run_id=? AND node_id=?",
+                (project_run_id, node_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_project_steps(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM project_run_steps WHERE project_run_id=? ORDER BY node_id",
+                (project_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_project_step(self, project_run_id: str, node_id: str, **changes: Any) -> None:
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE project_run_steps SET {','.join(f'{key}=?' for key in keys)} WHERE project_run_id=? AND node_id=?",
+                [changes[key] for key in keys] + [project_run_id, node_id],
+            )
+
+    def append_project_step_run(self, project_run_id: str, node_id: str, task_run_id: str, worker_override: str | None) -> int:
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM project_step_runs WHERE task_run_id=?", (task_run_id,)
+            ).fetchone()
+            if existing:
+                raise RelayError("STEP_RUN_DUPLICATE", f"Task Run already attached: {task_run_id}")
+            attempt_row = conn.execute(
+                "SELECT COALESCE(MAX(step_attempt), 0) + 1 FROM project_step_runs WHERE project_run_id=? AND node_id=?",
+                (project_run_id, node_id),
+            ).fetchone()
+            attempt = int(attempt_row[0])
+            conn.execute(
+                "INSERT INTO project_step_runs (project_run_id, node_id, step_attempt, task_run_id, worker_override, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'queued', ?)",
+                (project_run_id, node_id, attempt, task_run_id, worker_override, utc_now()),
+            )
+            return attempt
+
+    def list_project_step_runs(self, project_run_id: str | None = None, node_id: str | None = None, *, task_run_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM project_step_runs"
+        params: list[Any] = []
+        where: list[str] = []
+        if project_run_id:
+            where.append("project_run_id=?")
+            params.append(project_run_id)
+        if node_id:
+            where.append("node_id=?")
+            params.append(node_id)
+        if task_run_id:
+            where.append("task_run_id=?")
+            params.append(task_run_id)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY project_run_id, node_id, step_attempt"
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def claim_ready_steps(self, project_run_id: str, runnable: str, claimed: str) -> list[tuple[str, str]]:
+        claimed_list: list[tuple[str, str]] = []
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    "SELECT project_run_id, node_id FROM project_run_steps WHERE project_run_id=? AND status=?",
+                    (project_run_id, runnable),
+                ).fetchall()
+                for row in rows:
+                    cur = conn.execute(
+                        "UPDATE project_run_steps SET status=?, updated_at=? "
+                        "WHERE project_run_id=? AND node_id=? AND status=?",
+                        (claimed, utc_now(), row["project_run_id"], row["node_id"], runnable),
+                    )
+                    if cur.rowcount > 0:
+                        claimed_list.append((row["project_run_id"], row["node_id"]))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.rollback()
+                raise
+        return claimed_list
