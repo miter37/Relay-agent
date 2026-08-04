@@ -20,6 +20,7 @@ class TaskDBTests(unittest.TestCase):
             "task_id": "task-1",
             "name": "Weekly report",
             "description": None,
+            "task_summary": None,
             "instructions": "Write a weekly report",
             "default_worker": "auto",
             "fallback_enabled": 1,
@@ -39,6 +40,11 @@ class TaskDBTests(unittest.TestCase):
         task = self.db.get_task("task-1")
         self.assertEqual(task["name"], "Weekly report")
         self.assertEqual(task["version"], 1)
+
+    def test_task_summary_persists_and_updates(self):
+        self.db.create_task(self._row(task_summary="Collect weekly HBM evidence."))
+        self.db.update_task("task-1", task_summary="Compare weekly HBM evidence.")
+        self.assertEqual(self.db.get_task("task-1")["task_summary"], "Compare weekly HBM evidence.")
 
     def test_get_missing_task_returns_none(self):
         self.assertIsNone(self.db.get_task("nope"))

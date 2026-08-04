@@ -83,7 +83,7 @@ class ScheduleDetailView(QWidget):
             ("Next run", schedule.get("next_run_at_utc")),
             ("Last run", schedule.get("last_run")),
             ("Time zone", schedule.get("timezone")),
-            ("Source job", schedule.get("source_job_id")),
+            ("Source Task Run", schedule.get("source_job_id")),
             ("Output folder", schedule.get("output_root")),
             ("Attention", schedule.get("attention_code")),
         )

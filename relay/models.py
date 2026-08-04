@@ -94,6 +94,7 @@ class TaskSpec:
     name: str
     instructions: str
     description: str | None = None
+    task_summary: str | None = None
     default_worker: str | None = "auto"
     fallback_enabled: bool = True
     timeout_seconds: int | None = None
@@ -112,6 +113,15 @@ class TaskSpec:
             raise RelayError("TASK_NAME_REQUIRED", "A task name is required.")
         if not str(self.instructions or "").strip():
             raise RelayError("TASK_INVALID", "Task instructions are required.")
+        if self.task_summary is not None:
+            from .validation import normalize_summary
+
+            self.task_summary = normalize_summary(
+                self.task_summary,
+                max_chars=500,
+                field="task_summary",
+                error_code="TASK_INVALID",
+            )
         if self.result_format and self.result_format not in {"json", "txt"}:
             raise RelayError("TASK_INVALID", "result_format must be json or txt.")
 
@@ -124,6 +134,7 @@ class TaskSpec:
             "task_id": self.task_id or new_job_id(),
             "name": self.name,
             "description": self.description,
+            "task_summary": self.task_summary,
             "instructions": self.instructions,
             "default_worker": self.default_worker,
             "fallback_enabled": 1 if self.fallback_enabled else 0,
@@ -143,6 +154,7 @@ class TaskSpec:
         allowed = {
             "name",
             "description",
+            "task_summary",
             "instructions",
             "default_worker",
             "fallback_enabled",
@@ -159,6 +171,15 @@ class TaskSpec:
                 continue
             if key == "fallback_enabled":
                 out[key] = 1 if value else 0
+            elif key == "task_summary":
+                from .validation import normalize_summary
+
+                out[key] = normalize_summary(
+                    value,
+                    max_chars=500,
+                    field="task_summary",
+                    error_code="TASK_INVALID",
+                )
             else:
                 out[key] = value
         return out
@@ -179,6 +200,7 @@ class TaskSpec:
             name=name,
             instructions=instructions,
             description=description,
+            task_summary=snapshot.get("task_summary") or description,
             default_worker=worker,
             fallback_enabled=bool(fallback) if fallback is not None else True,
             timeout_seconds=snapshot.get("timeout_seconds") or request.get("timeout_seconds"),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,12 @@ class CodexAdapter(Adapter):
         if model:
             args.extend(["--model", str(model)])
         if ctx.result_format == "json":
+            if ctx.schema_file.exists():
+                schema = json.loads(ctx.schema_file.read_text(encoding="utf-8"))
+                properties = schema.get("properties") or {}
+                required = list(schema.get("required") or [])
+                schema["required"] = [*required, *(key for key in properties if key not in required)]
+                ctx.schema_file.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
             args.extend(["--output-schema", str(ctx.schema_file)])
         args.append("-")
         prompt = (
@@ -129,6 +136,8 @@ class CodexAdapter(Adapter):
             "RELAY_ARTIFACT_DIR": str(ctx.artifact_dir),
             "RELAY_RESULT_FORMAT": ctx.result_format,
         }
+        if os.environ.get("RELAY_MISSION_E2E") == "1":
+            env["RELAY_MOCK_SINGLE_ARTIFACT"] = "1"
         return args, prompt, env
 
     def normalize_output(self, ctx: AdapterContext, stdout_path: Path, stderr_path: Path) -> None:

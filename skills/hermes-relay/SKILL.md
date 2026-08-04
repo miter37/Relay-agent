@@ -19,7 +19,7 @@ Relay는 Claude Code, Codex CLI, Antigravity CLI를 직접 대화형으로 실�
 1. 사용자 요청에서 위임 가능한 작업을 분리한다.
 2. 명확한 UTF-8 Markdown 작업 지시서를 작성한다.
 3. Relay CLI로 작업을 제출한다.
-4. `job_id`를 보존하고 완료될 때까지 상태를 추적한다.
+4. `task_run_id`를 보존하고 완료될 때까지 상태를 추적한다.
 5. 최종 receipt와 결과 파일을 읽는다.
 6. `partial`, `uncertainties`, `missing_items`를 확인한다.
 7. 결과의 품질과 사용자 요청 충족 여부를 검토한다.
@@ -71,7 +71,7 @@ Relay는 결과 내용의 사실성, 최신성, 출처 신뢰도, 논리적 타�
   **`submit → wait/status → result → 결과 파일 읽기 → 사용자 전달`** 순서를 사용한다.
 - 긴 지시문은 CLI 인자에 직접 넣지 말고 UTF-8 Markdown `--task-file`로 전달한다.
 - 자동 파싱이 필요한 모든 명령에는 가능한 한 `--machine`을 사용한다.
-- `relay submit`이 반환한 `job_id`를 즉시 저장한다.
+- `relay submit`이 반환한 `task_run_id`를 즉시 저장한다.
 - exit code나 stdout 문장만으로 성공을 판단하지 않는다.
 - 최종 receipt의 상태와 `result_path`에 있는 실제 파일을 모두 확인한다.
 - JSON 결과의 `uncertainties`, `missing_items`, `partial` 상태를 숨기지 않는다.
@@ -318,7 +318,7 @@ JSON의 장점:
 
 ```sh
 relay submit \
-  --task-file "/relay/requests/job-1001.md" \
+  --task-file "/relay/requests/task-run-1001.md" \
   --attach "/relay/input/report.pdf" \
   --attach "/relay/input/data.csv" \
   --machine
@@ -328,7 +328,7 @@ PowerShell:
 
 ```powershell
 relay submit `
-  --task-file "D:\Relay\requests\job-1001.md" `
+  --task-file "D:\Relay\requests\task-run-1001.md" `
   --attach "D:\Relay\input\report.pdf" `
   --attach "D:\Relay\input\data.csv" `
   --machine
@@ -352,23 +352,92 @@ relay submit `
 
 Hermes, Telegram gateway, 서비스형 에이전트에서는 이 절차를 기본으로 사용한다.
 
-### Step 0. 검색 우선
+### Step 0. Catalog 우선 후보 선정
 
-유사한 과거 결과가 있을 가능성이 있으면 새 작업을 제출하기 전에 후보 요약을 검색한다.
+Relay는 후보를 검색하거나 추천하지 않는다. Agent가 요청의 목적·입력·기대 출력·제약을 분리한 뒤
+Catalog의 요약을 읽고 후보를 선정한다.
+
+등록 Task를 찾을 때:
 
 ```sh
-relay search "<topic>" --kind runs --status completed --limit 10 --machine
-relay artifact show <ARTIFACT_UID> --machine
-relay artifact read <ARTIFACT_UID> --max-bytes 65536 --machine
+relay catalog tasks --machine
+relay task show <TASK_ID> --machine
 ```
 
-가장 최근 Run과 가장 최근 성공 Run을 구분한다. 이전 결과물을 재사용할 때는 임의의 파일 경로를 `--attach`로 넘기지 말고 immutable Artifact UID를 Phase 1 입력으로 사용한다.
+1. `items`의 `name`, `task_summary`, Version과 계약 존재 여부를 읽는다.
+2. `next_cursor`가 있으면 다음 페이지를 읽는다. 반환 순서를 relevance 순서로 해석하지 않는다.
+3. 목적에 맞는 후보를 3~5개 고른 뒤 각 후보의 상세 정의를 조회한다.
+4. `instructions`, input schema, output contract, validation policy, 기본 Worker/profile을 비교한다.
+5. 목적과 계약이 모두 맞는 Task만 선택한다. 적합한 후보가 없으면 기존 Task를 억지로 실행하지 말고 새 Task 생성을 제안한다.
+
+과거 Task Run과 결과물을 찾을 때:
+
+```sh
+relay catalog task-runs --status completed --machine
+relay result <TASK_RUN_ID> --machine
+relay artifact show <ARTIFACT_UID> --machine
+relay artifact read <ARTIFACT_UID> --max-bytes 65536 --machine
+relay artifact lineage <ARTIFACT_UID> --machine
+```
+
+1. `task_summary`, `result_summary`, `failure_reason`, status를 먼저 비교한다.
+2. 실패 Task Run은 재사용 후보에서 제외하고 동일 실패를 피하기 위한 참고로만 사용한다.
+3. 유망 Task Run의 receipt와 Artifact metadata를 확인한 뒤 필요한 Artifact만 읽는다.
+4. 새 작업에 결과물을 넣을 때는 임의의 파일 경로가 아니라 immutable Artifact UID와 alias를 사용한다.
 
 ```sh
 relay run "Update the previous report" --input-artifact <ARTIFACT_UID>=A1 --machine
 ```
 
-결과에는 source Run ID, Artifact UID, alias를 남긴다. 검색 결과 전체, raw logs, 대형 Artifact를 무조건 context에 넣지 않는다.
+5. 새 Task Run 완료 후 `relay run-lineage <TASK_RUN_ID> --machine`으로 source Artifact UID와
+`binding_mode=snapshot` 연결을 확인한다. 상위 응답이나 실행 기록에는 선택한 Task ID/Version,
+source Task Run ID, Artifact UID와 alias를 남긴다.
+
+기존 `relay search --kind runs|artifacts`는 명시적인 전문 검색이나 상세 본문 탐색이 필요할 때만
+보조적으로 사용한다. 검색 결과 전체, raw logs, 대형 Artifact를 무조건 context에 넣지 않는다.
+
+### Step 0.1. Machine response contract
+
+Catalog capability를 먼저 읽어 canonical field를 확인한다.
+
+```sh
+relay catalog --machine
+```
+
+Agent는 다음 canonical field를 사용한다.
+
+| 응답 | Canonical field |
+|---|---|
+| Catalog 목록 | `items` |
+| Artifact 본문 | `text` |
+| Catalog status | lowercase (`completed`, `failed` 등) |
+| 기존 Project 목록 alias | `items`를 우선하고 `projects`는 compatibility alias |
+| 기존 Project Run 목록 alias | `items`를 우선하고 `project_runs`는 compatibility alias |
+
+### Step 0.2. Project discovery
+
+등록 Project를 선택해야 하는 요청이면:
+
+```sh
+relay catalog projects --machine
+relay project show <PROJECT_ID> --machine
+```
+
+1. `project_summary`, Version, node/connection 수와 output role을 읽는다.
+2. `next_cursor`가 있으면 모든 필요한 페이지를 읽는다.
+3. 유망 Project 3~5개의 전체 정의를 조회해 Task 계약과 Artifact 연결을 비교한다.
+4. 목적과 입력·출력 계약이 맞는 Project만 선택한다. 맞는 Project가 없으면 새 Project 설계를 제안한다.
+
+과거 Project Run을 재사용하거나 실패 원인을 조사할 때:
+
+```sh
+relay catalog project-runs --machine
+relay project-run show <PROJECT_RUN_ID> --machine
+relay project-run steps <PROJECT_RUN_ID> --machine
+relay project-run receipt <PROJECT_RUN_ID> --machine
+```
+
+`status`, `project_summary`, step counts, `failure_reason`을 먼저 읽고, 필요한 final Artifact만 UID로 조회한다. Project Run snapshot이나 전체 DAG를 Catalog 목록에서 직접 읽는다고 가정하지 않는다.
 
 ### Step 1. 경로와 request ID 생성
 
@@ -456,7 +525,7 @@ relay submit `
 {
   "ok": true,
   "status": "queued",
-  "job_id": "01KY4K...",
+  "task_run_id": "01KY4K...",
   "deduplicated": false
 }
 ```
@@ -467,7 +536,7 @@ relay submit `
 {
   "ok": true,
   "status": "reused",
-  "job_id": "01KY4K...",
+  "task_run_id": "01KY4K...",
   "deduplicated": true
 }
 ```
@@ -475,9 +544,9 @@ relay submit `
 처리 규칙:
 
 1. `ok=false`이면 `error_code`, `error_message`, `details`를 읽고 실패 처리한다.
-2. `ok=true`이면 `job_id`를 즉시 저장한다.
+2. `ok=true`이면 `task_run_id`를 즉시 저장한다.
 3. `status=reused`도 정상일 수 있다.
-4. reused 작업을 새로 submit하지 말고 해당 `job_id`의 현재 상태를 조회한다.
+4. reused 작업을 새로 submit하지 말고 해당 `task_run_id`의 현재 상태를 조회한다.
 5. request ID가 잘못 재사용된 정황이 있으면 사용자 요청과 결과가 같은지 확인한다.
 
 ### Step 4. 상태 조회 또는 대기
@@ -485,13 +554,13 @@ relay submit `
 즉시 조회:
 
 ```sh
-relay status <JOB_ID> --machine
+relay status <TASK_RUN_ID> --machine
 ```
 
 완료까지 일정 시간 대기:
 
 ```sh
-relay wait <JOB_ID> --timeout 1800 --interval 2 --machine
+relay wait <TASK_RUN_ID> --timeout 1800 --interval 2 --machine
 ```
 
 `wait --timeout`은 **상위 에이전트가 기다리는 시간**이다.
@@ -513,8 +582,8 @@ submit의 `--timeout`은 **worker 실행 제한 시간**이다. 둘을 혼동하
 - `failed`
 - `cancelled`
 
-`relay wait`가 `TIMEOUT`을 반환했다고 해서 worker job 자체가 실패한 것은 아니다.
-먼저 `relay status <JOB_ID> --machine`으로 실제 상태를 다시 확인한다.
+`relay wait`가 `TIMEOUT`을 반환했다고 해서 Task Run 자체가 실패한 것은 아니다.
+먼저 `relay status <TASK_RUN_ID> --machine`으로 실제 상태를 다시 확인한다.
 같은 작업을 즉시 재제출하지 않는다.
 
 ### Step 5. 최종 receipt 회수
@@ -522,7 +591,7 @@ submit의 `--timeout`은 **worker 실행 제한 시간**이다. 둘을 혼동하
 종료 상태가 되면 다음을 실행한다.
 
 ```sh
-relay result <JOB_ID> --machine
+relay result <TASK_RUN_ID> --machine
 ```
 
 최종 성공 receipt 예:
@@ -531,10 +600,10 @@ relay result <JOB_ID> --machine
 {
   "ok": true,
   "status": "completed",
-  "job_id": "01KY4K...",
+  "task_run_id": "01KY4K...",
   "worker": "claude",
-  "result_path": "/relay/results/job-1001.json",
-  "artifact_path": "/relay/artifacts/job-1001",
+  "result_path": "/relay/results/task-run-1001.json",
+  "artifact_path": "/relay/artifacts/task-run-1001",
   "result_status": "complete",
   "uncertainties_count": 1,
   "missing_items_count": 0,
@@ -550,7 +619,7 @@ relay result <JOB_ID> --machine
 
 - `ok`
 - `status`
-- `job_id`
+- `task_run_id`
 - `worker`
 - `result_path`
 - `artifact_path`
@@ -564,7 +633,7 @@ relay result <JOB_ID> --machine
 
 중요한 상태명 차이:
 
-- Relay job receipt: `completed`
+- Relay Task Run receipt: `completed`
 - 결과 JSON 내부: `complete`
 
 두 값을 혼동하지 않는다.
@@ -736,7 +805,7 @@ Relay의 형식 검증을 통과했더라도 상위 에이전트는 다음을 �
 - 생성된 파일명
 - 핵심 검증 한계
 
-Relay의 내부 job 로그나 모든 운영 세부사항을
+Relay의 내부 실행 로그나 모든 운영 세부사항을
 정상 완료 응답에 불필요하게 나열하지 않는다.
 
 ---
@@ -795,7 +864,7 @@ relay config enable-worker antigravity
 ### `TIMEOUT` / `STALL_TIMEOUT`
 
 - submit의 실행 timeout인지 wait의 대기 timeout인지 구분한다.
-- wait timeout이면 job 상태를 다시 확인한다.
+- wait timeout이면 Task Run 상태를 다시 확인한다.
 - worker 실행 timeout이면 receipt의 attempts와 logs를 확인한다.
 - 단순히 동일 작업을 즉시 새로 submit하지 않는다.
 - 작업 범위를 줄이거나 timeout 조정이 합리적인 경우에만 재실행한다.
@@ -805,7 +874,7 @@ relay config enable-worker antigravity
 - provider가 Relay 출력 계약을 지키지 못한 것이다.
 - fallback이 켜져 있으면 Relay가 다른 worker를 시도할 수 있다.
 - 최종 실패하면 잘못된 stdout을 정상 결과로 대신 전달하지 않는다.
-- 필요하면 `relay logs <JOB_ID> --machine`으로 원인을 확인한다.
+- 필요하면 `relay logs <TASK_RUN_ID> --machine`으로 원인을 확인한다.
 
 ### `ALL_WORKERS_FAILED`
 
@@ -827,16 +896,16 @@ relay config enable-worker antigravity
 ### 상세 상태
 
 ```sh
-relay show <JOB_ID> --machine
+relay show <TASK_RUN_ID> --machine
 ```
 
-job, attempts, events, artifacts를 상세히 확인할 때 사용한다.
+Task Run, Attempt, Event, Artifact를 상세히 확인할 때 사용한다.
 정상 처리 중 매번 호출할 필요는 없다.
 
 ### 로그 확인
 
 ```sh
-relay logs <JOB_ID> --machine
+relay logs <TASK_RUN_ID> --machine
 ```
 
 각 worker 시도의 stdout/stderr tail을 확인한다.
@@ -845,7 +914,7 @@ relay logs <JOB_ID> --machine
 ### 취소
 
 ```sh
-relay cancel <JOB_ID> --machine
+relay cancel <TASK_RUN_ID> --machine
 ```
 
 사용자가 명시적으로 취소했거나,
@@ -854,10 +923,10 @@ relay cancel <JOB_ID> --machine
 ### 재실행
 
 ```sh
-relay rerun <JOB_ID> --machine
+relay rerun <TASK_RUN_ID> --machine
 ```
 
-기존 요청을 새 job으로 다시 실행한다.
+기존 요청을 새 Task Run으로 다시 실행한다.
 단, 출력·아티팩트 경로는 새 기본 경로가 사용될 수 있다.
 다음 경우에만 사용한다.
 
@@ -866,7 +935,7 @@ relay rerun <JOB_ID> --machine
 - 기존 결과가 핵심 요구를 충족하지 못했고 새 실행이 필요하다.
 
 단순 네트워크 응답 손실이나 wait timeout 때문에 재실행하지 않는다.
-먼저 기존 `job_id`를 조회한다.
+먼저 기존 `task_run_id`를 조회한다.
 
 ### 이력
 
@@ -876,7 +945,7 @@ relay history --status failed --limit 20 --machine
 ```
 
 기존 작업을 찾거나 운영 진단할 때 사용한다.
-새 요청 처리 중 기존 job ID를 알고 있다면 history보다 직접 status/result를 사용한다.
+새 요청 처리 중 기존 Task Run ID를 알고 있다면 history보다 직접 status/result를 사용한다.
 
 ---
 
@@ -935,8 +1004,8 @@ relay "현재 디렉터리의 app.py 버그를 찾아줘" \
 
 1. 서브태스크마다 별도 task file, request ID, result path, artifact path를 만든다.
 2. 가능한 경우 여러 job을 먼저 submit한다.
-3. 각 `job_id`를 별도로 저장한다.
-4. 각 job을 wait/status로 추적한다.
+3. 각 `task_run_id`를 별도로 저장한다.
+4. 각 Task Run을 wait/status로 추적한다.
 5. 모든 결과를 읽고 상위 에이전트가 통합한다.
 6. 서로 충돌하는 결론은 숨기지 않고 비교한다.
 7. 최종 사용자 요청에 맞는 하나의 종합 답변으로 전달한다.
@@ -997,8 +1066,8 @@ relay submit `
 ### 회수
 
 ```powershell
-relay wait <JOB_ID> --timeout 2100 --machine
-relay result <JOB_ID> --machine
+relay wait <TASK_RUN_ID> --timeout 2100 --machine
+relay result <TASK_RUN_ID> --machine
 ```
 
 ### 사용자 전달
@@ -1212,7 +1281,7 @@ IF 사용자가 Relay 또는 특정 외부 worker 사용을 요청했거나
     3. UTF-8 task Markdown을 작성한다.
     4. 고유 request/result/artifact 경로를 만든다.
     5. relay submit ... --caller hermes --machine 을 실행한다.
-    6. JSON receipt에서 job_id를 저장한다.
+    6. JSON receipt에서 task_run_id를 저장한다.
     7. relay wait 또는 status로 terminal state까지 추적한다.
     8. relay result로 최종 receipt를 읽는다.
     9. completed 또는 partial일 때만 result_path 파일을 읽는다.

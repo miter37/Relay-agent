@@ -54,7 +54,7 @@ class Phase6eAPITests(unittest.TestCase):
         # GET /v1/receipt-schema
         rs = self.client.request("GET", "/v1/receipt-schema")
         self.assertTrue(rs["ok"])
-        self.assertEqual(rs["receipt_schema_version"], 1)
+        self.assertEqual(rs["receipt_schema_version"], 2)
 
         # POST /v1/export
         export_out = Path(self.temp.name) / "exported.zip"

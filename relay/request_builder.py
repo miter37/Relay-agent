@@ -18,6 +18,7 @@ STANDARD_JSON_SCHEMA = {
         "schema_version": {"type": "string"},
         "status": {"type": "string", "enum": ["complete", "partial", "failed"]},
         "answer": {"type": "string"},
+        "summary": {"type": "string", "maxLength": 1000},
         "sources": {"type": "array", "items": {"type": "string"}},
         "uncertainties": {"type": "array", "items": {"type": "string"}},
         "missing_items": {"type": "array", "items": {"type": "string"}},
@@ -75,6 +76,7 @@ def build_request_markdown(
 ) -> str:
     format_rules = (
         "Return a UTF-8 JSON object matching schema.json exactly. Do not wrap it in Markdown fences.\n"
+        "- Include an optional summary containing 1–3 short sentences describing the work performed and the actual result.\n"
         "- For every requested artifact, include an artifacts entry with relative_path, description, encoding, "
         "and exact content. Use encoding=utf-8 for text and encoding=base64 for binary content. Relay "
         "materializes this payload into the artifact directory, so a valid payload is sufficient to complete "

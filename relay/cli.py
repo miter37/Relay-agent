@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from . import __version__
 from .adapters.generic import (
@@ -66,6 +67,7 @@ COMMANDS = {
     "export",
     "import",
     "receipt-schema",
+    "catalog",
 }
 
 
@@ -83,7 +85,7 @@ def _preprocess(argv: list[str]) -> list[str]:
 
 def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = False) -> None:
     parser.add_argument("task", nargs=None if task_required else "?", default="")
-    parser.add_argument("--title", help="Optional short title shown in job history")
+    parser.add_argument("--title", help="Optional short title shown in Task Run history")
     parser.add_argument("--task-file")
     parser.add_argument("--worker", default="auto", help="Agent ID from the built-in or custom Agent registry")
     parser.add_argument("--fallback", action="store_true", default=None)
@@ -155,12 +157,12 @@ def _add_schedule_parsers(sub: argparse._SubParsersAction) -> None:
         "schedule",
         help="Create and control daemon-managed schedules",
         description=(
-            "Register a replayable completed Job as a timezone-aware Schedule, preview occurrences, "
+            "Register a replayable completed Task Run as a timezone-aware Schedule, preview occurrences, "
             "and control its lifecycle. Schedule execution is performed by the local daemon."
         ),
         epilog=(
             "Examples:\n"
-            "  relay schedule create --from-job JOB_ID --name report --type daily --time 09:00 --timezone Asia/Seoul\n"
+            "  relay schedule create --from-task-run TASK_RUN_ID --name report --type daily --time 09:00 --timezone Asia/Seoul\n"
             "  relay schedule preview --type weekly --weekday 1 --time 09:00 --timezone Asia/Seoul\n"
             "  relay schedule run-now SCHEDULE_ID"
         ),
@@ -168,8 +170,10 @@ def _add_schedule_parsers(sub: argparse._SubParsersAction) -> None:
     )
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
 
-    create = schedule_sub.add_parser("create", help="Create a Schedule from a completed replayable Job")
-    create.add_argument("--from-job", dest="source_job_id", required=True)
+    create = schedule_sub.add_parser("create", help="Create a Schedule from a completed replayable Task Run")
+    source = create.add_mutually_exclusive_group(required=True)
+    source.add_argument("--from-task-run", dest="source_job_id", metavar="TASK_RUN_ID")
+    source.add_argument("--from-job", dest="source_job_id", metavar="JOB_ID", help=argparse.SUPPRESS)
     create.add_argument("--name", required=True)
     _add_schedule_rule_args(create)
     _add_schedule_policy_args(create)
@@ -218,6 +222,7 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     create.add_argument("--profile", default="web-research")
     create.add_argument("--format", default="json", choices=["json", "txt"])
     create.add_argument("--description")
+    create.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
     create.add_argument("--machine", action="store_true")
 
     list_p = task_sub.add_parser("list", help="List registered Tasks")
@@ -242,6 +247,7 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--profile")
     update.add_argument("--format", choices=["json", "txt"])
     update.add_argument("--description")
+    update.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
     update.add_argument("--machine", action="store_true")
 
     delete_p = task_sub.add_parser("delete", help="Delete a Task definition")
@@ -252,13 +258,13 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     run_p.add_argument("task_id")
     _add_request_args(run_p, task_required=False)
 
-    runs_p = task_sub.add_parser("runs", help="List Run history for a Task")
+    runs_p = task_sub.add_parser("runs", help="List Task Run history for a Task")
     runs_p.add_argument("task_id")
     runs_p.add_argument("--limit", type=int, default=50)
     runs_p.add_argument("--machine", action="store_true")
 
-    sat = task_sub.add_parser("save-as-task", help="Promote a Run into a stored Task")
-    sat.add_argument("job_id")
+    sat = task_sub.add_parser("save-as-task", help="Promote a Task Run into a stored Task")
+    sat.add_argument("job_id", metavar="TASK_RUN_ID")
     sat.add_argument("--name", required=True)
     sat.add_argument("--description")
     sat.add_argument("--machine", action="store_true")
@@ -275,6 +281,7 @@ def _task_cli_request(args, config: Config) -> Any:
             "name": args.name,
             "instructions": instructions,
             "description": args.description,
+            "task_summary": args.task_summary,
             "worker": args.worker,
             "fallback_enabled": args.fallback if args.fallback is not None else True,
             "timeout_seconds": args.timeout,
@@ -300,6 +307,8 @@ def _task_cli_request(args, config: Config) -> Any:
             payload["instructions"] = instructions
         if args.description is not None:
             payload["description"] = args.description
+        if args.task_summary is not None:
+            payload["task_summary"] = args.task_summary
         if args.worker:
             payload["default_worker"] = args.worker
         if args.fallback is not None:
@@ -697,7 +706,7 @@ def _approval_cli_request(args, config: Config) -> Any:
 def _add_compare_parsers(sub: argparse._SubParsersAction) -> None:
     compare = sub.add_parser(
         "compare",
-        help="Compare Runs or diff Artifacts",
+        help="Compare Task/Project Runs or diff Artifacts",
         description="Compare two Task/Project Runs or inspect diffs between two Artifacts.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -728,8 +737,8 @@ def _compare_cli_request(args, config: Config) -> Any:
 def _add_quality_parsers(sub: argparse._SubParsersAction) -> None:
     quality = sub.add_parser(
         "quality",
-        help="Inspect Run quality scores and attention items",
-        description="Score Run quality or list items requiring attention.",
+        help="Inspect Task/Project Run quality scores and attention items",
+        description="Score Task/Project Run quality or list items requiring attention.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     qsub = quality.add_subparsers(dest="quality_command", required=True)
@@ -738,7 +747,7 @@ def _add_quality_parsers(sub: argparse._SubParsersAction) -> None:
     run_q.add_argument("run_id")
     run_q.add_argument("--machine", action="store_true")
 
-    att_q = qsub.add_parser("attention", help="List runs needing attention")
+    att_q = qsub.add_parser("attention", help="List Task/Project Runs needing attention")
     att_q.add_argument("--status", default="low", choices=["low", "medium", "high", "all"])
     att_q.add_argument("--limit", type=int, default=50)
     att_q.add_argument("--machine", action="store_true")
@@ -747,8 +756,8 @@ def _add_quality_parsers(sub: argparse._SubParsersAction) -> None:
 def _add_search_semantic_parsers(sub: argparse._SubParsersAction) -> None:
     sem = sub.add_parser(
         "search-semantic",
-        help="Semantic search across Runs or Artifacts",
-        description="Search Runs or Artifacts using vector similarity embeddings.",
+        help="Semantic search across Task Runs or Artifacts",
+        description="Search Task Runs or Artifacts using vector similarity embeddings.",
     )
     sem.add_argument("query")
     sem.add_argument("--kind", choices=["runs", "artifacts"], default="runs")
@@ -776,7 +785,7 @@ def _add_attention_parsers(sub: argparse._SubParsersAction) -> None:
     att = sub.add_parser(
         "attention",
         help="Inspect items needing operator attention",
-        description="List failed jobs, checkpoint approvals, and low quality runs needing attention.",
+        description="List failed Task Runs, checkpoint approvals, and low quality Task Runs needing attention.",
     )
     asub = att.add_subparsers(dest="attention_command", required=True)
     list_p = asub.add_parser("list", help="List attention items")
@@ -841,8 +850,8 @@ def _notify_cli_request(args, config: Config) -> Any:
 def _add_export_parsers(sub: argparse._SubParsersAction) -> None:
     exp = sub.add_parser(
         "export",
-        help="Export Relay definitions and optional Runs to an archive",
-        description="Serialize Tasks, Projects, Routines, and Runs to a deterministic ZIP archive.",
+        help="Export Relay definitions and optional Task Runs to an archive",
+        description="Serialize Tasks, Projects, Routines, and Task Runs to a deterministic ZIP archive.",
     )
     exp.add_argument("--include-runs", action="store_true")
     exp.add_argument("--out")
@@ -889,6 +898,94 @@ def _receipt_schema_cli_request(args, config: Config) -> Any:
     return client.request("GET", "/v1/receipt-schema")
 
 
+def _add_catalog_parsers(sub: argparse._SubParsersAction) -> None:
+    catalog = sub.add_parser(
+        "catalog",
+        help="Read bounded Task, Project, Task Run, and Project Run catalogs for Agent selection",
+        description="Read stable catalog metadata. Relay does not rank or search candidates for the caller.",
+    )
+    catalog.add_argument("--machine", action="store_true")
+    catalog_sub = catalog.add_subparsers(dest="catalog_command")
+
+    tasks = catalog_sub.add_parser("tasks", help="List registered Tasks")
+    tasks.add_argument("--limit", type=int, default=100)
+    tasks.add_argument("--cursor")
+    tasks.add_argument("--updated-since", dest="updated_since")
+    tasks.add_argument("--machine", action="store_true")
+
+    runs = catalog_sub.add_parser("task-runs", help="List Task Run catalog entries")
+    runs.add_argument("--limit", type=int, default=100)
+    runs.add_argument("--cursor")
+    runs.add_argument("--status")
+    runs.add_argument("--task-id")
+    runs.add_argument("--from", dest="date_from")
+    runs.add_argument("--to", dest="date_to")
+    runs.add_argument("--machine", action="store_true")
+
+    projects = catalog_sub.add_parser("projects", help="List registered Projects")
+    projects.add_argument("--limit", type=int, default=100)
+    projects.add_argument("--cursor")
+    projects.add_argument("--updated-since", dest="updated_since")
+    projects.add_argument("--machine", action="store_true")
+
+    project_runs = catalog_sub.add_parser("project-runs", help="List Project Run catalog entries")
+    project_runs.add_argument("--limit", type=int, default=100)
+    project_runs.add_argument("--cursor")
+    project_runs.add_argument("--status")
+    project_runs.add_argument("--project-id")
+    project_runs.add_argument("--from", dest="date_from")
+    project_runs.add_argument("--to", dest="date_to")
+    project_runs.add_argument("--machine", action="store_true")
+
+
+def _catalog_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    command = getattr(args, "catalog_command", None)
+    if command is None:
+        return client.request("GET", "/v1/catalog")
+    if command == "tasks":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "updated_since": args.updated_since,
+        }
+        return client.request("GET", "/v1/catalog/tasks?" + urlencode({k: v for k, v in values.items() if v is not None}))
+    if command == "task-runs":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "status": args.status,
+            "task_id": args.task_id,
+            "from": args.date_from,
+            "to": args.date_to,
+        }
+        return client.request(
+            "GET", "/v1/catalog/task-runs?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
+    if command == "projects":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "updated_since": args.updated_since,
+        }
+        return client.request(
+            "GET", "/v1/catalog/projects?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
+    if command == "project-runs":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "status": args.status,
+            "project_id": args.project_id,
+            "from": args.date_from,
+            "to": args.date_to,
+        }
+        return client.request(
+            "GET", "/v1/catalog/project-runs?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
+    raise RelayError("INVALID_REQUEST", f"Unknown catalog command: {command}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="relay",
@@ -924,7 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Run a task synchronously and return the final receipt as JSON. "
             "Use this for one-off queries where you need the result inline. "
-            "For background jobs that should survive shell exit, use 'relay submit'. "
+            "For Task Runs that should survive shell exit, use 'relay submit'. "
             "The selected worker (claude, codex, antigravity, or any registered agent) "
             "executes the task in a sandbox under RELAY_HOME; fallback workers run if enabled."
         ),
@@ -945,8 +1042,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Submit a task to the daemon and queue it for background execution. "
             "The daemon is started automatically if it is not running. "
-            "Use 'relay wait <job_id>' or 'relay status <job_id>' to monitor progress, "
-            "and 'relay result <job_id>' to retrieve the final receipt."
+            "Use 'relay wait <task_run_id>' or 'relay status <task_run_id>' to monitor progress, "
+            "and 'relay result <task_run_id>' to retrieve the final receipt."
         ),
         epilog=(
             "Examples:\n"
@@ -963,46 +1060,46 @@ def build_parser() -> argparse.ArgumentParser:
             name,
             description=(
                 {
-                    "status": "Return the current status of a job. Uses the daemon when available, otherwise reads the local database.",
-                    "result": "Return the final receipt and result/artifact paths of a completed job.",
-                    "show": "Return detailed local job data including attempts, events, and artifacts.",
+                    "status": "Return the current status of a Task Run. Uses the daemon when available, otherwise reads the local database.",
+                    "result": "Return the final receipt and result/artifact paths of a completed Task Run.",
+                    "show": "Return detailed Task Run data including Attempts, events, and Artifacts.",
                     "logs": "Return attempt metadata and the tail of stdout/stderr logs (last 8,000 characters each).",
-                    "cancel": "Request cancellation of a queued or running job. Submitted to the daemon when available.",
-                    "rerun": "Reconstruct the saved request and execute it again as a new job.",
+                    "cancel": "Request cancellation of a queued or running Task Run. Submitted to the daemon when available.",
+                    "rerun": "Reconstruct the saved request and execute it again as a new Task Run.",
                 }[name]
             ),
-            epilog=f"Examples:\n  relay {name} <job_id> --machine",
+            epilog=f"Examples:\n  relay {name} <task_run_id> --machine",
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
-        p.add_argument("job_id")
+        p.add_argument("job_id", metavar="TASK_RUN_ID")
         p.add_argument("--machine", action="store_true")
 
     wait = sub.add_parser(
         "wait",
-        help="Block until a job completes",
+        help="Block until a Task Run completes",
         description=(
-            "Poll a job until it reaches a terminal state (completed, partial, failed, or cancelled) "
+            "Poll a Task Run until it reaches a terminal state (completed, partial, failed, or cancelled) "
             "or until the timeout expires. Returns the final receipt. "
-            "Use this from scripts that need to chain work after the job is done."
+            "Use this from scripts that need to chain work after the Task Run is done."
         ),
         epilog=(
             "Examples:\n"
-            "  relay wait <job_id> --timeout 1800\n"
-            "  relay wait <job_id> --timeout 60 --interval 0.5 --machine"
+            "  relay wait <task_run_id> --timeout 1800\n"
+            "  relay wait <task_run_id> --timeout 60 --interval 0.5 --machine"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    wait.add_argument("job_id")
+    wait.add_argument("job_id", metavar="TASK_RUN_ID")
     wait.add_argument("--timeout", type=int, default=0)
     wait.add_argument("--interval", type=float, default=2.0)
     wait.add_argument("--machine", action="store_true")
 
     history = sub.add_parser(
         "history",
-        help="List recent jobs",
+        help="List recent Task Runs",
         description=(
-            "List recent jobs from the local database, optionally filtered by status. "
-            "Use 'relay status <job_id>' or 'relay show <job_id>' for details on a specific job."
+            "List recent Task Runs from the local database, optionally filtered by status. "
+            "Use 'relay status <task_run_id>' or 'relay show <task_run_id>' for details on a specific Task Run."
         ),
         epilog=("Examples:\n  relay history --limit 20\n  relay history --status failed --machine"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1270,6 +1367,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_export_parsers(sub)
     _add_import_parsers(sub)
     _add_receipt_schema_parsers(sub)
+    _add_catalog_parsers(sub)
     project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
     _add_project_run_parsers(project_run_sub)
     search = sub.add_parser("search", help="Search previous Runs or Artifacts")
@@ -1524,7 +1622,7 @@ def _run_add_agent_wizard(
     display_name = prompt_fn("Display name", default=worker_id.capitalize())
     command = prompt_fn("Executable path or name on PATH", default=worker_id)
     template = prompt_fn(
-        "Command template (placeholders substituted per job)",
+        "Command template (placeholders substituted per Task Run)",
         default=_DEFAULT_AGENT_COMMAND_TEMPLATE,
     )
     default_model = prompt_fn("Default model (blank for none)", default="")
@@ -1672,7 +1770,7 @@ def _emit(value: Any, machine: bool = False) -> None:
     if isinstance(value, dict):
         if value.get("ok") and value.get("status") in {"completed", "partial"}:
             print(f"Status: {value.get('status')}")
-            print(f"Job: {value.get('job_id')}")
+            print(f"Task Run: {value.get('job_id')}")
             if value.get("worker"):
                 print(f"Worker: {value.get('worker')}")
             if value.get("result_path"):
@@ -1684,7 +1782,7 @@ def _emit(value: Any, machine: bool = False) -> None:
             return
         if value.get("status") in {"queued", "running", "created", "reused"}:
             print(f"Status: {value.get('status')}")
-            print(f"Job: {value.get('job_id')}")
+            print(f"Task Run: {value.get('job_id')}")
             return
     _print_json(value, compact=False)
 
@@ -1762,7 +1860,7 @@ def _ensure_daemon(config: Config) -> RPCClient:
 def _logs(engine: RelayEngine, job_id: str) -> dict:
     job = engine.db.get_job(job_id)
     if not job:
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     attempts = engine.db.attempts_for_job(job_id)
     result = []
     for attempt in attempts:
@@ -1775,7 +1873,7 @@ def _logs(engine: RelayEngine, job_id: str) -> dict:
                 text = Path(path).read_text(encoding="utf-8", errors="replace")
                 item[key.replace("_path", "_tail")] = text[-8000:]
         result.append(item)
-    return {"ok": True, "job_id": job_id, "attempts": result}
+    return {"ok": True, "job_id": job_id, "task_run_id": job_id, "attempts": result}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1858,7 +1956,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "logs":
             _emit(_logs(engine, args.job_id), machine)
         elif args.command == "history":
-            _emit({"ok": True, "jobs": db.list_jobs(args.status, args.limit)}, machine)
+            runs = db.list_jobs(args.status, args.limit)
+            _emit({"ok": True, "task_runs": runs, "jobs": runs}, machine)
         elif args.command == "search":
             from .api import search_artifacts, search_runs
 
@@ -1966,6 +2065,8 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_import_cli_request(args, config), machine)
         elif args.command == "receipt-schema":
             _emit(_receipt_schema_cli_request(args, config), machine)
+        elif args.command == "catalog":
+            _emit(_catalog_cli_request(args, config), machine)
         elif args.command == "project-run":
             _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":

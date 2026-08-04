@@ -22,6 +22,26 @@ REQUIRED_JSON_FIELDS = {
 }
 
 
+def normalize_summary(
+    value: Any,
+    *,
+    max_chars: int,
+    field: str,
+    error_code: str = "SCHEMA_MISMATCH",
+) -> str | None:
+    """Return a plain bounded summary without changing the source document."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RelayError(error_code, f"{field} must be a string", True)
+    text = " ".join(value.split())
+    if not text:
+        return None
+    if len(text) <= max_chars:
+        return text
+    return text[: max(1, max_chars - 1)].rstrip() + "…"
+
+
 def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
     if not path.is_file():
         raise RelayError("OUTPUT_NOT_CREATED", f"Result file not found: {path}", True)
@@ -41,6 +61,8 @@ def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
     for field, expected in REQUIRED_JSON_FIELDS.items():
         if field not in value or not isinstance(value[field], expected):
             raise RelayError("SCHEMA_MISMATCH", f"Field {field!r} is missing or has the wrong type", True)
+    if "summary" in value:
+        value["summary"] = normalize_summary(value["summary"], max_chars=1000, field="summary")
     if value.get("schema_version") != "1.0":
         raise RelayError("SCHEMA_MISMATCH", "schema_version must be 1.0", True)
     if value["status"] not in {"complete", "partial", "failed"}:

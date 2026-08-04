@@ -51,6 +51,14 @@ class TaskEngineFlowTests(unittest.TestCase):
         self.assertEqual(updated["instructions"], "Updated report")
         self.assertTrue(self.engine.delete_task(task["task_id"]))
 
+    def test_registered_task_summary_is_stored_and_pinned_in_run_snapshot(self):
+        task = self._create_task(task_summary="Collect and summarize weekly HBM evidence.")
+        self.assertEqual(task["task_summary"], "Collect and summarize weekly HBM evidence.")
+        job, _, _ = self.engine.run_task(task["task_id"], queued=True, submitted_via="cli")
+        snapshot = json.loads(job["task_snapshot_json"])
+        self.assertEqual(snapshot["task_definition"]["task_summary"], task["task_summary"])
+        self.assertEqual(job["task_summary"], task["task_summary"])
+
     def test_run_task_stamps_task_id_and_snapshot(self):
         task = self._create_task(default_worker="codex", result_format="json")
         job, reused, task_ref = self.engine.run_task(task["task_id"], queued=True, submitted_via="cli")

@@ -37,6 +37,7 @@ class ProjectService:
             "project_id": project_id,
             "name": spec.name or "Untitled",
             "description": spec.description,
+            "project_summary": spec.project_summary or spec.description or spec.name,
             "version": 1,
             "definition_json": spec.to_snapshot(),
         }
@@ -54,6 +55,7 @@ class ProjectService:
             project_id,
             name=spec.name or existing["name"],
             description=spec.description,
+            project_summary=spec.project_summary or existing.get("project_summary") or spec.description or spec.name,
             definition_json=snapshot,
         )
         return self.db.get_project(project_id)
@@ -170,6 +172,7 @@ class ProjectService:
         project_snapshot = {
             "project_id": project_id,
             "project_version": project["version"],
+            "project_summary": project.get("project_summary") or project.get("description") or project.get("name"),
             "project_definition": json.loads(project["definition_json"]),
             "task_snapshots": task_snapshots,
             "external_inputs": staged_inputs,

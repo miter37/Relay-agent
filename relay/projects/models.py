@@ -7,6 +7,7 @@ from typing import Any
 
 from ..errors import RelayError
 from ..util import canonical_json
+from ..validation import normalize_summary
 
 _ALIAS_PATTERN = re.compile(r"^A[1-9][0-9]*$")
 _POLICY_VALUES = {"stop"}
@@ -40,6 +41,7 @@ class ProjectSpec:
     failure_policy: str = "stop"
     notification_policy: dict[str, Any] | None = None
     description: str | None = None
+    project_summary: str | None = None
     name: str | None = None
     project_id: str | None = None
     version: int = 1
@@ -51,6 +53,7 @@ class ProjectSpec:
         return {
             "name": self.name,
             "description": self.description,
+            "project_summary": self.project_summary,
             "version": self.version,
             "failure_policy": self.failure_policy,
             **({"notification_policy": self.notification_policy} if self.notification_policy else {}),
@@ -75,6 +78,13 @@ class ProjectSpec:
     def validate(
         self, task_lookup: Callable[[str], dict[str, Any] | None], allow_roots: Iterable[str] | None = None
     ) -> None:
+        if self.project_summary is not None:
+            self.project_summary = normalize_summary(
+                self.project_summary,
+                max_chars=500,
+                field="project_summary",
+                error_code="PROJECT_INVALID",
+            )
         if not self.nodes:
             raise RelayError("PROJECT_INVALID", "Project must declare at least one node.")
         node_ids: list[str] = []
@@ -224,6 +234,7 @@ class ProjectSpec:
             failure_policy=str(payload.get("failure_policy", "stop")),
             notification_policy=notification_policy,
             description=payload.get("description"),
+            project_summary=payload.get("project_summary"),
             name=payload.get("name"),
             project_id=payload.get("project_id"),
             version=int(payload.get("version", 1)),

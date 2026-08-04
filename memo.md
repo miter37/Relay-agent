@@ -1,7 +1,7 @@
 - [ ] Review and merge Draft PR #14 (`feat/g5-custom-agent-apps`) after confirming the final G5 scope.
 - [ ] Reconcile README's legacy `relay add-agent` description with the current manifest-backed Agent App workflow.
 - [ ] Start G6 packaging/platform operations only after G5 is accepted.
-- [ ] Add the deferred Phase 3–6 GUI surfaces for Tasks, Project flows, Routines, approvals, attention, and dashboards.
 - [ ] Add a production embedding backend; current semantic search intentionally falls back to FTS5.
 - [ ] Extend lifecycle import/export from Task Runs to full Project/Routine operational-history restoration.
 - [ ] Define and implement overlap `queue`/`cancel_previous` semantics for Routines; current tested behavior is `skip`, `allow_parallel`, and due/recovery handling.
+- [ ] Resolve pre-existing repository-wide Ruff format-check violations before release acceptance; focused changed-file checks and full tests pass.

@@ -41,6 +41,16 @@ class TaskCLITests(unittest.TestCase):
         self.assertEqual(ns.timeout, 120)
         self.assertEqual(ns.format, "json")
 
+    def test_task_create_and_update_parse_catalog_summary(self):
+        create = build_parser().parse_args(
+            _preprocess(["task", "create", "--name", "Report", "--summary", "Summarize weekly evidence"])
+        )
+        update = build_parser().parse_args(
+            _preprocess(["task", "update", "task-101", "--summary", "Compare weekly evidence"])
+        )
+        self.assertEqual(create.task_summary, "Summarize weekly evidence")
+        self.assertEqual(update.task_summary, "Compare weekly evidence")
+
     def test_task_list_and_show_and_runs(self):
         ns_list = build_parser().parse_args(_preprocess(["task", "list", "--name", "HBM", "--machine"]))
         self.assertEqual(ns_list.task_command, "list")
@@ -68,6 +78,40 @@ class TaskCLITests(unittest.TestCase):
         self.assertEqual(ns.task_command, "save-as-task")
         self.assertEqual(ns.job_id, "job-101")
         self.assertEqual(ns.name, "Saved Task")
+
+    def test_schedule_uses_task_run_as_canonical_source_option(self):
+        ns = build_parser().parse_args(
+            [
+                "schedule",
+                "create",
+                "--from-task-run",
+                "task-run-101",
+                "--name",
+                "Daily report",
+                "--type",
+                "daily",
+                "--time",
+                "09:00",
+            ]
+        )
+        self.assertEqual(ns.source_job_id, "task-run-101")
+
+    def test_legacy_schedule_source_option_remains_accepted(self):
+        ns = build_parser().parse_args(
+            [
+                "schedule",
+                "create",
+                "--from-job",
+                "job-101",
+                "--name",
+                "Daily report",
+                "--type",
+                "daily",
+                "--time",
+                "09:00",
+            ]
+        )
+        self.assertEqual(ns.source_job_id, "job-101")
 
 
 if __name__ == "__main__":

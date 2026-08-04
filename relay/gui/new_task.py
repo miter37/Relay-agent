@@ -25,13 +25,13 @@ from PySide6.QtWidgets import (
 )
 
 
-class JobFilePickerDialog(QDialog):
+class TaskRunFilePickerDialog(QDialog):
     def __init__(self, job_id: str, files: list[dict], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Add files from Job")
+        self.setWindowTitle("Add files from Task Run")
         self.resize(620, 360)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"Select result or artifact files from Job {job_id}:"))
+        layout.addWidget(QLabel(f"Select result or artifact files from Task Run {job_id}:"))
         self.file_list = QListWidget()
         for file in files:
             path = str(file["path"])
@@ -115,7 +115,7 @@ class NewTaskView(QWidget):
         add_attachment = QPushButton("+ Add files")
         add_attachment.clicked.connect(self._choose_attachments)
         attachment_buttons.addWidget(add_attachment)
-        self.add_from_job_button = QPushButton("+ Add from Job ID")
+        self.add_from_job_button = QPushButton("+ Add from Task Run ID")
         self.add_from_job_button.clicked.connect(self._choose_job)
         attachment_buttons.addWidget(self.add_from_job_button)
         attachment_buttons.addStretch(1)
@@ -124,7 +124,7 @@ class NewTaskView(QWidget):
             self._help_label(
                 "Files",
                 "Optional files supplied to the Agent as task attachments. "
-                "You can also select delivered result or artifact files from an existing Job.",
+                "You can also select delivered result or artifact files from an existing Task Run.",
             ),
             attachment_row,
         )
@@ -203,14 +203,14 @@ class NewTaskView(QWidget):
         advanced_form.addRow(
             self._help_label(
                 "External Request ID",
-                "Optional ID from an external system. Reusing it prevents duplicate work; it is not the Job ID.",
+                "Optional ID from an external system. Reusing it prevents duplicate work; it is not the Task Run ID.",
             ),
             self.request_id_edit,
         )
-        self.force_new_check = QCheckBox("Create a new job even if a similar task exists")
+        self.force_new_check = QCheckBox("Create a new Task Run even if a similar task exists")
         self.overwrite_check = QCheckBox("Replace an existing result file")
         advanced_form.addRow(
-            self._help_label("Force new", "Ignore recent similar-task deduplication and always create a new Job."),
+            self._help_label("Force new", "Ignore recent similar-task deduplication and always create a new Task Run."),
             self.force_new_check,
         )
         advanced_form.addRow(
@@ -265,8 +265,8 @@ class NewTaskView(QWidget):
     def _choose_job(self) -> None:
         job_id, accepted = QInputDialog.getText(
             self,
-            "Add files from Job",
-            "Job ID:",
+            "Add files from Task Run",
+            "Task Run ID:",
             text="",
         )
         job_id = job_id.strip()
@@ -274,7 +274,7 @@ class NewTaskView(QWidget):
             self.job_files_requested.emit(job_id)
 
     def choose_job_files(self, job_id: str, files: list[dict]) -> None:
-        dialog = JobFilePickerDialog(job_id, files, self)
+        dialog = TaskRunFilePickerDialog(job_id, files, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             selected = dialog.selected_files()
             self.add_attachments([item["path"] for item in selected if not item.get("artifact_uid")])
@@ -300,7 +300,10 @@ class NewTaskView(QWidget):
 
     def _update_job_lookup_button(self) -> None:
         self.add_from_job_button.setEnabled(self._job_lookup_allowed and not self._job_lookup_pending)
-        self.add_from_job_button.setText("Loading Job files…" if self._job_lookup_pending else "+ Add from Job ID")
+        self.add_from_job_button.setText(
+            "Loading Task Run files…" if self._job_lookup_pending else "+ Add from Task Run ID"
+        )
+
 
     def _choose_target(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose working folder")
@@ -350,3 +353,7 @@ class NewTaskView(QWidget):
         self.format_combo.setCurrentText("json")
         self.force_new_check.setChecked(True)
         self.overwrite_check.setChecked(True)
+
+
+# Compatibility import for existing GUI extensions and tests.
+JobFilePickerDialog = TaskRunFilePickerDialog

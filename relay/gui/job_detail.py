@@ -19,11 +19,12 @@ from PySide6.QtWidgets import (
 )
 
 
-class JobDetailView(QWidget):
+class TaskRunDetailView(QWidget):
     cancel_requested = Signal(str)
     check_requested = Signal(str)
     rerun_requested = Signal(str)
     schedule_requested = Signal(str)
+    save_as_task_requested = Signal()
     tab_requested = Signal(str)
     open_folder_requested = Signal(str)
     open_log_requested = Signal(str)
@@ -36,7 +37,7 @@ class JobDetailView(QWidget):
         self.job_id: str | None = None
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
-        self.title_label = QLabel("Job")
+        self.title_label = QLabel("Task Run")
         self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel()
@@ -56,6 +57,9 @@ class JobDetailView(QWidget):
         self.copy_task_button = QPushButton("Copy task")
         self.copy_task_button.clicked.connect(self._copy_task)
         header.addWidget(self.copy_task_button)
+        self.save_as_task_button = QPushButton("Save as Task")
+        self.save_as_task_button.clicked.connect(lambda: self.save_as_task_requested.emit())
+        header.addWidget(self.save_as_task_button)
         self.open_folder_button = QPushButton("Open folder")
         self.open_folder_button.clicked.connect(self._open_folder)
         header.addWidget(self.open_folder_button)
@@ -111,7 +115,7 @@ class JobDetailView(QWidget):
         self.set_answer(None)
 
     def set_job(self, job: dict) -> None:
-        job_id = str(job.get("job_id") or "")
+        job_id = str(job.get("task_run_id") or job.get("job_id") or "")
         if job_id != self.job_id:
             self.set_answer(None)
             self.set_content("Result", "")
@@ -121,7 +125,7 @@ class JobDetailView(QWidget):
             self.stream_combo.setCurrentText("stdout")
             self.stream_combo.blockSignals(False)
         self.job_id = job_id
-        self.title_label.setText(str(job.get("title") or self.job_id or "Job"))
+        self.title_label.setText(str(job.get("title") or self.job_id or "Task Run"))
         status = str(job.get("status") or "UNKNOWN")
         self.status_label.setText(self._status_text(status))
         self.status_label.setStyleSheet(self._status_style(status))
@@ -160,12 +164,13 @@ class JobDetailView(QWidget):
             ("Result file", job.get("output_path")),
             ("Files folder", job.get("artifact_path")),
             ("Working folder", (job.get("request") or {}).get("target_path")),
-            ("Job ID", job.get("job_id")),
+            ("Task Run ID", job.get("task_run_id") or job.get("job_id")),
         )
         request = job.get("request") or {}
         task_text = str(request.get("task") or job.get("task_text") or job.get("task_preview") or "").strip()
         self.task_text = task_text
         self.copy_task_button.setEnabled(bool(task_text) and bool(actions.get("can_copy", True)))
+        self.save_as_task_button.setEnabled(bool(task_text) and bool(actions.get("can_copy", True)))
         request_preview = job.get("task_preview") or task_text
         self.set_content(
             "Overview",
@@ -284,3 +289,8 @@ class JobDetailView(QWidget):
         if attempt_id is None:
             return None
         return {"attempt_id": int(attempt_id)}
+
+
+# Compatibility import for existing GUI extensions and tests. New code should
+# use the canonical TaskRunDetailView name.
+JobDetailView = TaskRunDetailView

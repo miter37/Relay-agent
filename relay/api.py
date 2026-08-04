@@ -9,10 +9,10 @@ from typing import Any
 from .db import Database
 from .errors import RelayError
 from .progress import diagnose_progress
+from .receipts import RECEIPT_SCHEMA_VERSION
 from .schedules.snapshots import validate_source_job
 from .search import normalize_limit, normalize_max_bytes, result_summary, snippet
-
-RECEIPT_SCHEMA_VERSION = 1
+from .validation import normalize_summary
 
 RESULT_STATUS = {
     "completed": "COMPLETED",
@@ -20,6 +20,8 @@ RESULT_STATUS = {
     "failed": "FAILED",
     "cancelled": "CANCELLED",
 }
+
+CATALOG_SCHEMA_VERSION = 1
 
 
 def _encode_cursor(value: tuple[str, str]) -> str:
@@ -40,6 +42,21 @@ def _decode_cursor(value: str | None) -> tuple[str, str] | None:
         raise RelayError("INVALID_REQUEST", "The cursor is invalid.") from None
 
 
+def _decode_catalog_cursor(value: str | None) -> tuple[str, str] | None:
+    if not value:
+        return None
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        if not isinstance(decoded, list) or len(decoded) != 2 or not all(isinstance(item, str) for item in decoded):
+            raise ValueError
+        if not decoded[0] or not decoded[1]:
+            raise ValueError
+        return decoded[0], decoded[1]
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        raise RelayError("INVALID_CURSOR", "The catalog cursor is invalid.") from None
+
+
 def _summary(job: dict[str, Any], *, hide_task: bool) -> dict[str, Any]:
     request: dict[str, Any] = {}
     try:
@@ -54,6 +71,8 @@ def _summary(job: dict[str, Any], *, hide_task: bool) -> dict[str, Any]:
         job.pop("task_text", None)
         job.pop("task_preview", None)
     job["model"] = request.get("model")
+    if job.get("job_id"):
+        job["task_run_id"] = job["job_id"]
     return job
 
 
@@ -98,6 +117,7 @@ def list_jobs(
         next_cursor = _encode_cursor((sort_value, rows[-1]["job_id"]))
     summaries = [_summary(row, hide_task=hide_task) for row in rows]
     for row in summaries:
+        row["task_run_id"] = row["job_id"]
         row["run_id"] = row["job_id"]
         row.setdefault("trigger_type", "manual")
     return {
@@ -132,7 +152,7 @@ def _task_preview(value: Any) -> str | None:
 def job_detail(engine, job_id: str) -> dict[str, Any]:
     raw = engine.db.get_job(job_id)
     if not raw:
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     detail = engine.show(job_id)
     request = _load_request(raw)
     safe_request = {
@@ -194,22 +214,24 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
         "can_open_result": bool(detail.get("output_path") and Path(detail["output_path"]).is_file()),
         "can_open_folder": bool(detail.get("artifact_path") and Path(detail["artifact_path"]).is_dir()),
     }
+    detail["task_run_id"] = detail["job_id"]
     return detail
 
 
 def job_result(db: Database, job_id: str, *, max_bytes: int = 1024 * 1024) -> dict[str, Any]:
     job = db.get_job(job_id)
     if not job:
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     path = Path(job["output_path"])
     if not path.is_file():
-        return {"ok": True, "job_id": job_id, "available": False, "path": str(path)}
+        return {"ok": True, "job_id": job_id, "task_run_id": job_id, "available": False, "path": str(path)}
     raw = path.read_bytes()
     truncated = len(raw) > max_bytes
     text = raw[:max_bytes].decode("utf-8", errors="replace")
     payload: dict[str, Any] = {
         "ok": True,
         "job_id": job_id,
+        "task_run_id": job_id,
         "available": True,
         "path": str(path),
         "format": job.get("format"),
@@ -227,25 +249,26 @@ def job_result(db: Database, job_id: str, *, max_bytes: int = 1024 * 1024) -> di
 
 def job_artifacts(db: Database, job_id: str) -> dict[str, Any]:
     if not db.get_job(job_id):
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
-    return {"ok": True, "job_id": job_id, "artifacts": db.artifacts_for_job(job_id)}
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
+    return {"ok": True, "job_id": job_id, "task_run_id": job_id, "artifacts": db.artifacts_for_job(job_id)}
 
 
 def job_events(db: Database, job_id: str) -> dict[str, Any]:
     if not db.get_job(job_id):
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
-    return {"ok": True, "job_id": job_id, "events": db.events_for_job(job_id)}
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
+    return {"ok": True, "job_id": job_id, "task_run_id": job_id, "events": db.events_for_job(job_id)}
 
 
 def check_job_progress(engine, job_id: str) -> dict[str, Any]:
     job = engine.db.get_job(job_id)
     if not job:
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     result = diagnose_progress(
         job,
         engine.progress_for_job(job_id),
         engine.db.attempts_for_job(job_id),
     )
+    result["task_run_id"] = job_id
     engine.db.add_event(job_id, "PROGRESS_CHECKED", result)
     return result
 
@@ -261,11 +284,11 @@ def job_logs(
     errors_only: bool = False,
 ) -> dict[str, Any]:
     if not db.get_job(job_id):
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     attempts = {int(row["attempt_id"]): row for row in db.attempts_for_job(job_id)}
     attempt = attempts.get(attempt_id)
     if not attempt:
-        raise RelayError("INVALID_REQUEST", "The attempt does not belong to this job.")
+        raise RelayError("INVALID_REQUEST", "The Attempt does not belong to this Task Run.")
     if stream not in {"stdout", "stderr"}:
         raise RelayError("INVALID_REQUEST", "The log stream must be stdout or stderr.")
     if limit < 1 or limit > 65536:
@@ -275,6 +298,7 @@ def job_logs(
         return {
             "ok": True,
             "job_id": job_id,
+            "task_run_id": job_id,
             "attempt_id": attempt_id,
             "stream": stream,
             "text": "",
@@ -287,6 +311,7 @@ def job_logs(
         return {
             "ok": True,
             "job_id": job_id,
+            "task_run_id": job_id,
             "attempt_id": attempt_id,
             "stream": stream,
             "text": "",
@@ -310,6 +335,7 @@ def job_logs(
     return {
         "ok": True,
         "job_id": job_id,
+        "task_run_id": job_id,
         "attempt_id": attempt_id,
         "stream": stream,
         "text": text,
@@ -352,10 +378,11 @@ def run_events(db: Database, run_id: str) -> dict[str, Any]:
 def run_lineage(db: Database, run_id: str) -> dict[str, Any]:
     job = db.get_job(run_id)
     if not job:
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {run_id}")
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {run_id}")
     return {
         "ok": True,
         "job_id": run_id,
+        "task_run_id": run_id,
         "run_id": run_id,
         "inputs": db.lineage_for_job(run_id),
         "outputs": db.artifacts_for_job(run_id),
@@ -387,6 +414,7 @@ def search_runs(db: Database, **kwargs: Any) -> dict[str, Any]:
         items.append(
             {
                 "run_id": row["job_id"],
+                "task_run_id": row["job_id"],
                 "job_id": row["job_id"],
                 "title": row.get("title"),
                 "status": row.get("status"),
@@ -421,6 +449,7 @@ def search_artifacts(db: Database, **kwargs: Any) -> dict[str, Any]:
             {
                 "artifact_uid": row.get("artifact_uid"),
                 "run_id": row.get("job_id"),
+                "task_run_id": row.get("job_id"),
                 "name": row.get("relative_path"),
                 "role": row.get("role") or "output",
                 "mime_type": row.get("mime_type"),
@@ -484,8 +513,179 @@ def _task_public(task: dict[str, Any]) -> dict[str, Any]:
     return {**task, "fallback_enabled": bool(task.get("fallback_enabled", 1))}
 
 
-def list_tasks(engine) -> dict[str, Any]:
-    return {"ok": True, "tasks": [_task_public(t) for t in engine.db.list_tasks(limit=200)]}
+def list_tasks(engine, *, name: str | None = None, limit: int = 200) -> dict[str, Any]:
+    return {"ok": True, "tasks": [_task_public(t) for t in engine.db.list_tasks(name=name, limit=limit)]}
+
+
+def catalog_capability() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "response_contract": {
+            "list_items_key": "items",
+            "status_style": "lowercase",
+            "cursor_style": "opaque_urlsafe",
+        },
+        "resources": {
+            "artifact_content": {
+                "path_template": "/v1/artifacts/{artifact_uid}/content",
+                "text_field": "text",
+                "availability_field": "available",
+            }
+        },
+        "kinds": {
+            "tasks": {
+                "list_path": "/v1/catalog/tasks",
+                "detail_path_template": "/v1/tasks/{task_id}",
+                "order": "updated_at_desc",
+            },
+            "task_runs": {
+                "list_path": "/v1/catalog/task-runs",
+                "detail_path_template": "/v1/task-runs/{task_run_id}",
+                "order": "created_at_desc",
+            },
+            "projects": {
+                "item_schema_version": 1,
+                "list_path": "/v1/catalog/projects",
+                "detail_path_template": "/v1/projects/{project_id}",
+                "order": "updated_at_desc",
+            },
+            "project_runs": {
+                "item_schema_version": 1,
+                "list_path": "/v1/catalog/project-runs",
+                "detail_path_template": "/v1/project-runs/{project_run_id}",
+                "order": "created_at_desc",
+            },
+        },
+    }
+
+
+def _catalog_task(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": task["task_id"],
+        "name": task["name"],
+        "version": task.get("version"),
+        "task_summary": task.get("task_summary"),
+        "has_input_schema": bool(task.get("input_schema")),
+        "has_output_contract": bool(task.get("output_contract")),
+        "has_validation_policy": bool(task.get("validation_policy")),
+        "default_worker": task.get("default_worker"),
+        "profile": task.get("profile"),
+        "result_format": task.get("result_format"),
+        "created_at": task.get("created_at"),
+        "updated_at": task.get("updated_at"),
+    }
+
+
+def catalog_tasks(
+    db: Database,
+    *,
+    limit: int = 100,
+    cursor: str | None = None,
+    updated_since: str | None = None,
+) -> dict[str, Any]:
+    limit = normalize_limit(limit, default=100, maximum=200)
+    rows = db.catalog_tasks(limit=limit, cursor=_decode_catalog_cursor(cursor), updated_since=updated_since)
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = _encode_cursor((rows[-1]["updated_at"], rows[-1]["task_id"]))
+    items = [_catalog_task(row) for row in rows]
+    return {
+        "ok": True,
+        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "kind": "tasks",
+        "items": items,
+        "tasks": items,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    }
+
+
+def _task_version(job: dict[str, Any]) -> int | None:
+    value = None
+    snapshot = job.get("task_snapshot_json")
+    if snapshot:
+        try:
+            decoded = json.loads(snapshot)
+            if isinstance(decoded, dict):
+                value = decoded.get("task_version")
+                if value is None:
+                    value = (decoded.get("task_definition") or {}).get("version")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _catalog_task_run(job: dict[str, Any]) -> dict[str, Any]:
+    status = str(job.get("status") or "").lower()
+    failure_reason = None
+    if status == "failed":
+        failure_reason = normalize_summary(
+            job.get("error_message"), max_chars=1000, field="failure_reason", error_code="TASK_INVALID"
+        )
+    roles = [item for item in str(job.get("artifact_roles") or "").split(",") if item]
+    output_path = job.get("output_path")
+    return {
+        "task_run_id": job["job_id"],
+        "task_id": job.get("task_id"),
+        "task_version": _task_version(job),
+        "status": status,
+        "task_summary": job.get("task_summary"),
+        "result_summary": job.get("result_summary"),
+        "failure_reason": failure_reason,
+        "worker": job.get("actual_worker") or job.get("requested_worker"),
+        "requested_worker": job.get("requested_worker"),
+        "trigger_type": job.get("trigger_type") or "manual",
+        "result_format": job.get("format"),
+        "result_available": bool(output_path and Path(output_path).is_file()),
+        "artifact_count": int(job.get("artifact_count") or 0),
+        "artifact_roles": roles,
+        "created_at": job.get("created_at"),
+        "completed_at": job.get("completed_at"),
+    }
+
+
+def catalog_task_runs(
+    db: Database,
+    *,
+    limit: int = 100,
+    cursor: str | None = None,
+    status: str | None = None,
+    task_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    limit = normalize_limit(limit, default=100, maximum=200)
+    if status:
+        status = RESULT_STATUS.get(status.lower(), status.upper())
+    rows = db.catalog_task_runs(
+        limit=limit,
+        cursor=_decode_catalog_cursor(cursor),
+        status=status,
+        task_id=task_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = _encode_cursor((rows[-1]["created_at"], rows[-1]["job_id"]))
+    items = [_catalog_task_run(row) for row in rows]
+    return {
+        "ok": True,
+        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "kind": "task_runs",
+        "items": items,
+        "task_runs": items,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    }
 
 
 def create_task(engine, payload: dict[str, Any]) -> dict[str, Any]:
@@ -495,6 +695,7 @@ def create_task(engine, payload: dict[str, Any]) -> dict[str, Any]:
         name=str(payload.get("name") or "").strip(),
         instructions=payload.get("instructions") or payload.get("task") or "",
         description=payload.get("description"),
+        task_summary=payload.get("task_summary"),
         default_worker=payload.get("default_worker") or payload.get("worker"),
         fallback_enabled=bool(payload.get("fallback_enabled", True)),
         timeout_seconds=payload.get("timeout_seconds"),
@@ -548,13 +749,19 @@ def run_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         queued=bool(payload.get("queued", False)),
         submitted_via=payload.get("submitted_via"),
     )
+    if job.get("job_id"):
+        job["task_run_id"] = job["job_id"]
     return {"ok": True, "run": job, "reused": reused, "task": _task_public(task)}
 
 
 def runs_for_task(engine, task_id: str, *, limit: int = 50) -> dict[str, Any]:
     if not engine.db.get_task(task_id):
         raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
-    return {"ok": True, "task_id": task_id, "runs": engine.db.runs_for_task(task_id, limit=limit)}
+    runs = engine.db.runs_for_task(task_id, limit=limit)
+    for run in runs:
+        if run.get("job_id"):
+            run["task_run_id"] = run["job_id"]
+    return {"ok": True, "task_id": task_id, "runs": runs}
 
 
 def save_run_as_task(engine, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -586,8 +793,160 @@ def _step_public(step: dict[str, Any]) -> dict[str, Any]:
     return {**step}
 
 
-def list_projects(engine) -> dict[str, Any]:
-    return {"ok": True, "projects": [_project_public(p) for p in engine.project_service.list_projects(limit=200)]}
+def list_projects(engine, *, name: str | None = None, limit: int = 200) -> dict[str, Any]:
+    projects = [_project_public(p) for p in engine.project_service.list_projects(name=name, limit=limit)]
+    return {
+        "ok": True,
+        "kind": "projects",
+        "items": projects,
+        "projects": projects,
+    }
+
+
+def _project_definition(project: dict[str, Any]) -> dict[str, Any]:
+    try:
+        value = json.loads(project.get("definition_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _catalog_project(project: dict[str, Any]) -> dict[str, Any]:
+    definition = _project_definition(project)
+    nodes = definition.get("nodes") or []
+    connections = definition.get("connections") or []
+    outputs = definition.get("output_selection") or []
+    return {
+        "project_id": project["project_id"],
+        "name": project.get("name"),
+        "version": project.get("version"),
+        "project_summary": project.get("project_summary") or project.get("description") or project.get("name"),
+        "node_count": len(nodes),
+        "connection_count": len(connections),
+        "output_roles": sorted({str(item.get("role")) for item in outputs if item.get("role")}),
+        "has_checkpoints": any(bool(item.get("checkpoint")) for item in nodes if isinstance(item, dict)),
+        "created_at": project.get("created_at"),
+        "updated_at": project.get("updated_at"),
+    }
+
+
+def catalog_projects(
+    db: Database,
+    *,
+    limit: int = 100,
+    cursor: str | None = None,
+    updated_since: str | None = None,
+) -> dict[str, Any]:
+    limit = normalize_limit(limit, default=100, maximum=200)
+    rows = db.catalog_projects(limit=limit, cursor=_decode_catalog_cursor(cursor), updated_since=updated_since)
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = _encode_cursor((rows[-1]["updated_at"], rows[-1]["project_id"])) if has_more and rows else None
+    items = [_catalog_project(row) for row in rows]
+    return {
+        "ok": True,
+        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "kind": "projects",
+        "items": items,
+        "projects": items,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    }
+
+
+def _project_run_snapshot(run: dict[str, Any]) -> dict[str, Any]:
+    try:
+        value = json.loads(run.get("project_snapshot_json") or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _catalog_project_run(run: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _project_run_snapshot(run)
+    warnings: list[dict[str, Any]] = []
+    try:
+        warning_value = json.loads(run.get("warnings_json") or "[]")
+        if isinstance(warning_value, list):
+            warnings = [item for item in warning_value if isinstance(item, dict)]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    final_ids: list[dict[str, Any]] = []
+    try:
+        value = json.loads(run.get("final_artifact_ids_json") or "[]")
+        if isinstance(value, list):
+            final_ids = [item for item in value if isinstance(item, dict)]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    status = str(run.get("status") or "").lower()
+    failure_reason = None
+    if status == "failed":
+        failure_reason = normalize_summary(
+            run.get("error_message") or run.get("failure_reason"),
+            max_chars=1000,
+            field="failure_reason",
+            error_code="PROJECT_INVALID",
+        )
+        if not failure_reason:
+            if warnings and isinstance(warnings[0], dict):
+                failure_reason = normalize_summary(
+                    warnings[0].get("error_message") or warnings[0].get("error"),
+                    max_chars=1000,
+                    field="failure_reason",
+                    error_code="PROJECT_INVALID",
+                )
+    return {
+        "project_run_id": run["project_run_id"],
+        "project_id": run.get("project_id"),
+        "project_version": run.get("project_version"),
+        "project_summary": snapshot.get("project_summary"),
+        "status": status,
+        "step_count": int(run.get("step_count") or 0),
+        "completed_step_count": int(run.get("completed_step_count") or 0),
+        "failed_step_count": int(run.get("failed_step_count") or 0),
+        "final_artifact_count": len(final_ids),
+        "final_artifact_roles": sorted({str(item.get("role")) for item in final_ids if item.get("role")}),
+        "failure_reason": failure_reason,
+        "trigger_type": run.get("trigger_type") or "manual",
+        "created_at": run.get("created_at"),
+        "completed_at": run.get("completed_at"),
+    }
+
+
+def catalog_project_runs(
+    db: Database,
+    *,
+    limit: int = 100,
+    cursor: str | None = None,
+    status: str | None = None,
+    project_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
+    limit = normalize_limit(limit, default=100, maximum=200)
+    if status:
+        status = str(status).lower()
+    rows = db.catalog_project_runs(
+        limit=limit,
+        cursor=_decode_catalog_cursor(cursor),
+        status=status,
+        project_id=project_id,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = _encode_cursor((rows[-1]["created_at"], rows[-1]["project_run_id"])) if has_more and rows else None
+    items = [_catalog_project_run(row) for row in rows]
+    return {
+        "ok": True,
+        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "kind": "project_runs",
+        "items": items,
+        "project_runs": items,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+    }
 
 
 def create_project(engine, payload: dict[str, Any]) -> dict[str, Any]:
@@ -621,15 +980,18 @@ def run_project(engine, project_id: str, payload: dict[str, Any]) -> dict[str, A
     }
 
 
-def project_runs(engine, project_id: str) -> dict[str, Any]:
-    rows = engine.db.list_project_runs(project_id=project_id, limit=50)
+def project_runs(engine, project_id: str, *, limit: int = 50) -> dict[str, Any]:
+    rows = engine.db.list_project_runs(project_id=project_id, limit=limit)
+    items = [
+        _project_run_public(r, json.loads(r["project_snapshot_json"]) if r.get("project_snapshot_json") else None)
+        for r in rows
+    ]
     return {
         "ok": True,
         "project_id": project_id,
-        "project_runs": [
-            _project_run_public(r, json.loads(r["project_snapshot_json"]) if r.get("project_snapshot_json") else None)
-            for r in rows
-        ],
+        "kind": "project_runs",
+        "items": items,
+        "project_runs": items,
     }
 
 
@@ -723,7 +1085,7 @@ def routine_receipt(engine, routine_id):
 
 
 def preview_routine(engine, payload):
-    result = engine.routine_service.preview(payload)
+    result = engine.routine_service.preview(payload, limit=int(payload.get("limit", 5)))
     return {"ok": True, **result}
 
 

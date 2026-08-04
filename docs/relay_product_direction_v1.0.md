@@ -2,7 +2,7 @@
 
 - 작성일: 2026-08-03
 - 문서 목적: Relay의 제품 방향, 핵심 용어와 데이터 모델, 현재 구조에서 수정할 사항, 단계별 개발 우선순위를 정리한다.
-- 핵심 전환: **Chat-based AI 사용에서 Job-based 업무 운영으로 전환**
+- 핵심 전환: **Chat-based AI 사용에서 Project·Task·Attempt 기반 업무 운영으로 전환**
 
 ---
 
@@ -1013,13 +1013,13 @@ blocked
 
 ## 10. Routine과 기존 Schedule 기능의 전환
 
-현재 Schedule이 단순 Job 실행 예약에 가깝다면 이를 Routine 개념으로 승격한다.
+현재 Schedule이 단순 Task Run 실행 예약에 가깝다면 이를 Routine 개념으로 승격한다.
 
 ### 10.1 변경 방향
 
 ```text
 기존
-Schedule → 특정 Job 파라미터 실행
+Schedule → 특정 Task Run 파라미터 실행
 
 변경
 Routine → Task 또는 Project를 반복 실행
@@ -1077,21 +1077,21 @@ replay_all
 
 Agent CLI, fallback, daemon, GUI는 부속품이 아니라 "결과를 믿을 수 있게" 만드는 신뢰의 기반이다. Safe working-folder delivery(격리 복사본에서 작업 → delta 검증 → 실제 폴더에 반영), unattended recovery, capability audit은 현재 Relay가 이미 가진 차별점이다. 새 중심 메시지 위에 반드시 같이 보인다.
 
-## 11.2 사용자 화면의 Job 용어
+## 11.2 사용자 화면의 Job 용어 정리
 
-현재 `Job`이 사용자 화면 전체에서 사용된다면 점진적으로 다음과 같이 전환한다.
+사용자 화면에서는 `Job`을 전면적으로 제거한다. 정식 모델은 `Project`, `Task`, `Task Run`/`Project Run`, `Attempt`이며, 단독 `Run`도 새 화면의 대표 용어로 사용하지 않는다.
 
 | 기존 표현 | 권장 표현 |
 |---|---|
-| New Job | New Run 또는 Run Task |
-| Completed Jobs | Runs |
+| New Job | New Task Run 또는 Run Task |
+| Completed Jobs | Task Runs |
 | Job Detail | Task Run Detail |
 | Job Attempts | Attempts |
 | Job Files | Artifacts |
 | Cron / Schedule | Routines |
 | Add from Job ID | Add from Task Run |
 
-단, 일회성 요청은 `Quick Run`으로 제공한다.
+단, 일회성 요청은 `Quick Task` 또는 `Ad-hoc Task Run`으로 제공한다.
 
 ## 11.3 내부 Job 모델의 마이그레이션
 
@@ -1101,7 +1101,7 @@ Agent CLI, fallback, daemon, GUI는 부속품이 아니라 "결과를 믿을 수
 
 1. 기존 Job ID를 계속 유효하게 유지한다.
 2. 도메인 계층에서 기존 Job을 Task Run으로 해석한다.
-3. 새 API와 GUI는 Task/Task Run 용어를 사용한다.
+3. 새 API와 GUI는 Project/Task/Task Run/Project Run/Attempt 용어를 사용한다.
 4. 기존 Job API는 일정 기간 compatibility alias로 유지한다.
 5. 기존 완료 Job은 Task가 없는 ad-hoc Task Run으로 마이그레이션한다.
 6. 기존 Schedule은 Routine으로 변환한다.
@@ -1114,7 +1114,7 @@ New canonical reference: task-run-104
 Alias lookup: job-104도 계속 허용
 ```
 
-DB 테이블명을 즉시 변경하기보다 서비스와 API 모델부터 전환한 뒤 안정화 후 물리 스키마를 정리한다.
+DB 테이블명을 즉시 변경하지 않는다. 서비스와 API의 공개 모델을 먼저 전환하고, 기존 DB·API·CLI는 호환 경계로 유지한다.
 
 ## 11.4 GUI 정보구조
 

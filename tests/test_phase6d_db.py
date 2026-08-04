@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from relay.db import CURRENT_SCHEMA_VERSION, Database
@@ -18,7 +19,7 @@ class Phase6dDBTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_migration_9_to_10_creates_notification_events_table(self):
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             self.assertEqual(version, CURRENT_SCHEMA_VERSION)
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

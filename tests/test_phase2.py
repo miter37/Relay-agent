@@ -78,6 +78,16 @@ class Phase2Tests(unittest.TestCase):
         self.db.rebuild_search_index()
         self.assertEqual(search_runs(self.db, query="Private phrase")["items"], [])
 
+    def test_reopening_database_backfills_stale_search_index(self):
+        job, _ = self.engine.create_job(
+            JobRequest(task="Backfill search phrase", title="Backfill test", worker="codex"), queued=True
+        )
+        self.db.update_job(job["job_id"], status="COMPLETED", result_status="complete")
+
+        reopened = Database(self.db.path)
+        runs = search_runs(reopened, query="Backfill phrase")
+        self.assertEqual(runs["items"][0]["run_id"], job["job_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

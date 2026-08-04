@@ -42,6 +42,8 @@ class MigrationTests(unittest.TestCase):
                     "trigger_type",
                     "task_id",
                     "task_snapshot_json",
+                    "task_summary",
+                    "result_summary",
                 }
                 <= columns
             )
@@ -62,6 +64,8 @@ class MigrationTests(unittest.TestCase):
                 <= tables
             )
             self.assertIn("receipt_schema_version", columns)
+            task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+            self.assertIn("task_summary", task_columns)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
         self.assertIsNotNone(db.last_backup_path)
         self.assertTrue(db.last_backup_path and db.last_backup_path.exists())
@@ -138,6 +142,82 @@ class MigrationTests(unittest.TestCase):
             self.assertIsNone(db.last_backup_path)
             with closing(sqlite3.connect(path)) as conn, conn:
                 self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
+
+    def test_new_database_has_catalog_columns_and_indexes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.db"
+            Database(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+                job_columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+                self.assertIn("task_summary", task_columns)
+                self.assertTrue({"task_summary", "result_summary"} <= job_columns)
+                task_indexes = {row[1] for row in conn.execute("PRAGMA index_list(tasks)")}
+                job_indexes = {row[1] for row in conn.execute("PRAGMA index_list(jobs)")}
+                self.assertIn("idx_tasks_catalog", task_indexes)
+                self.assertIn("idx_jobs_catalog", job_indexes)
+                project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+                self.assertIn("project_summary", project_columns)
+                project_indexes = {row[1] for row in conn.execute("PRAGMA index_list(projects)")}
+                self.assertIn("idx_projects_catalog", project_indexes)
+
+    def test_v12_to_v13_adds_catalog_columns_and_backfills_task_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.db"
+            db = Database(path)
+            db.create_task(
+                {
+                    "task_id": "legacy-task",
+                    "name": "Legacy task",
+                    "description": "A durable task summary.",
+                    "instructions": "Long instructions.",
+                    "default_worker": "auto",
+                    "fallback_enabled": 1,
+                    "timeout_seconds": None,
+                    "profile": "web-research",
+                    "result_format": "json",
+                    "input_schema": None,
+                    "output_contract": None,
+                    "validation_policy": None,
+                    "version": 1,
+                }
+            )
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("ALTER TABLE tasks DROP COLUMN task_summary")
+                conn.execute("ALTER TABLE jobs DROP COLUMN task_summary")
+                conn.execute("ALTER TABLE jobs DROP COLUMN result_summary")
+                conn.execute("PRAGMA user_version=12")
+            Database(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
+                self.assertEqual(
+                    conn.execute("SELECT task_summary FROM tasks WHERE task_id='legacy-task'").fetchone()[0],
+                    "A durable task summary.",
+                )
+
+    def test_v13_to_v14_adds_project_summary_and_backfills(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relay.db"
+            db = Database(path)
+            db.create_project(
+                {
+                    "project_id": "legacy-project",
+                    "name": "Legacy project",
+                    "description": "Legacy project description.",
+                    "definition_json": "{\"nodes\":[],\"connections\":[],\"output_selection\":[]}",
+                    "project_summary": "Legacy project description.",
+                }
+            )
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("ALTER TABLE projects DROP COLUMN project_summary")
+                conn.execute("PRAGMA user_version=13")
+            Database(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
+                self.assertEqual(
+                    conn.execute("SELECT project_summary FROM projects WHERE project_id='legacy-project'").fetchone()[0],
+                    "Legacy project description.",
+                )
 
     def test_newer_schema_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

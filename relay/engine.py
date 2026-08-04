@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ from .delivery import atomic_deliver_pair
 from .errors import RelayError
 from .models import JobRequest, TaskSpec
 from .process_supervisor import run_supervised
+from .receipts import RECEIPT_SCHEMA_VERSION
 from .request_builder import build_request_markdown, copy_attachments, write_schema
 from .security import validate_attachment_paths, validate_requested_paths
 from .target_workspace import (
@@ -47,11 +49,14 @@ from .util import (
 )
 from .validation import (
     materialize_artifact_payloads,
+    normalize_summary,
     reconcile_json_artifacts,
     scan_artifacts,
     validate_json_result,
     validate_text_result,
 )
+
+logger = logging.getLogger(__name__)
 
 TECHNICAL_FALLBACK_CODES = {
     "WORKER_NOT_INSTALLED",
@@ -96,6 +101,7 @@ class RelayEngine:
         from .projects.service import ProjectService
 
         self.project_service = ProjectService(self.db, self)
+        self.routine_service = None  # wired by RelayDaemon to keep engine config-free
 
     def _set_progress(self, job_id: str, **changes: Any) -> None:
         with self._progress_lock:
@@ -146,6 +152,35 @@ class RelayEngine:
             return "metadata"
         return mode
 
+    def _resolve_task_summary(self, request: JobRequest, task_definition: dict[str, Any] | None = None) -> str | None:
+        if task_definition:
+            candidate = (
+                task_definition.get("task_summary")
+                or task_definition.get("description")
+                or task_definition.get("instructions")
+            )
+        elif self._history_display_mode() == "full":
+            candidate = request.task
+        else:
+            candidate = None
+        return normalize_summary(candidate, max_chars=500, field="task_summary", error_code="TASK_INVALID")
+
+    @staticmethod
+    def _resolve_result_summary(value: dict[str, Any] | None, text: str | None) -> str | None:
+        candidate = (value or {}).get("summary") or (value or {}).get("answer") or text
+        return normalize_summary(candidate, max_chars=1000, field="result_summary", error_code="SCHEMA_MISMATCH")
+
+    @staticmethod
+    def _resolve_failure_reason(job: dict[str, Any], fallback: str | None = None) -> str | None:
+        candidate = job.get("error_message") or fallback
+        if not candidate and job.get("status") == "CANCELLED":
+            candidate = "Task Run was cancelled."
+        return normalize_summary(candidate, max_chars=1000, field="failure_reason", error_code="INTERNAL_ERROR")
+
+    @staticmethod
+    def _receipt_summary(job: dict[str, Any], key: str) -> str | None:
+        return job.get(key) if bool(job.get("replayable", 1)) else None
+
     @staticmethod
     def _short_text(value: str, limit: int) -> str:
         normalized = " ".join(value.split())
@@ -156,7 +191,7 @@ class RelayEngine:
     def _job_title_and_preview(self, request: JobRequest, job_id: str) -> tuple[str, str | None]:
         explicit = (request.title or "").strip()
         first_line = next((line.strip() for line in request.task.splitlines() if line.strip()), "")
-        title = self._short_text(explicit or first_line or f"Job {job_id[:8]}", 60)
+        title = self._short_text(explicit or first_line or f"Task Run {job_id[:8]}", 60)
         preview = self._short_text(request.task, 240) if self._history_display_mode() == "full" else None
         return title, preview
 
@@ -322,7 +357,7 @@ class RelayEngine:
         if target and request.caller.lower() in {"hermes", "service", "daemon", "schedule"}:
             raise RelayError(
                 "TARGET_PATH_NOT_ALLOWED",
-                "Working-folder updates are available only for interactive CLI and GUI jobs.",
+                "Working-folder updates are available only for interactive CLI and GUI Task Runs.",
             )
         if request.workspace and request.caller.lower() in {"hermes", "service", "daemon", "schedule"}:
             workspace_root = safe_resolve(Path(request.workspace))
@@ -378,6 +413,7 @@ class RelayEngine:
             validate_target_path(target, self.config.home, (output, artifacts))
         fallback = self.config.get("fallback_enabled", True) if request.fallback is None else request.fallback
         title, task_preview = self._job_title_and_preview(request, job_id)
+        task_summary = self._resolve_task_summary(request, task_definition)
         replayable = bool(self.config.get("store_replayable_requests", True))
         task_text = request.task if self._history_display_mode() == "full" else None
         submitted_source = self._submitted_via(request, submitted_via)
@@ -391,7 +427,8 @@ class RelayEngine:
             "submitted_via": submitted_source,
             "trigger_type": resolved_trigger,
             "task_id": task_id,
-            "receipt_schema_version": 1,
+            "task_summary": task_summary,
+            "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
             "task_snapshot_json": self._task_snapshot(
                 request, trigger_type=resolved_trigger, artifact_inputs=resolved_inputs, task_definition=task_definition
             ),
@@ -491,17 +528,29 @@ class RelayEngine:
     def cancel(self, job_id: str) -> dict[str, Any]:
         job = self.db.get_job(job_id)
         if not job:
-            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+            raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         if job["status"] in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
-            raise RelayError("JOB_NOT_CANCELLABLE", f"Job is already finished: {job_id}")
+            raise RelayError("JOB_NOT_CANCELLABLE", f"Task Run is already finished: {job_id}")
         if not self.db.request_cancel(job_id):
             if job["status"] == "CANCEL_REQUESTED":
-                return {"ok": True, "job_id": job_id, "status": "CANCEL_REQUESTED", "changed": False}
-            raise RelayError("JOB_NOT_CANCELLABLE", f"Job cannot be cancelled in state {job['status']}")
+                return {
+                    "ok": True,
+                    "job_id": job_id,
+                    "task_run_id": job_id,
+                    "status": "CANCEL_REQUESTED",
+                    "changed": False,
+                }
+            raise RelayError("JOB_NOT_CANCELLABLE", f"Task Run cannot be cancelled in state {job['status']}")
         updated = self.db.get_job(job_id) or job
         event = "JOB_CANCELLED" if updated["status"] == "CANCELLED" else "JOB_CANCEL_REQUESTED"
         self.db.add_event(job_id, event)
-        return {"ok": True, "job_id": job_id, "status": updated["status"], "changed": True}
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "task_run_id": job_id,
+            "status": updated["status"],
+            "changed": True,
+        }
 
     def _prepare_workspace(
         self,
@@ -577,7 +626,7 @@ class RelayEngine:
     def execute_job(self, job_id: str) -> dict[str, Any]:
         job = self.db.get_job(job_id)
         if not job:
-            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+            raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         request = JobRequest.from_dict(json.loads(job["request_json"]))
         self._resolve_request_task(request)
         input_manifest = json.loads(job.get("input_manifest_json") or "[]")
@@ -706,9 +755,15 @@ class RelayEngine:
                 )
                 if code == "CANCELLED":
                     self.db.update_job(
-                        job_id, status="CANCELLED", error_code=code, error_message=message, completed_at=utc_now()
+                        job_id,
+                        status="CANCELLED",
+                        error_code=code,
+                        error_message=message,
+                        result_summary=None,
+                        completed_at=utc_now(),
                     )
                     self.db.scrub_non_replayable(job_id)
+                    self._refresh_search_index(job_id)
                     self._clear_progress(job_id)
                     return self.receipt(job_id)
                 errors.append({"worker": worker, "code": code, "message": message})
@@ -738,10 +793,11 @@ class RelayEngine:
                 adapter.normalize_output(ctx, outcome.stdout_path, outcome.stderr_path)
                 self._set_progress(job_id, stage="validating", process_alive=False)
                 self.db.update_job(job_id, status="VALIDATING")
+                result_text: str | None = None
                 if request.result_format == "json":
                     value = validate_json_result(ctx.result_file, int(self.config.get("result_max_bytes")))
                 else:
-                    validate_text_result(ctx.result_file, int(self.config.get("result_max_bytes")))
+                    result_text = validate_text_result(ctx.result_file, int(self.config.get("result_max_bytes")))
                     value = None
                 max_artifact_files = int(self.config.get("artifact_max_files", 200))
                 max_artifact_bytes = int(self.config.get("artifact_max_total_bytes", 1024 * 1024 * 1024))
@@ -772,6 +828,7 @@ class RelayEngine:
                     result_status = value["status"]
                 else:
                     result_status = "complete"
+                result_summary = self._resolve_result_summary(value, result_text)
                 if result_status == "failed":
                     raise RelayError("PROCESS_CRASHED", f"{worker} returned status=failed", False)
                 self.db.update_job(job_id, status="DELIVERING")
@@ -813,8 +870,13 @@ class RelayEngine:
                 receipt = {
                     "ok": True,
                     "status": "partial" if result_status == "partial" else "completed",
+                    "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
                     "job_id": job_id,
+                    "task_run_id": job_id,
                     "run_id": job_id,
+                    "task_summary": self._receipt_summary(job, "task_summary"),
+                    "result_summary": result_summary if bool(job.get("replayable", 1)) else None,
+                    "failure_reason": None,
                     "trigger_type": job.get("trigger_type", "manual"),
                     "task_snapshot": json.loads(job["task_snapshot_json"]) if job.get("task_snapshot_json") else None,
                     "worker": worker,
@@ -837,6 +899,7 @@ class RelayEngine:
                     job_id,
                     status=final_job_status,
                     result_status=result_status,
+                    result_summary=result_summary,
                     actual_worker=worker,
                     receipt_json=json.dumps(receipt, ensure_ascii=False),
                     completed_at=utc_now(),
@@ -869,6 +932,7 @@ class RelayEngine:
                     },
                 )
                 self.db.scrub_non_replayable(job_id)
+                self._refresh_search_index(job_id)
                 self._clear_progress(job_id)
                 return receipt
             except RelayError as err:
@@ -888,6 +952,20 @@ class RelayEngine:
                 return self._fail_job(job_id, err.code, err.message, errors)
         return self._fail_job(job_id, "ALL_WORKERS_FAILED", "All eligible workers failed", errors)
 
+    def _refresh_search_index(self, job_id: str) -> None:
+        try:
+            self.db.index_run(job_id)
+        except Exception:  # pragma: no cover - search must not break execution
+            logger.warning("Could not index Task Run %s", job_id, exc_info=True)
+        for artifact in self.db.artifacts_for_job(job_id):
+            artifact_uid = artifact.get("artifact_uid")
+            if not artifact_uid:
+                continue
+            try:
+                self.db.index_artifact(artifact_uid)
+            except Exception:  # pragma: no cover - search must not break execution
+                logger.warning("Could not index Artifact %s", artifact_uid, exc_info=True)
+
     def _fail_job(self, job_id: str, code: str, message: str, errors: list[dict[str, Any]]) -> dict[str, Any]:
         attempt_rows = self.db.attempts_for_job(job_id)
         log_paths = [
@@ -897,7 +975,14 @@ class RelayEngine:
         receipt = {
             "ok": False,
             "status": "failed",
+            "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
             "job_id": job_id,
+            "task_run_id": job_id,
+            "task_summary": self._receipt_summary(self.db.get_job(job_id) or {}, "task_summary"),
+            "result_summary": None,
+            "failure_reason": normalize_summary(
+                message, max_chars=1000, field="failure_reason", error_code="INTERNAL_ERROR"
+            ),
             "error_code": code,
             "error_message": message,
             "attempts": errors,
@@ -909,11 +994,13 @@ class RelayEngine:
             status="FAILED",
             error_code=code,
             error_message=message,
+            result_summary=None,
             receipt_json=json.dumps(receipt, ensure_ascii=False),
             completed_at=utc_now(),
         )
         self.db.add_event(job_id, "JOB_FAILED", receipt)
         self.db.scrub_non_replayable(job_id)
+        self._refresh_search_index(job_id)
         self._clear_progress(job_id)
         return receipt
 
@@ -953,6 +1040,7 @@ class RelayEngine:
             "ok": True,
             "status": "reused" if reused else "queued",
             "job_id": job["job_id"],
+            "task_run_id": job["job_id"],
             "deduplicated": reused,
         }
 
@@ -982,22 +1070,26 @@ class RelayEngine:
             "ok": True,
             "status": "reused" if reused else "queued",
             "job_id": job["job_id"],
+            "task_run_id": job["job_id"],
             "deduplicated": reused,
         }
 
     def receipt(self, job_id: str) -> dict[str, Any]:
         job = self.db.get_job(job_id)
         if not job:
-            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+            raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         if job.get("receipt_json"):
             try:
                 return json.loads(job["receipt_json"])
             except json.JSONDecodeError:
                 pass
-        return {
+        schema_version = int(job.get("receipt_schema_version") or 1)
+        receipt = {
             "ok": job["status"] not in {"FAILED", "CANCELLED"},
             "status": job["status"].lower(),
+            "receipt_schema_version": schema_version,
             "job_id": job_id,
+            "task_run_id": job_id,
             "run_id": job_id,
             "trigger_type": job.get("trigger_type", "manual"),
             "worker": job.get("actual_worker"),
@@ -1006,11 +1098,20 @@ class RelayEngine:
             "error_code": job.get("error_code"),
             "error_message": job.get("error_message"),
         }
+        if schema_version >= RECEIPT_SCHEMA_VERSION:
+            receipt.update(
+                {
+                    "task_summary": self._receipt_summary(job, "task_summary"),
+                    "result_summary": self._receipt_summary(job, "result_summary"),
+                    "failure_reason": self._resolve_failure_reason(job),
+                }
+            )
+        return receipt
 
     def show(self, job_id: str) -> dict[str, Any]:
         job = self.db.get_job(job_id)
         if not job:
-            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+            raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         job["attempts"] = self.db.attempts_for_job(job_id)
         job["events"] = self.db.events_for_job(job_id)
         job["artifacts"] = self.db.artifacts_for_job(job_id)
@@ -1023,9 +1124,9 @@ class RelayEngine:
     def rerun(self, job_id: str, force_new: bool = True) -> dict[str, Any]:
         job = self.db.get_job(job_id)
         if not job:
-            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+            raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         if not bool(job.get("replayable", 1)) or job.get("request_json") in (None, "", "{}"):
-            raise RelayError("JOB_NOT_REPLAYABLE", "This job did not save a replayable request.")
+            raise RelayError("JOB_NOT_REPLAYABLE", "This Task Run did not save a replayable request.")
         request = JobRequest.from_dict(json.loads(job["request_json"]))
         request.request_id = None
         request.force_new = force_new
@@ -1036,9 +1137,9 @@ class RelayEngine:
     def queue_rerun(self, job_id: str, submitted_via: str = "gui") -> dict[str, Any]:
         job = self.db.get_job(job_id)
         if not job:
-            raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+            raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         if not bool(job.get("replayable", 1)) or job.get("request_json") in (None, "", "{}"):
-            raise RelayError("JOB_NOT_REPLAYABLE", "This job did not save a replayable request.")
+            raise RelayError("JOB_NOT_REPLAYABLE", "This Task Run did not save a replayable request.")
         request = JobRequest.from_dict(json.loads(job["request_json"]))
         request.request_id = None
         request.force_new = True
@@ -1120,6 +1221,7 @@ class RelayEngine:
             "input_schema": task.get("input_schema"),
             "output_contract": task.get("output_contract"),
             "validation_policy": task.get("validation_policy"),
+            "task_summary": task.get("task_summary"),
         }
         job, reused = self.create_job(
             base,
@@ -1152,6 +1254,7 @@ class RelayEngine:
             "input_schema": task.get("input_schema"),
             "output_contract": task.get("output_contract"),
             "validation_policy": task.get("validation_policy"),
+            "task_summary": task.get("task_summary"),
         }
 
     def run_task_from_snapshot(
@@ -1202,6 +1305,7 @@ class RelayEngine:
             "input_schema": task_snapshot.get("input_schema"),
             "output_contract": task_snapshot.get("output_contract"),
             "validation_policy": task_snapshot.get("validation_policy"),
+            "task_summary": task_snapshot.get("task_summary"),
         }
         return self.create_job(
             base,
@@ -1215,7 +1319,7 @@ class RelayEngine:
     def save_run_as_task(self, run_id: str, *, name: str, description: str | None = None) -> dict[str, Any]:
         job = self.db.get_job(run_id)
         if not job:
-            raise RelayError("JOB_NOT_FOUND", f"Job not found: {run_id}")
+            raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {run_id}")
         snapshot: dict[str, Any] = {}
         if job.get("task_snapshot_json"):
             try:

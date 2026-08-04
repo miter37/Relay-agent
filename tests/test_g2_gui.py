@@ -87,6 +87,7 @@ class G2NewTaskGuiTests(unittest.TestCase):
 
         self.assertEqual(dialog.selected_paths(), ["C:/relay/report.md"])
         self.assertIn("2.0 KB", dialog.file_list.item(1).text())
+        self.assertEqual(dialog.windowTitle(), "Add files from Task Run")
 
     def test_job_input_candidates_keep_existing_unique_files_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -130,6 +131,14 @@ class G2NewTaskGuiTests(unittest.TestCase):
         self.assertTrue(view.rerun_button.isEnabled())
         self.assertFalse(view.copy_task_button.isEnabled())
         self.assertFalse(view.open_folder_button.isEnabled())
+        self.assertEqual(view.title_label.text(), "Completed task")
+
+    def test_public_gui_labels_use_task_run_terminology(self):
+        view = NewTaskView()
+        self.assertEqual(view.add_from_job_button.text(), "+ Add from Task Run ID")
+
+        detail = JobDetailView()
+        self.assertEqual(detail.title_label.text(), "Task Run")
 
     def test_answer_tab_renders_markdown_and_copies_plain_text(self):
         view = JobDetailView()

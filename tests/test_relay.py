@@ -97,6 +97,16 @@ class RelayTests(unittest.TestCase):
         self.assertIn(r"\u2014", output)
         self.assertEqual(json.loads(output)["message"], "before — after")
 
+    def test_human_receipt_output_uses_task_run_label(self):
+        from relay.cli import _emit
+
+        stream = io.StringIO()
+        with patch("sys.stdout", stream):
+            _emit({"ok": True, "status": "completed", "job_id": "task-run-1"})
+
+        self.assertIn("Task Run: task-run-1", stream.getvalue())
+        self.assertNotIn("Job:", stream.getvalue())
+
     def test_daemon_runs_due_cleanup(self):
         self.audit_all(deep=False)
         result = self.engine.run(JobRequest(task="daemon cleanup", worker="codex", fallback=False))
@@ -328,6 +338,14 @@ class RelayTests(unittest.TestCase):
         self.assertFalse(retryable)
         self.assertIn("Settings > General > Codex Full Access Mode", adapter.permission_failure_message("Blocked"))
 
+    def test_auth_error_in_worker_stdout_is_classified_as_auth_required(self):
+        from relay.adapters.claude import ClaudeAdapter
+
+        adapter = ClaudeAdapter(self.config.worker("claude"), self.config.path_value("adapter_spec_root"))
+        code, retryable = adapter.classify_failure(1, '{"result":"Not logged in · Please run /login"}')
+        self.assertEqual(code, "AUTH_REQUIRED")
+        self.assertFalse(retryable)
+
     def test_engine_surfaces_permission_guidance_for_a_worker_exit(self):
         self.audit_all(deep=False)
         os.environ["RELAY_MOCK_CODEX_BEHAVIOR"] = "permission"
@@ -380,6 +398,38 @@ class RelayTests(unittest.TestCase):
             set(artifact_schema["required"]),
             {"relative_path", "description", "encoding", "content"},
         )
+
+    def test_codex_output_schema_requires_all_top_level_properties(self):
+        from relay.adapters.base import AdapterContext
+        from relay.adapters.codex import CodexAdapter
+        from relay.request_builder import STANDARD_JSON_SCHEMA
+
+        worker_config = self.config.worker("codex")
+        worker_config["command"] = mock_cli("codex")
+        adapter = CodexAdapter(worker_config, self.config.path_value("adapter_spec_root"))
+        workspace = self.home / "workspace" / "codex-schema"
+        workspace.mkdir(parents=True)
+        schema_file = workspace / "schema.json"
+        schema_file.write_text(json.dumps(STANDARD_JSON_SCHEMA), encoding="utf-8")
+        ctx = AdapterContext(
+            job_id="codex-schema-test",
+            workspace=workspace,
+            request_file=workspace / "request.md",
+            result_file=workspace / "result.json.partial",
+            artifact_dir=workspace / "artifacts",
+            schema_file=schema_file,
+            result_format="json",
+            profile="analysis-only",
+            model=None,
+            config=worker_config,
+        )
+
+        command, _, _ = adapter.build_command(ctx)
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+        self.assertIn("summary", schema["required"])
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertNotIn("summary", STANDARD_JSON_SCHEMA["required"])
+        self.assertIn("--output-schema", command)
 
     def test_model_catalog_verify_does_not_reuse_unverified_cache(self):
         from relay.model_catalog import DiscoveredModel, ModelCatalog

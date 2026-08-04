@@ -17,6 +17,11 @@ from .api import (
     artifact_detail,
     artifact_lineage,
     attention_inbox_api,
+    catalog_capability,
+    catalog_project_runs,
+    catalog_projects,
+    catalog_task_runs,
+    catalog_tasks,
     check_job_progress,
     compare_runs,
     create_project,
@@ -60,7 +65,7 @@ from .api import (
     project_runs,
     quality_attention_api,
     reject_checkpoint,
-    routine_runs,
+    routine_receipt,
     run_artifacts,
     run_detail,
     run_events,
@@ -290,7 +295,72 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/v1/tasks":
-            self._json(HTTPStatus.OK, list_tasks(self.daemon.engine))
+            try:
+                name = (params.get("name") or [None])[0]
+                limit = int((params.get("limit") or ["200"])[0])
+            except ValueError:
+                self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "limit must be an integer.")
+                return
+            self._json(HTTPStatus.OK, list_tasks(self.daemon.engine, name=name, limit=limit))
+            return
+        if path == "/v1/catalog":
+            self._json(HTTPStatus.OK, catalog_capability())
+            return
+        if path in {
+            "/v1/catalog/tasks",
+            "/v1/catalog/task-runs",
+            "/v1/catalog/projects",
+            "/v1/catalog/project-runs",
+        }:
+            try:
+                values = {key: (items[0] if items else None) for key, items in params.items()}
+                limit = int(values.get("limit") or "100")
+                if path.endswith("/tasks"):
+                    payload = catalog_tasks(
+                        self.daemon.db,
+                        limit=limit,
+                        cursor=values.get("cursor"),
+                        updated_since=values.get("updated_since"),
+                    )
+                elif path.endswith("/task-runs"):
+                    payload = catalog_task_runs(
+                        self.daemon.db,
+                        limit=limit,
+                        cursor=values.get("cursor"),
+                        status=values.get("status"),
+                        task_id=values.get("task_id"),
+                        date_from=values.get("from"),
+                        date_to=values.get("to"),
+                    )
+                elif path.endswith("/projects"):
+                    payload = catalog_projects(
+                        self.daemon.db,
+                        limit=limit,
+                        cursor=values.get("cursor"),
+                        updated_since=values.get("updated_since"),
+                    )
+                else:
+                    payload = catalog_project_runs(
+                        self.daemon.db,
+                        limit=limit,
+                        cursor=values.get("cursor"),
+                        status=values.get("status"),
+                        project_id=values.get("project_id"),
+                        date_from=values.get("from"),
+                        date_to=values.get("to"),
+                    )
+                self._json(HTTPStatus.OK, payload)
+            except (ValueError, RelayError) as err:
+                code = err.code if isinstance(err, RelayError) else "INVALID_REQUEST"
+                message = err.message if isinstance(err, RelayError) else str(err)
+                self._api_error(HTTPStatus.BAD_REQUEST, code, message)
+            return
+        if path.startswith("/v1/task-runs/"):
+            suffix = path[len("/v1/task-runs/") :]
+            try:
+                self._json(HTTPStatus.OK, run_detail(self.daemon.engine, suffix))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
         if path.startswith("/v1/tasks/"):
             suffix = path[len("/v1/tasks/") :]
@@ -304,23 +374,34 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
         if path == "/v1/projects":
-            self._json(HTTPStatus.OK, list_projects(self.daemon.engine))
+            try:
+                name = (params.get("name") or [None])[0]
+                limit = int((params.get("limit") or ["200"])[0])
+            except ValueError:
+                self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "limit must be an integer.")
+                return
+            self._json(HTTPStatus.OK, list_projects(self.daemon.engine, name=name, limit=limit))
             return
         if path == "/v1/routines":
-            self._json(HTTPStatus.OK, list_routines(self.daemon.engine))
-            return
-        if path == "/v1/routines/preview":
             try:
-                self._json(HTTPStatus.OK, preview_routine(self.daemon.engine, self._body()))
-            except RelayError as err:
-                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+                name = (params.get("name") or [None])[0]
+                limit = int((params.get("limit") or ["200"])[0])
+            except ValueError:
+                self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "limit must be an integer.")
+                return
+            self._json(HTTPStatus.OK, list_routines(self.daemon.engine, name=name, limit=limit))
             return
         if path.startswith("/v1/projects/"):
             suffix = path[len("/v1/projects/") :]
             try:
                 if suffix.endswith("/runs"):
                     pid = suffix[: -len("/runs")]
-                    self._json(HTTPStatus.OK, project_runs(self.daemon.engine, pid))
+                    try:
+                        limit = int((params.get("limit") or ["50"])[0])
+                    except ValueError:
+                        self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "limit must be an integer.")
+                        return
+                    self._json(HTTPStatus.OK, project_runs(self.daemon.engine, pid, limit=limit))
                 else:
                     self._json(HTTPStatus.OK, get_project(self.daemon.engine, suffix))
             except RelayError as err:
@@ -331,7 +412,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             try:
                 if suffix.endswith("/runs"):
                     rid = suffix[: -len("/runs")]
-                    self._json(HTTPStatus.OK, routine_runs(self.daemon.engine, rid))
+                    try:
+                        limit = int((params.get("limit") or ["100"])[0])
+                    except ValueError:
+                        self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "limit must be an integer.")
+                        return
+                    rows = self.daemon.engine.db.list_routine_runs(routine_id=rid, limit=limit)
+                    self._json(HTTPStatus.OK, {"ok": True, "routine_id": rid, "runs": rows})
+                elif suffix.endswith("/receipt"):
+                    rid = suffix[: -len("/receipt")]
+                    self._json(HTTPStatus.OK, routine_receipt(self.daemon.engine, rid))
                 else:
                     self._json(HTTPStatus.OK, get_routine(self.daemon.engine, suffix))
             except RelayError as err:
@@ -354,16 +444,6 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 elif suffix.endswith("/receipt"):
                     prid = suffix[: -len("/receipt")]
                     self._json(HTTPStatus.OK, project_run_receipt(self.daemon.engine, prid))
-                elif suffix.endswith("/retry"):
-                    prid = suffix[: -len("/retry")]
-                    self._json(HTTPStatus.OK, project_run_retry(self.daemon.engine, prid, self._body()))
-                elif suffix.endswith("/partial-reexecute"):
-                    prid = suffix[: -len("/partial-reexecute")]
-                    self._json(HTTPStatus.OK, partial_reexecute_project_run(self.daemon.engine, prid, self._body()))
-                    return
-                elif suffix.endswith("/cancel"):
-                    prid = suffix[: -len("/cancel")]
-                    self._json(HTTPStatus.OK, project_run_cancel(self.daemon.engine, prid))
                 else:
                     self._json(HTTPStatus.OK, project_run(self.daemon.engine, suffix))
             except RelayError as err:
@@ -724,6 +804,12 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             if path == "/v1/routines":
                 self._json(HTTPStatus.OK, create_routine(self.daemon.engine, self._body()))
                 return
+            if path == "/v1/routines/preview":
+                try:
+                    self._json(HTTPStatus.OK, preview_routine(self.daemon.engine, self._body()))
+                except RelayError as err:
+                    self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+                return
             if path.startswith("/v1/routines/") and path.endswith("/run-now"):
                 rid = path[len("/v1/routines/") : -len("/run-now")]
                 self._json(HTTPStatus.OK, run_routine_now(self.daemon.engine, rid))
@@ -755,6 +841,37 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     elif action == "edit":
                         self._json(HTTPStatus.OK, edit_checkpoint(self.daemon.engine, prid, token, self._body()))
                         return
+            if path.startswith("/v1/project-runs/") and path.endswith("/steps"):
+                # Mirror GET /steps for clients that send POST; the underlying call is read-only.
+                prid = path[len("/v1/project-runs/") : -len("/steps")]
+                try:
+                    self._json(HTTPStatus.OK, project_run_steps(self.daemon.engine, prid))
+                except RelayError as err:
+                    self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+                return
+            if path.startswith("/v1/project-runs/") and path.endswith("/retry"):
+                prid = path[len("/v1/project-runs/") : -len("/retry")]
+                try:
+                    self._json(HTTPStatus.OK, project_run_retry(self.daemon.engine, prid, self._body()))
+                except RelayError as err:
+                    self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+                return
+            if path.startswith("/v1/project-runs/") and path.endswith("/cancel"):
+                prid = path[len("/v1/project-runs/") : -len("/cancel")]
+                try:
+                    self._json(HTTPStatus.OK, project_run_cancel(self.daemon.engine, prid))
+                except RelayError as err:
+                    self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+                return
+            if path.startswith("/v1/project-runs/") and path.endswith("/partial-reexecute"):
+                prid = path[len("/v1/project-runs/") : -len("/partial-reexecute")]
+                try:
+                    self._json(HTTPStatus.OK, partial_reexecute_project_run(self.daemon.engine, prid, self._body()))
+                except (RelayError, ValueError) as err:
+                    code = err.code if isinstance(err, RelayError) else "INVALID_REQUEST"
+                    message = err.message if isinstance(err, RelayError) else str(err)
+                    self._api_error(HTTPStatus.BAD_REQUEST, code, message)
+                return
             if path == "/v1/search/semantic":
                 self._json(HTTPStatus.OK, semantic_search_api(self.daemon.engine, self._body()))
                 return
@@ -974,6 +1091,7 @@ class RelayDaemon:
         self.project_runtime = ProjectRuntime(self.db, self.engine, self.project_service)
         self.routine_service = RoutineService(self.config, self.db, self.engine)
         self.routine_runtime = RoutineRuntime(self.config, self.db, self.engine, self.routine_service)
+        self.engine.routine_service = self.routine_service
         self.autostart_manager = AutoStartManager(self.config)
         self.schedule_runtime = ScheduleRuntime(self.config, self.db, self.engine)
         self.scheduler = Scheduler(self.engine)
