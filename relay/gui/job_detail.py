@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .design_widgets import StatusBadge
+
 
 class TaskRunDetailView(QWidget):
     cancel_requested = Signal(str)
@@ -38,9 +40,9 @@ class TaskRunDetailView(QWidget):
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         self.title_label = QLabel("Task Run")
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label.setObjectName("pageTitle")
         header.addWidget(self.title_label, 1)
-        self.status_label = QLabel()
+        self.status_label = StatusBadge()
         header.addWidget(self.status_label)
         self.cancel_button = QPushButton("Stop task")
         self.cancel_button.clicked.connect(self._cancel)
@@ -127,8 +129,7 @@ class TaskRunDetailView(QWidget):
         self.job_id = job_id
         self.title_label.setText(str(job.get("title") or self.job_id or "Task Run"))
         status = str(job.get("status") or "UNKNOWN")
-        self.status_label.setText(self._status_text(status))
-        self.status_label.setStyleSheet(self._status_style(status))
+        self.status_label.set_status(status)
         actions = job.get("actions") or {}
         self.cancel_button.setEnabled(bool(actions.get("can_cancel")))
         self._can_check_progress = bool(actions.get("can_check_progress"))

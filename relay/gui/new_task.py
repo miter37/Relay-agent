@@ -243,7 +243,7 @@ class NewTaskView(QWidget):
         row.addWidget(button)
         help_text = QLabel(explanation)
         help_text.setWordWrap(True)
-        help_text.setStyleSheet("color: #475569; font-size: 11px; padding: 2px 0;")
+        help_text.setObjectName("mutedText")
         help_text.hide()
         button.toggled.connect(help_text.setVisible)
         row.addWidget(help_text, 1)
@@ -303,7 +303,6 @@ class NewTaskView(QWidget):
         self.add_from_job_button.setText(
             "Loading Task Run files…" if self._job_lookup_pending else "+ Add from Task Run ID"
         )
-
 
     def _choose_target(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose working folder")

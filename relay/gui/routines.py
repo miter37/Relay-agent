@@ -67,7 +67,7 @@ class RoutinesListView(QWidget):
         header = QHBoxLayout()
         header.addWidget(QLabel("<b>Routines</b>"), 1)
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet("color: #475569; font-size: 11px;")
+        self.count_label.setObjectName("mutedText")
         header.addWidget(self.count_label)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
@@ -139,7 +139,7 @@ class RoutineDetailView(QWidget):
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         self.title_label = QLabel("Routine")
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label.setObjectName("pageTitle")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel("")
         header.addWidget(self.status_label)
@@ -385,7 +385,7 @@ class RoutineEditorDialog(QDialog):
 
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #991B1B;")
+        self.error_label.setObjectName("errorText")
         root.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
@@ -449,8 +449,7 @@ class RoutineEditorDialog(QDialog):
             self.preview_browser.setHtml("<i>No occurrences in the configured active range.</i>")
             return
         rows = "".join(
-            f"<li>{escape(str(item.get('local_time') or '-'))} "
-            f"({escape(str(item.get('instant_utc') or '-'))})</li>"
+            f"<li>{escape(str(item.get('local_time') or '-'))} ({escape(str(item.get('instant_utc') or '-'))})</li>"
             for item in occurrences
         )
         self.preview_browser.setHtml(f"<b>Next occurrences</b><ul>{rows}</ul>")

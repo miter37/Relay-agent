@@ -110,12 +110,17 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         root = QWidget()
         outer = QVBoxLayout(root)
-        header = QFrame()
-        header_layout = QVBoxLayout(header)
+        self.top_bar = QFrame()
+        self.top_bar.setObjectName("topBar")
+        header_layout = QVBoxLayout(self.top_bar)
         title_row = QFrame()
         title_layout = QHBoxLayout(title_row)
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.addWidget(QLabel("<b>Relay-agent</b>"))
+        self.brand_label = QLabel("<b>Relay</b>")
+        title_layout.addWidget(self.brand_label)
+        self.page_title_label = QLabel("Runs")
+        self.page_title_label.setObjectName("pageTitle")
+        title_layout.addWidget(self.page_title_label)
         title_layout.addStretch(1)
         self.health_label = QLabel("Health: Checking…")
         self.daemon_label = self.health_label
@@ -126,12 +131,7 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.health_time_label)
         title_layout.addWidget(self.health_refresh_button)
         self.new_task_button = QPushButton("+ New Task")
-        self.new_task_button.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border: 0; border-radius: 7px; "
-            "padding: 8px 16px; font-weight: 700; }"
-            "QPushButton:hover { background: #1D4ED8; }"
-            "QPushButton:disabled { background: #93C5FD; color: #EFF6FF; }"
-        )
+        self.new_task_button.setObjectName("primaryAction")
         self.new_task_button.clicked.connect(self._show_new_task)
         title_layout.addWidget(self.new_task_button)
         header_layout.addWidget(title_row)
@@ -139,11 +139,12 @@ class MainWindow(QMainWindow):
         self.banner.setWordWrap(True)
         self.banner.hide()
         header_layout.addWidget(self.banner)
-        outer.addWidget(header)
+        outer.addWidget(self.top_bar)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setObjectName("mainSplitter")
         self.sidebar = QWidget()
+        self.sidebar.setObjectName("sidebarNav")
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
         self.search = QLineEdit()
@@ -166,15 +167,28 @@ class MainWindow(QMainWindow):
         self.schedule_list.itemClicked.connect(self._select_schedule)
         sidebar_layout.addWidget(self.schedule_list)
         self.settings_button = QPushButton("Settings")
+        self.settings_button.setObjectName("sidebarButton")
+        self.settings_button.setCheckable(True)
         self.settings_button.clicked.connect(self._show_settings)
         sidebar_layout.addWidget(self.settings_button)
+        self.runs_button = QPushButton("Runs")
+        self.runs_button.setObjectName("sidebarButton")
+        self.runs_button.setCheckable(True)
+        self.runs_button.clicked.connect(self._show_runs)
+        sidebar_layout.addWidget(self.runs_button)
         self.tasks_button = QPushButton("Tasks")
+        self.tasks_button.setObjectName("sidebarButton")
+        self.tasks_button.setCheckable(True)
         self.tasks_button.clicked.connect(self._show_tasks)
         sidebar_layout.addWidget(self.tasks_button)
         self.projects_button = QPushButton("Projects")
+        self.projects_button.setObjectName("sidebarButton")
+        self.projects_button.setCheckable(True)
         self.projects_button.clicked.connect(self._show_projects)
         sidebar_layout.addWidget(self.projects_button)
         self.routines_button = QPushButton("Routines")
+        self.routines_button.setObjectName("sidebarButton")
+        self.routines_button.setCheckable(True)
         self.routines_button.clicked.connect(self._show_routines)
         sidebar_layout.addWidget(self.routines_button)
         self.job_list = QTreeWidget()
@@ -271,6 +285,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self.statusBar().showMessage(f"Relay Home: {self.config.home}")
         self._set_connection("checking", "waiting for daemon health check")
+        self._activate_navigation("runs")
 
     @staticmethod
     def _combo(prefix: str, values: list[str]) -> QComboBox:
@@ -305,6 +320,7 @@ class MainWindow(QMainWindow):
         self.selected_job_id = None
         self.current_detail = None
         self.detail_view_mode = "settings"
+        self._activate_navigation("settings")
 
         self.detail_stack.setCurrentWidget(self.settings_view)
         if self.current_mode == "normal":
@@ -451,6 +467,7 @@ class MainWindow(QMainWindow):
         self.selected_job_id = None
         self.current_detail = None
         self.detail_view_mode = "new_task"
+        self._activate_navigation(None)
         self.detail_stack.setCurrentWidget(self.new_task_view)
 
     def _create_task(self, payload: dict) -> None:
@@ -460,11 +477,32 @@ class MainWindow(QMainWindow):
 
     # ----- Registered Tasks (Phase 3) ---------------------------------------
 
+    def _show_runs(self) -> None:
+        """Return to the Task Run browse context without changing selection."""
+        self.detail_view_mode = "runs"
+        self._activate_navigation("runs")
+        self.empty_detail.setText("Select a Task Run from the Runs list to inspect its evidence.")
+        self.detail_stack.setCurrentWidget(self.empty_detail)
+
+    def _activate_navigation(self, section: str | None) -> None:
+        buttons = {
+            "runs": self.runs_button,
+            "tasks": self.tasks_button,
+            "projects": self.projects_button,
+            "routines": self.routines_button,
+            "settings": self.settings_button,
+        }
+        for name, button in buttons.items():
+            button.setChecked(name == section)
+        if section:
+            self.page_title_label.setText(section.title())
+
     def _show_tasks(self) -> None:
         self.selected_job_id = None
         self.selected_schedule_id = None
         self.current_detail = None
         self.detail_view_mode = "tasks"
+        self._activate_navigation("tasks")
         self.detail_stack.setCurrentWidget(self.tasks_view)
         self.tasks_view.set_available_workers(
             [str(agent.get("agent_id")) for agent in self.agent_definitions if agent.get("agent_id")]
@@ -558,6 +596,7 @@ class MainWindow(QMainWindow):
         self.selected_task_id = None
         self.current_detail = None
         self.detail_view_mode = "projects"
+        self._activate_navigation("projects")
         self.detail_stack.setCurrentWidget(self.projects_view)
         if self.current_mode == "normal":
             self._refresh_projects()
@@ -657,6 +696,7 @@ class MainWindow(QMainWindow):
         self.selected_project_id = None
         self.current_detail = None
         self.detail_view_mode = "routines"
+        self._activate_navigation("routines")
         self.detail_stack.setCurrentWidget(self.routines_view)
         self.routines_view.set_tasks(list(self.tasks_index.values()))
         self.routines_view.set_projects(list(self.projects_index.values()))
@@ -1407,9 +1447,7 @@ class MainWindow(QMainWindow):
 
         if kind == "routines":
             routines = payload.get("routines", [])
-            self.routines_index = {
-                str(r.get("routine_id")): r for r in routines if r.get("routine_id")
-            }
+            self.routines_index = {str(r.get("routine_id")): r for r in routines if r.get("routine_id")}
             self.routines_view.set_routines(routines)
             if self.selected_routine_id and self.selected_routine_id in self.routines_index:
                 self.routines_view.set_routine(self.routines_index[self.selected_routine_id])
@@ -1740,6 +1778,7 @@ class MainWindow(QMainWindow):
         if schedule_id:
             self.selected_schedule_id = str(schedule_id)
             self.detail_view_mode = "schedule"
+            self._activate_navigation("runs")
             self._refresh_schedule(self.selected_schedule_id)
 
     def _refresh_schedule(self, schedule_id: str | None) -> None:
@@ -1754,6 +1793,7 @@ class MainWindow(QMainWindow):
             return
         self.selected_schedule_id = schedule_id
         self.detail_view_mode = "schedule"
+        self._activate_navigation("runs")
         self.schedule_detail_view.set_schedule(schedule, self.schedule_runs.get(schedule_id, []))
         self.detail_stack.setCurrentWidget(self.schedule_detail_view)
 
@@ -1812,6 +1852,7 @@ class MainWindow(QMainWindow):
         if self.progress_check_job_id and self.progress_check_job_id != job.get("job_id"):
             self.progress_check_job_id = None
         self.detail_view_mode = "job"
+        self._activate_navigation("runs")
         self.current_detail = job
         self.log_attempt_id = None
         self.log_offset = None

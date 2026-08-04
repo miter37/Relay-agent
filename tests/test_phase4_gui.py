@@ -70,6 +70,16 @@ class ProjectsWidgetTests(unittest.TestCase):
         self.assertEqual(view.title_label.text(), "Project")
         self.assertFalse(view.edit_button.isEnabled())
 
+    def test_project_list_activation_emits_selection_once(self):
+        view = ProjectsListView()
+        view.set_projects([{"project_id": "p-1", "name": "One"}])
+        seen = []
+        view.select_project_requested.connect(seen.append)
+
+        view._item_activated(view.list_widget.item(0))
+
+        self.assertEqual(seen, ["p-1"])
+
     def test_project_editor_payload_round_trip(self):
         dialog = ProjectEditorDialog(
             available_tasks=[{"name": "TA", "task_id": "ta"}],

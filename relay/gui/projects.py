@@ -45,10 +45,6 @@ def _definition_from_project(project):
         decoded = {}
     decoded.setdefault("name", project.get("name", ""))
     return decoded
-    decoded.setdefault("name", project.get("name", ""))
-    return decoded
-    decoded.setdefault("name", project.get("name", ""))
-    return decoded
 
 
 class ProjectsListView(QWidget):
@@ -72,7 +68,7 @@ class ProjectsListView(QWidget):
         header.addWidget(self.create_button)
         layout.addLayout(header)
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet("color: #475569; font-size: 11px;")
+        self.count_label.setObjectName("mutedText")
         header.addWidget(self.count_label)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by name")
@@ -120,7 +116,6 @@ class ProjectsListView(QWidget):
         project_id = item.data(Qt.UserRole)
         if project_id:
             self.select_project_requested.emit(str(project_id))
-            self.select_project_requested.emit(str(project_id))
 
 
 class ProjectDetailView(QWidget):
@@ -135,7 +130,7 @@ class ProjectDetailView(QWidget):
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         self.title_label = QLabel("Project")
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label.setObjectName("pageTitle")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel("")
         header.addWidget(self.status_label)
@@ -318,7 +313,7 @@ class ProjectEditorDialog(QDialog):
         root.addLayout(output_buttons)
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #991B1B;")
+        self.error_label.setObjectName("errorText")
         root.addWidget(self.error_label)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
         buttons.accepted.connect(self._on_save)

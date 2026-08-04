@@ -6,11 +6,13 @@ from .. import __version__
 from ..cli import _ensure_daemon
 from ..compatibility import relay_home_id
 from ..errors import RelayError
+from .design_styles import application_stylesheet
 from .main_window import MainWindow
 
 
 def run_gui(config) -> int:
     app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(application_stylesheet())
     try:
         _ensure_daemon(config)
     except RelayError as exc:

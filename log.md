@@ -1,9 +1,11 @@
-- 2026-08-04 19:35 | 실제 Codex·Claude 복합 오케스트레이션을 재검증해 Project 고착과 Artifact 입력 경로 결함을 수정하고, 두 Worker 최종 시나리오를 통과시킴; Agy 기존 S1–S6도 6/6.
-- 2026-08-04 18:55 | Real-agy orchestration S1–S6 all passed; fixed agy PATH hardlink, adapter absolute paths/--add-dir/scratch fallback, doctor Path+artifact tolerance; report: docs/Relay_Agent_Orchestration_Agy_Validation_Report_v1.0.md.
-- 2026-08-04 18:30 | Re-ran orchestration scenarios S1–S6 with D:\Python314 + mock Codex; all 6 passed (Task chain, sequential/parallel/cross Project, failure recovery, catalog/search); report: docs/Relay_Agent_Orchestration_Scenario_Validation_Report_v1.1.md.
-- 2026-08-04 10:50 | Hardened Tasks and Projects query flows: API and daemon now parse `?name=` and `?limit=` for `/v1/tasks`, `/v1/projects`, and `/v1/projects/{id}/runs` (CLI `--name` was silently dropped before); TasksView and ProjectsView gained an entry-count label with "server may have more" cap hint; added six daemon route regression tests (name filter, limit cap, invalid limit, project run limit); 16 backend + 20 GUI tests green.
-- 2026-08-04 09:50 | Built Phase 4 registered-Projects GUI (list/detail/editor/run-monitor views, structured DAG editor with allow-list guard) and repaired daemon route readiness (Project Run retry/cancel/partial-reexecute on POST, Routine preview on POST, Routine receipt on GET); 10 Phase 4 GUI tests + 46 prior GUI tests + 10 phase4 backend regression tests all pass.
-- 2026-08-04 09:10 | Implemented Phase 3 registered-Tasks GUI (TaskListView, TaskDetailView, TaskEditorDialog, TaskRunDialog, SaveRunAsTaskDialog, TasksView), wired MainWindow navigation, response handlers, and signal emitters; 46 GUI tests pass.
+- 2026-08-04 21:25 | Reproduced the disabled New Task GUI issue as legacy-daemon API incompatibility and defined scenario-based GUI validation.
+- 2026-08-04 19:35 | Revalidated Codex·Claude orchestration; fixed Project anchoring and Artifact input paths. Both Worker finals and Agy S1–S6 passed.
+- 2026-08-04 20:20 | Implemented the Relay GUI design foundation: shared tokens, QSS, shell navigation, reusable widgets, and GUI regressions.
+- 2026-08-04 18:55 | Real-agy S1–S6 passed; fixed PATH, adapter paths/add-dir/scratch fallback, and doctor Path/Artifact tolerance. Report v1.0 added.
+- 2026-08-04 18:30 | Re-ran mock-Codex orchestration S1–S6; all passed across chaining, Project modes, recovery, and catalog/search. Report v1.1 added.
+- 2026-08-04 10:50 | Hardened Tasks/Projects name and limit query parsing, added capped-count hints, and six daemon route regressions; 16 backend + 20 GUI tests passed.
+- 2026-08-04 09:50 | Built Phase 4 Projects GUI and repaired Project Run/Routine daemon routes; 10 Phase 4 GUI + 46 prior GUI + 10 backend tests passed.
+- 2026-08-04 09:10 | Implemented Phase 3 Tasks GUI, navigation, response handlers, and signals; 46 GUI tests passed.
 - 2026-08-04 08:35 | Defined the staged Phase 3–6 GUI implementation plan, architecture, API mappings, safety constraints, tests, and acceptance gates.
 - 2026-08-04 04:00 | Implemented Phase 6 approvals, comparison, quality, attention, notifications, dashboards, lifecycle archives, and receipt schema v1.
 - 2026-08-04 02:00 | Implemented Phase 5 Routine CRUD, persistent Task/Project dispatch, daemon API/CLI, policies, history, and Schedule coexistence.
@@ -37,7 +39,7 @@
 - 2026-08-04 16:05 | Catalog Slice 1 계약 구현: Task summary 모델/정규화, JSON result summary, receipt v2 계약 상수, 단위 테스트 추가. 기존 receipt v1은 호환을 위해 유지.
 - 2026-08-04 16:32 | Catalog Slice 2 완료: schema v13 additive migration, Task/Task Run summary columns, indexes, idempotent legacy backfill, privacy scrub, CLI/API Task summary 입력을 구현.
 - 2026-08-04 17:05 | Catalog Slice 3 완료: receipt schema v2 활성화, Agent summary 추출, Task/Result/Failure summary 저장, cancel/failure/partial 경로 receipt 보강.
-- 2026-08-04 13:30 | Implemented bounded Task/Task Run catalogs with opaque pagination, filters, capability manifest, daemon routes, CLI machine output, and summary/privacy regression tests; 470 tests pass.
+- 2026-08-04 13:30 | Implemented bounded Task/Task Run catalogs, pagination, filters, capability manifest, daemon/CLI contracts, and privacy regressions; 470 tests passed.
 - 2026-08-04 14:10 | Added Catalog-first Agent guidance to Hermes skill, README, and manual; added catalog-to-Task-selection-to-receipt-to-Artifact-reuse-Lineage E2E coverage; 471 tests pass.
 - 2026-08-04 15:00 | 검증 리포트 작성: 임시 Relay Home에서 단독 Task 5개, Artifact 체인 2개, Project 3개와 Project Run 완료, 실패·변조 차단·CLI Catalog 계약을 확인.
 - 2026-08-04 15:30 | Planned mission hardening: machine contracts, mock-Worker E2E, schema v14 Project summaries, and Project/Project Run catalogs.
@@ -45,3 +47,4 @@
 - 2026-08-04 17:30 | Ran five orchestration scenarios: 11 Tasks, 12 Task Runs, 3 Projects; execution and cross-Project lineage passed, fresh search gap recorded.
 - 2026-08-04 18:00 | Implemented Search Index Hardening: terminal Run/Artifact auto-indexing, stale-index backfill, privacy-safe scrub ordering, and orchestration search regressions pass.
 - 2026-08-04 18:30 | Restored real Worker health: Codex schema compatibility fixed, Claude auth errors classified, and Codex/Claude/Antigravity deep doctor passed.
+- 2026-08-04 07:35 | Defined the reusable Relay GUI design system and rollout plan from the dark operations-console references.
