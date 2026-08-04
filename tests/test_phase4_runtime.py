@@ -98,6 +98,27 @@ class ProjectRuntimeTests(unittest.TestCase):
         step_b = self.db.get_project_step(project_run["project_run_id"], "b")
         self.assertEqual(step_b["status"], "ready")
 
+    def test_partial_task_run_is_terminal_for_project_progression(self):
+        project_run = self._make_linear_project()
+        project_run_id = project_run["project_run_id"]
+        self.runtime.tick_once()
+        self._complete_step_with_artifact(project_run_id, "a", "out")
+        step_a = self.db.get_project_step(project_run_id, "a")
+        self.db.update_job(step_a["active_task_run_id"], status="PARTIAL", result_status="partial")
+
+        self.runtime.tick_once()
+        step_a = self.db.get_project_step(project_run_id, "a")
+        step_b = self.db.get_project_step(project_run_id, "b")
+        self.assertEqual(step_a["status"], "completed")
+        self.assertEqual(step_b["status"], "ready")
+
+        self.runtime.tick_once()
+        self._complete_step_with_artifact(project_run_id, "b", "out")
+        self.runtime.tick_once()
+        final_run = self.db.get_project_run(project_run_id)
+        self.assertEqual(final_run["status"], "completed")
+        self.assertIn("TASK_RUN_PARTIAL", final_run["warnings_json"])
+
     def test_completing_all_runs_marks_run_completed(self):
         project_run = self._make_linear_project()
         for _ in range(15):

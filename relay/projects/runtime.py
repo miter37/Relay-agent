@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 _STEP_TERMINAL = {"completed", "failed", "cancelled", "blocked"}
+_TASK_SUCCESS_STATUSES = {"COMPLETED", "PARTIAL"}
 
 
 class ProjectRuntime:
@@ -88,7 +89,7 @@ class ProjectRuntime:
             if not job:
                 continue
             job_status = job.get("status")
-            if job_status in {"COMPLETED"}:
+            if job_status in _TASK_SUCCESS_STATUSES:
                 # Skip if step already processed (prevents duplicate checkpoint pausing on restart)
                 if step["status"] in {"awaiting_approval", "completed"}:
                     continue
@@ -299,11 +300,22 @@ class ProjectRuntime:
     def _finalize_completed(self, project_run_id: str, steps: list[dict[str, Any]], spec: ProjectSpec) -> None:
         snapshot = json.loads(self.db.get_project_run(project_run_id)["project_snapshot_json"])
         selection = snapshot.get("output_selection", []) or []
-        if not selection:
-            self._mark_run_completed(project_run_id, steps, [], [])
-            return
         final_ids: list[dict[str, Any]] = []
-        warnings: list[str] = []
+        warnings: list[dict[str, Any]] = []
+        for step in steps:
+            task_run_id = step.get("active_task_run_id")
+            task_run = self.engine.db.get_job(task_run_id) if task_run_id else None
+            if task_run and task_run.get("status") == "PARTIAL":
+                warnings.append(
+                    {
+                        "node_id": step["node_id"],
+                        "task_run_id": task_run_id,
+                        "warning": "TASK_RUN_PARTIAL",
+                    }
+                )
+        if not selection:
+            self._mark_run_completed(project_run_id, steps, [], warnings)
+            return
         for entry in selection:
             node_id = entry["node_id"]
             role = entry["role"]
@@ -314,6 +326,7 @@ class ProjectRuntime:
                     steps,
                     final_ids,
                     [{"node_id": node_id, "role": role, "error": "PROJECT_ARTIFACT_MISSING"}],
+                    failed=True,
                 )
                 return
             artifacts = self.engine.db.artifacts_for_job(step["active_task_run_id"])
@@ -331,6 +344,7 @@ class ProjectRuntime:
                             "error": "PROJECT_ARTIFACT_MISSING" if not matches else "PROJECT_ARTIFACT_AMBIGUOUS",
                         }
                     ],
+                    failed=True,
                 )
                 return
             uid = matches[0].get("artifact_uid") or matches[0].get("relative_path")
@@ -343,9 +357,11 @@ class ProjectRuntime:
         steps: list[dict[str, Any]],
         final_ids: list[dict[str, Any]],
         warnings: list[dict[str, Any]],
+        *,
+        failed: bool = False,
     ) -> None:
-        failed = next((s for s in steps if s["status"] == "failed"), None)
-        status = "failed" if failed or warnings else "completed"
+        failed_step = next((s for s in steps if s["status"] == "failed"), None)
+        status = "failed" if failed or failed_step else "completed"
         self.db.update_project_run(
             project_run_id,
             status=status,

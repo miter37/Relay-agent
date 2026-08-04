@@ -88,7 +88,7 @@ def build_request_markdown(
     attachment_lines = "\n".join(f"- `{item['name']}` at `input/{item['name']}`" for item in attachments) or "- None"
     artifact_input_lines = (
         "\n".join(
-            f"- `{item['alias']}` at `{item['snapshot_relative_path']}` "
+            f"- `{item['alias']}` at `input/{Path(item['snapshot_relative_path']).name}` "
             f"(source {item['source_job_id']}/{item['source_relative_path']}, sha256={item['snapshot_sha256']})"
             for item in artifact_inputs or []
         )
