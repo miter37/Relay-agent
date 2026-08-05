@@ -1,3 +1,7 @@
+- 2026-08-05 17:00 | Separated reusable Task definitions from Task Runs, added optional run inputs and schema checks, and validated 91 focused regressions.
+- 2026-08-05 15:47 | Completed GUI stage 2 for Runs, Task Run detail, and Tasks with action hierarchy, evidence panes, and explicit empty states; all GUI tests pass.
+- 2026-08-05 15:36 | Implemented GUI P0 palette/QSS hardening, semantic status styling, legacy color cleanup, and 94 GUI/core regression tests.
+- 2026-08-05 15:23 | Audited GUI contrast failures and added a phased all-screen/readability hardening plan with measurable accessibility gates.
 - 2026-08-04 21:25 | Reproduced the disabled New Task GUI issue as legacy-daemon API incompatibility and defined scenario-based GUI validation.
 - 2026-08-04 19:35 | Revalidated Codex·Claude orchestration; fixed Project anchoring and Artifact input paths. Both Worker finals and Agy S1–S6 passed.
 - 2026-08-04 20:20 | Implemented the Relay GUI design foundation: shared tokens, QSS, shell navigation, reusable widgets, and GUI regressions.
@@ -48,3 +52,6 @@
 - 2026-08-04 18:00 | Implemented Search Index Hardening: terminal Run/Artifact auto-indexing, stale-index backfill, privacy-safe scrub ordering, and orchestration search regressions pass.
 - 2026-08-04 18:30 | Restored real Worker health: Codex schema compatibility fixed, Claude auth errors classified, and Codex/Claude/Antigravity deep doctor passed.
 - 2026-08-04 07:35 | Defined the reusable Relay GUI design system and rollout plan from the dark operations-console references.
+- 2026-08-05 16:17 | Revalidated all Worker deep health checks, restored healthy daemon state, and added automatic GUI health refresh to prevent stale X indicators.
+- 2026-08-05 16:28 | Added GUI Worker deep-doctor actions, daemon deep-doctor API, long-running request handling, and verified Codex endpoint execution.
+- 2026-08-05 16:30 | Reduced automatic GUI health polling to a 10-minute interval while preserving immediate manual refresh.

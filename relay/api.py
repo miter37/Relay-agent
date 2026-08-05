@@ -170,6 +170,7 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             "force_new",
             "model",
             "request_id",
+            "inputs",
         )
         if key in request
     }
@@ -178,6 +179,7 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             if key in request:
                 safe_request[key] = request[key]
     detail["request"] = safe_request
+    detail["task_inputs"] = request.get("inputs") or {}
     detail["task_preview"] = _task_preview(request.get("task") or raw.get("task_text") or raw.get("task_preview"))
     status = raw.get("status")
     can_schedule = False
@@ -731,7 +733,7 @@ def run_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     overrides = payload.get("request") or {}
     request = None
-    if overrides or payload.get("worker") or payload.get("format"):
+    if overrides or payload.get("worker") or payload.get("format") or payload.get("inputs") is not None:
         request = JobRequest(
             task=overrides.get("task") or "",
             worker=overrides.get("worker") or payload.get("worker") or "auto",
@@ -742,6 +744,7 @@ def run_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             artifact_inputs=list(overrides.get("artifact_inputs") or []),
             request_id=overrides.get("request_id"),
             caller=overrides.get("caller", "human"),
+            inputs=overrides.get("inputs") or payload.get("inputs") or {},
         )
     job, reused, task = engine.run_task(
         task_id,

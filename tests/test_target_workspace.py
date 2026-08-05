@@ -27,6 +27,10 @@ class TargetPathInferenceTests(unittest.TestCase):
     def test_does_not_treat_url_as_posix_path(self):
         self.assertIsNone(infer_target_path("Create a summary from https://example.com/report"))
 
+    def test_ignores_interpreter_path_in_agent_instructions(self):
+        task = "Use D:\\Python314\\python.exe and pykrx to collect data and write a report."
+        self.assertIsNone(infer_target_path(task))
+
     def test_rejects_ambiguous_write_paths(self):
         with self.assertRaises(RelayError) as context:
             infer_target_path(r"D:\one 파일을 D:\two 쪽으로 복사해줘")

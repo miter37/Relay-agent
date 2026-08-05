@@ -21,6 +21,18 @@ _QUOTED_POSIX_PATH = re.compile(r"[`'\"](/[^\r\n`'\"]+)[`'\"]")
 _BARE_POSIX_PATH = re.compile(r"(?<![\w:/])(/[^\s`'\"<>|?*]+)")
 _SKIPPED_DIRS = {".git", ".hg", ".svn"}
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_NON_DIRECTORY_PATH_SUFFIXES = {
+    ".bat",
+    ".cmd",
+    ".com",
+    ".dll",
+    ".exe",
+    ".msi",
+    ".py",
+    ".pyc",
+    ".ps1",
+    ".sh",
+}
 
 
 @dataclass(frozen=True)
@@ -81,7 +93,21 @@ def task_target_candidates(task: str) -> list[str]:
 def infer_target_path(task: str) -> str | None:
     if not _WRITE_INTENT.search(task):
         return None
-    candidates = task_target_candidates(task)
+    candidates = []
+    for candidate in task_target_candidates(task):
+        path = Path(candidate).expanduser()
+        # A command/interpreter path mentioned in a task is not a Working folder.
+        # This is especially important for agent instructions such as
+        # ``D:\Python314\python.exe``. Existing files are also never valid
+        # targets because Relay requires a directory.
+        if path.suffix.lower() in _NON_DIRECTORY_PATH_SUFFIXES:
+            continue
+        try:
+            if path.exists() and not path.is_dir():
+                continue
+        except OSError:
+            pass
+        candidates.append(candidate)
     if len(candidates) > 1:
         raise RelayError(
             "TARGET_PATH_AMBIGUOUS",

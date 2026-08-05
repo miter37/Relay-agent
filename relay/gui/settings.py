@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget
 
 from .agent_apps import AgentAppListView
 
@@ -9,6 +9,7 @@ from .agent_apps import AgentAppListView
 class SettingsView(QWidget):
     autostart_changed = Signal(bool)
     antigravity_activate_requested = Signal()
+    doctor_requested = Signal(str)
     full_access_mode_changed = Signal(str, bool)
 
     def __init__(self, parent=None):
@@ -25,6 +26,31 @@ class SettingsView(QWidget):
         self.autostart_button = QPushButton("Enable auto-start")
         self.autostart_button.clicked.connect(self._toggle_autostart)
         general_layout.addWidget(self.autostart_button)
+
+        doctor_group = QGroupBox("Worker deep doctor")
+        doctor_layout = QVBoxLayout(doctor_group)
+        doctor_help = QLabel("Run a deep unattended probe for a Worker before using it in automated Tasks or Projects.")
+        doctor_help.setObjectName("mutedText")
+        doctor_help.setWordWrap(True)
+        doctor_layout.addWidget(doctor_help)
+        self.doctor_status_labels: dict[str, QLabel] = {}
+        self.doctor_buttons: dict[str, QPushButton] = {}
+        for worker, label in (("codex", "Codex"), ("claude", "Claude"), ("antigravity", "Antigravity")):
+            row = QHBoxLayout()
+            name = QLabel(label)
+            name.setMinimumWidth(110)
+            status = QLabel("Not verified")
+            status.setObjectName("doctorStatus")
+            status.setProperty("tone", "unknown")
+            button = QPushButton("Run deep doctor")
+            button.clicked.connect(lambda _checked=False, value=worker: self.doctor_requested.emit(value))
+            row.addWidget(name)
+            row.addWidget(status, 1)
+            row.addWidget(button)
+            doctor_layout.addLayout(row)
+            self.doctor_status_labels[worker] = status
+            self.doctor_buttons[worker] = button
+        general_layout.addWidget(doctor_group)
 
         general_layout.addWidget(QLabel("<br><b>Worker Security Bypasses</b>"))
         general_layout.addWidget(
@@ -64,6 +90,58 @@ class SettingsView(QWidget):
     def set_full_access_states(self, codex: bool, claude: bool, agy: bool) -> None:
         for worker, enabled in (("codex", codex), ("claude", claude), ("antigravity", agy)):
             self.set_full_access_state(worker, enabled)
+
+    def set_worker_health(self, health: dict | None) -> None:
+        health = health or {}
+        healthy = {str(value) for value in health.get("healthy", [])}
+        unhealthy = {str(item.get("agent_id")): item for item in health.get("unhealthy", [])}
+        for worker, _label in self.doctor_status_labels.items():
+            if worker in healthy:
+                self._set_doctor_label(worker, "Deep doctor passed", "healthy")
+            elif worker in unhealthy:
+                item = unhealthy[worker]
+                self._set_doctor_label(worker, f"Not verified: {item.get('code') or 'failed'}", "failed")
+            else:
+                self._set_doctor_label(worker, "Not verified", "unknown")
+
+    def set_doctor_pending(self, worker: str, pending: bool) -> None:
+        button = self.doctor_buttons.get(worker)
+        if button is None:
+            return
+        button.setEnabled(not pending)
+        button.setText("Running…" if pending else "Run deep doctor")
+        if pending:
+            self._set_doctor_label(worker, "Running deep doctor…", "running")
+
+    def set_doctor_result(self, worker: str, result: dict) -> None:
+        button = self.doctor_buttons.get(worker)
+        if button is not None:
+            button.setEnabled(True)
+            button.setText("Run again")
+        workers = result.get("workers") or []
+        item = next((value for value in workers if value.get("worker") == worker), {})
+        status = str(item.get("status") or "failed")
+        if status == "healthy":
+            self._set_doctor_label(worker, "Deep doctor passed", "healthy")
+        else:
+            details = item.get("details") or {}
+            self._set_doctor_label(worker, str(details.get("error") or status), "failed")
+
+    def set_doctor_error(self, worker: str, message: str) -> None:
+        button = self.doctor_buttons.get(worker)
+        if button is not None:
+            button.setEnabled(True)
+            button.setText("Run again")
+        self._set_doctor_label(worker, f"Failed: {message}", "failed")
+
+    def _set_doctor_label(self, worker: str, text: str, tone: str) -> None:
+        label = self.doctor_status_labels.get(worker)
+        if label is None:
+            return
+        label.setText(text)
+        label.setProperty("tone", tone)
+        label.style().unpolish(label)
+        label.style().polish(label)
 
     def set_full_access_state(self, worker: str, enabled: bool) -> None:
         checkbox = {

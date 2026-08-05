@@ -49,23 +49,23 @@ contract, so accessible values can evolve without changing each screen.
 
 | Token | Initial value | Use |
 |---|---:|---|
-| `bg.canvas` | `#0B1220` | application background and graph canvas |
-| `bg.sidebar` | `#111827` | persistent navigation rail |
-| `bg.topbar` | `#101A2D` | page title / global action bar |
-| `bg.surface` | `#172235` | cards, tables, inspector panels |
-| `bg.surfaceRaised` | `#202D42` | hover, selected rows, secondary cards |
-| `bg.input` | `#0F1A2B` | editable controls and code/log panes |
-| `border.subtle` | `#2A3850` | panel and table separation |
-| `border.focus` | `#38BDF8` | keyboard focus and selected graph node |
-| `text.primary` | `#E5EDF8` | titles and primary values |
-| `text.secondary` | `#A9B8CC` | metadata and labels |
-| `text.muted` | `#71819A` | helper text, placeholders, timestamps |
-| `accent.primary` | `#3B9CFF` | primary action and active navigation |
-| `accent.cyan` | `#35C8F2` | live route, selected node, link affordance |
-| `state.success` | `#58D68D` | completed, healthy, available |
-| `state.warning` | `#F4C95D` | queued, attention, partial, caution |
-| `state.danger` | `#F07178` | failed, blocked, destructive action |
-| `state.info` | `#7AA2F7` | running and informational status |
+| `bg.canvas` | `#0F172A` | application background and graph canvas |
+| `bg.sidebar` | `#111C2E` | persistent navigation rail |
+| `bg.topbar` | `#162238` | page title / global action bar |
+| `bg.surface` | `#1B2A40` | cards, tables, inspector panels |
+| `bg.surfaceRaised` | `#263A55` | hover, selected rows, secondary cards |
+| `bg.input` | `#121F33` | editable controls and code/log panes |
+| `border.subtle` | `#354A66` | panel and table separation |
+| `border.focus` | `#6DD6F7` | keyboard focus and selected graph node |
+| `text.primary` | `#F3F7FC` | titles and primary values |
+| `text.secondary` | `#C3D0E0` | metadata and labels |
+| `text.muted` | `#9AAAC0` | helper text, placeholders, timestamps |
+| `accent.primary` | `#1769AA` | primary action and active navigation |
+| `accent.cyan` | `#6DD6F7` | live route, selected node, link affordance |
+| `state.success` | `#70E0A0` | completed, healthy, available |
+| `state.warning` | `#FFD166` | queued, attention, partial, caution |
+| `state.danger` | `#FF8A8F` | failed, blocked, destructive action |
+| `state.info` | `#9BB8FF` | running and informational status |
 
 Rules:
 

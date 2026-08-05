@@ -98,7 +98,7 @@ class NewTaskView(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<h2>New Task</h2>"))
+        layout.addWidget(QLabel("<h2>New Task Run</h2>"))
         form = QFormLayout()
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("Optional short title")
@@ -224,7 +224,8 @@ class NewTaskView(QWidget):
         clear = QPushButton("Clear")
         clear.clicked.connect(self.clear)
         buttons.addWidget(clear)
-        self.create_button = QPushButton("Create task")
+        self.create_button = QPushButton("Run Task")
+        self.create_button.setObjectName("primaryAction")
         self.create_button.clicked.connect(lambda: self.create_requested.emit(self.payload()))
         buttons.addWidget(self.create_button)
         layout.addLayout(buttons)

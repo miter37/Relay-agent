@@ -5,7 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from .design_tokens import COLORS, SPACING, status_presentation
+from .design_tokens import SPACING, status_presentation
 
 
 class StatusBadge(QLabel):
@@ -22,7 +22,6 @@ class StatusBadge(QLabel):
         self.setProperty("state", presentation.state)
         self.setText(presentation.label)
         self.setToolTip(presentation.label)
-        self.setStyleSheet(f"color: {COLORS[presentation.color_token]};")
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -112,4 +111,5 @@ class InlineNotice(QFrame):
         presentation = status_presentation(tone)
         self.setProperty("tone", presentation.state)
         self.label.setText(message)
-        self.setStyleSheet(f"border: 1px solid {COLORS[presentation.color_token]}; color: {COLORS['text.primary']};")
+        self.style().unpolish(self)
+        self.style().polish(self)

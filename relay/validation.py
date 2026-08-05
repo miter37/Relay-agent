@@ -5,6 +5,7 @@ import binascii
 import json
 import mimetypes
 import os
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -20,6 +21,7 @@ REQUIRED_JSON_FIELDS = {
     "missing_items": list,
     "artifacts": list,
 }
+_ARTIFACT_ROLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,63}$")
 
 
 def normalize_summary(
@@ -84,6 +86,10 @@ def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
                 raise RelayError("SCHEMA_MISMATCH", "artifact encoding must be utf-8 or base64", True)
             if not isinstance(item.get("description", ""), str):
                 raise RelayError("SCHEMA_MISMATCH", "artifact description must be a string", True)
+        if isinstance(item, dict) and "role" in item:
+            role = item.get("role")
+            if not isinstance(role, str) or not _ARTIFACT_ROLE_RE.fullmatch(role):
+                raise RelayError("SCHEMA_MISMATCH", "artifact role must be a safe non-empty identifier", True)
     return value
 
 
@@ -160,7 +166,12 @@ def validate_text_result(path: Path, max_bytes: int) -> str:
     return text
 
 
-def scan_artifacts(artifact_dir: Path, max_files: int, max_total_bytes: int) -> list[dict[str, Any]]:
+def scan_artifacts(
+    artifact_dir: Path,
+    max_files: int,
+    max_total_bytes: int,
+    roles: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     files: list[dict[str, Any]] = []
     total = 0
@@ -179,15 +190,17 @@ def scan_artifacts(artifact_dir: Path, max_files: int, max_total_bytes: int) -> 
                 raise RelayError("ARTIFACT_PATH_VIOLATION", "Artifact count or total size exceeds configured limits")
             rel = path.relative_to(artifact_dir).as_posix()
             mime, _ = mimetypes.guess_type(path.name)
-            files.append(
-                {
-                    "name": path.name,
-                    "relative_path": rel,
-                    "mime_type": mime or "application/octet-stream",
-                    "size": size,
-                    "sha256": sha256_file(path),
-                }
-            )
+            item = {
+                "name": path.name,
+                "relative_path": rel,
+                "mime_type": mime or "application/octet-stream",
+                "size": size,
+                "sha256": sha256_file(path),
+            }
+            role = (roles or {}).get(rel)
+            if role:
+                item["role"] = role
+            files.append(item)
     return sorted(files, key=lambda x: x["relative_path"])
 
 
@@ -201,6 +214,7 @@ def reconcile_json_artifacts(value: dict[str, Any], artifacts: list[dict[str, An
             "name": item["name"],
             "relative_path": item["relative_path"],
             "description": descriptions.get(item["relative_path"], ""),
+            **({"role": item["role"]} if item.get("role") else {}),
         }
         for item in artifacts
     ]

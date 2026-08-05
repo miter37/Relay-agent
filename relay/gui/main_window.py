@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from ..compatibility import evaluate_compatibility
 from .agent_apps import AgentAppWizard
+from .design_tokens import COLORS
 from .job_detail import TaskRunDetailView
 from .new_task import NewTaskView
 from .projects import ProjectRunMonitorDialog, ProjectsView
@@ -105,6 +106,10 @@ class MainWindow(QMainWindow):
         self.log_timer = QTimer(self)
         self.log_timer.timeout.connect(self._refresh_log)
         self.log_timer.start(1000)
+        self.health_timer = QTimer(self)
+        self.health_timer.timeout.connect(self._refresh_health)
+        # Health is a low-frequency status signal; manual refresh remains available.
+        self.health_timer.start(600000)
         self._refresh_health()
 
     def _build_ui(self) -> None:
@@ -123,6 +128,7 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.page_title_label)
         title_layout.addStretch(1)
         self.health_label = QLabel("Health: Checking…")
+        self.health_label.setObjectName("healthBadge")
         self.daemon_label = self.health_label
         self.health_time_label = QLabel("Not checked")
         self.health_refresh_button = QPushButton("Refresh health")
@@ -130,7 +136,7 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.health_label)
         title_layout.addWidget(self.health_time_label)
         title_layout.addWidget(self.health_refresh_button)
-        self.new_task_button = QPushButton("+ New Task")
+        self.new_task_button = QPushButton("+ New Task Run")
         self.new_task_button.setObjectName("primaryAction")
         self.new_task_button.clicked.connect(self._show_new_task)
         title_layout.addWidget(self.new_task_button)
@@ -208,7 +214,9 @@ class MainWindow(QMainWindow):
 
         self.detail_stack = QStackedWidget()
         self.empty_detail = QLabel("Select a Task Run to view its overview.")
+        self.empty_detail.setObjectName("emptyState")
         self.empty_detail.setAlignment(Qt.AlignCenter)
+        self.empty_detail.setWordWrap(True)
         self.detail_stack.addWidget(self.empty_detail)
         self.new_task_view = NewTaskView()
         self.new_task_view.create_requested.connect(self._create_task)
@@ -271,6 +279,7 @@ class MainWindow(QMainWindow):
         self.settings_view = SettingsView()
         self.settings_view.autostart_changed.connect(self._toggle_autostart)
         self.settings_view.antigravity_activate_requested.connect(self._activate_antigravity)
+        self.settings_view.doctor_requested.connect(self._run_deep_doctor)
         self.settings_view.full_access_mode_changed.connect(self._set_full_access_mode)
         agent_apps = self.settings_view.agent_apps_view
         agent_apps.create_requested.connect(self._create_agent_app)
@@ -440,6 +449,12 @@ class MainWindow(QMainWindow):
             timeout_ms=310000,
         )
 
+    def _run_deep_doctor(self, worker: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.settings_view.set_doctor_pending(worker, True)
+        self._request_post(("doctor", worker), "/v1/doctor/deep", {"worker": worker}, timeout_ms=310000)
+
     def _maybe_prompt_autostart(self) -> None:
         if self.autostart_status.get("enabled") or self._state_truthy("gui/autostart_prompted"):
             return
@@ -468,6 +483,7 @@ class MainWindow(QMainWindow):
         self.current_detail = None
         self.detail_view_mode = "new_task"
         self._activate_navigation(None)
+        self.page_title_label.setText("New Task Run")
         self.detail_stack.setCurrentWidget(self.new_task_view)
 
     def _create_task(self, payload: dict) -> None:
@@ -1070,6 +1086,8 @@ class MainWindow(QMainWindow):
             elif kind == "antigravity_activate":
                 message = (payload or {}).get("error_message") if isinstance(payload, dict) else None
                 self.settings_view.set_antigravity_error(message or str(error or "Activation failed"))
+            elif isinstance(kind, tuple) and kind[0] == "doctor":
+                self.settings_view.set_doctor_error(kind[1], str(error or "Deep doctor failed"))
             elif isinstance(kind, tuple) and kind[0] == "full_access":
                 self.settings_view.set_full_access_state(kind[1], bool(kind[2]))
                 message = (payload or {}).get("message") if isinstance(payload, dict) else None
@@ -1105,6 +1123,7 @@ class MainWindow(QMainWindow):
                 supported_schema_revision=5,
             )
             self._set_connection(decision.mode, decision.reason, health=payload)
+            self.settings_view.set_worker_health(payload.get("worker_health"))
             if decision.mode == "normal":
                 self._request("agents", "/v1/agents")
                 self._request("autostart", "/v1/autostart")
@@ -1155,6 +1174,18 @@ class MainWindow(QMainWindow):
             self.settings_view.set_antigravity_status(payload.get("antigravity") or {})
             self._request("agents", "/v1/agents")
             self.banner.setText("Antigravity was verified and enabled.")
+            self.banner.show()
+            return
+        if isinstance(kind, tuple) and kind[0] == "doctor":
+            worker = kind[1]
+            report = payload.get("doctor") or {}
+            self.settings_view.set_doctor_result(worker, report)
+            self._refresh_health()
+            self.banner.setText(
+                f"{worker.title()} deep doctor passed."
+                if report.get("ok")
+                else f"{worker.title()} deep doctor failed; inspect Settings for details."
+            )
             self.banner.show()
             return
         if kind == "agent_apps":
@@ -1585,7 +1616,7 @@ class MainWindow(QMainWindow):
     def _set_connection(self, mode: str, reason: str | None = None, *, health: dict | None = None) -> None:
         self.current_mode = mode if mode in {"normal", "read-only"} else "disconnected"
         if mode == "checking":
-            self._set_health_badge("Health: Checking…", "#FEF3C7", "#92400E", reason)
+            self._set_health_badge("Health: Checking…", "checking", "", reason)
         elif mode == "normal":
             warning = self._health_warning(health)
             worker_health = (health or {}).get("worker_health") or {}
@@ -1599,14 +1630,14 @@ class MainWindow(QMainWindow):
             badge_text = label if worker_health.get("status") == "unhealthy" or not warning else "Health: Attention"
             self._set_health_badge(
                 badge_text,
-                "#FEE2E2" if worker_health.get("status") == "unhealthy" else "#FEF3C7" if warning else "#DCFCE7",
-                "#991B1B" if worker_health.get("status") == "unhealthy" else "#92400E" if warning else "#166534",
+                "unhealthy" if worker_health.get("status") == "unhealthy" else "attention" if warning else "healthy",
+                "",
                 warning or self._health_tooltip(health),
             )
         elif mode == "read-only":
-            self._set_health_badge("Health: Compatibility warning", "#FEF3C7", "#92400E", reason)
+            self._set_health_badge("Health: Compatibility warning", "attention", "", reason)
         else:
-            self._set_health_badge("Health: Disconnected", "#FEE2E2", "#991B1B", reason)
+            self._set_health_badge("Health: Disconnected", "disconnected", "", reason)
         self.new_task_button.setEnabled(mode == "normal")
         self.new_task_view.create_button.setEnabled(mode == "normal")
         self.new_task_view.set_job_file_lookup_enabled(mode == "normal")
@@ -1620,11 +1651,9 @@ class MainWindow(QMainWindow):
 
     def _set_health_badge(self, text: str, background: str, foreground: str, tooltip: str | None) -> None:
         self.daemon_label.setText(text)
-        self.daemon_label.setStyleSheet(
-            f"QLabel {{ background: {background}; color: {foreground}; "
-            "border: 1px solid rgba(0,0,0,0.12); border-radius: 10px; padding: 5px 11px; "
-            "font-size: 12px; font-weight: 800; }"
-        )
+        self.daemon_label.setProperty("tone", background)
+        self.daemon_label.style().unpolish(self.daemon_label)
+        self.daemon_label.style().polish(self.daemon_label)
         self.daemon_label.setToolTip(tooltip or text)
 
     @staticmethod
@@ -1731,10 +1760,10 @@ class MainWindow(QMainWindow):
                     item.setToolTip(0, job.get("task_preview") or job.get("job_id", ""))
                     item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
                     colors = {
-                        "COMPLETED": ("#166534", "#F0FDF4"),
-                        "PARTIAL": ("#92400E", "#FFFBEB"),
-                        "FAILED": ("#991B1B", "#FEF2F2"),
-                        "CANCELLED": ("#475569", "#F8FAFC"),
+                        "COMPLETED": (COLORS["state.success"], COLORS["bg.surface"]),
+                        "PARTIAL": (COLORS["state.warning"], COLORS["bg.surface"]),
+                        "FAILED": (COLORS["state.danger"], COLORS["bg.surface"]),
+                        "CANCELLED": (COLORS["text.muted"], COLORS["bg.surface"]),
                     }
                     if status in colors:
                         foreground, background = colors[status]

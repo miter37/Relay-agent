@@ -10,6 +10,7 @@ from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
 from relay.models import JobRequest
+from relay.validation import reconcile_json_artifacts, scan_artifacts
 
 
 class Phase0Tests(unittest.TestCase):
@@ -66,6 +67,16 @@ class Phase0Tests(unittest.TestCase):
         self.assertEqual(artifact["artifact_uid"], "artifact-uid")
         self.assertEqual(artifact["role"], "output")
         self.assertEqual(artifact["producer_attempt_id"], attempt_id)
+
+    def test_declared_artifact_role_survives_scan_and_result_reconciliation(self):
+        artifact_dir = Path(self.temp.name) / "artifacts"
+        artifact_dir.mkdir()
+        (artifact_dir / "composition.json").write_text("{}", encoding="utf-8")
+        records = scan_artifacts(artifact_dir, 10, 1024, {"composition.json": "composition"})
+        self.assertEqual(records[0]["role"], "composition")
+        value = {"artifacts": [{"relative_path": "composition.json", "description": "handoff", "role": "composition"}]}
+        reconciled = reconcile_json_artifacts(value, records)
+        self.assertEqual(reconciled["artifacts"][0]["role"], "composition")
 
     def test_run_aliases_preserve_job_id(self):
         job, _ = self.engine.create_job(JobRequest(task="Alias", worker="codex"), queued=True)

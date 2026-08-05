@@ -3,10 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from relay.config import Config
 from relay.db import Database
 from relay.engine import RelayEngine
+from relay.errors import RelayError
 from relay.models import TaskSpec
 from relay.projects.runtime import ProjectRuntime
 from relay.projects.service import ProjectService
@@ -97,6 +99,8 @@ class ProjectRuntimeTests(unittest.TestCase):
         self.runtime.tick_once()
         step_b = self.db.get_project_step(project_run["project_run_id"], "b")
         self.assertEqual(step_b["status"], "ready")
+        step_runs = self.db.list_project_step_runs(project_run["project_run_id"], "a")
+        self.assertEqual(step_runs[0]["status"], "completed")
 
     def test_partial_task_run_is_terminal_for_project_progression(self):
         project_run = self._make_linear_project()
@@ -141,6 +145,35 @@ class ProjectRuntimeTests(unittest.TestCase):
         final_run = self.db.get_project_run(project_run["project_run_id"])
         self.assertEqual(final_run["status"], "failed")
         self.assertIn("ALL_WORKERS_FAILED", final_run["warnings_json"])
+
+    def test_dispatch_failure_does_not_leave_project_running(self):
+        task = self.engine.create_task(
+            TaskSpec(
+                name="Market collection",
+                instructions="collect market data",
+                default_worker="codex",
+            )
+        )
+        project = self.service.create_project(
+            {
+                "name": "Dispatch failure",
+                "nodes": [{"node_id": "collect", "task_id": task["task_id"]}],
+                "connections": [],
+                "output_selection": [],
+            }
+        )
+        project_run_id = self.service.create_project_run(project["project_id"])["project_run_id"]
+        with patch.object(
+            self.engine,
+            "run_task_from_snapshot",
+            side_effect=RelayError("TARGET_PATH_INVALID", "invalid target"),
+        ):
+            self.runtime.tick_once()
+        run = self.db.get_project_run(project_run_id)
+        step = self.db.get_project_step(project_run_id, "collect")
+        self.assertEqual(step["status"], "failed")
+        self.assertEqual(step["error_code"], "TARGET_PATH_INVALID")
+        self.assertEqual(run["status"], "failed")
 
     def test_missing_selected_final_artifact_fails_project_run(self):
         task = _task(self.engine, "Final")

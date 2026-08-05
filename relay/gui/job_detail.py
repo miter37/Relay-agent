@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .design_tokens import COLORS, status_presentation
 from .design_widgets import StatusBadge
 
 
@@ -45,12 +46,14 @@ class TaskRunDetailView(QWidget):
         self.status_label = StatusBadge()
         header.addWidget(self.status_label)
         self.cancel_button = QPushButton("Stop task")
+        self.cancel_button.setObjectName("dangerAction")
         self.cancel_button.clicked.connect(self._cancel)
         header.addWidget(self.cancel_button)
         self.check_button = QPushButton("Check progress")
         self.check_button.clicked.connect(self._check)
         header.addWidget(self.check_button)
         self.rerun_button = QPushButton("Run again")
+        self.rerun_button.setObjectName("primaryAction")
         self.rerun_button.clicked.connect(self._rerun)
         header.addWidget(self.rerun_button)
         self.schedule_button = QPushButton("Schedule")
@@ -91,6 +94,7 @@ class TaskRunDetailView(QWidget):
         self._browsers: dict[str, QTextBrowser] = {}
         for name in self.TAB_NAMES:
             browser = QTextBrowser()
+            browser.setObjectName("evidencePane")
             browser.setOpenExternalLinks(False)
             self._browsers[name] = browser
             if name == "Answer":
@@ -184,7 +188,15 @@ class TaskRunDetailView(QWidget):
             ),
         )
         self.set_content("Task", escape(str(task_text or "Task details are hidden by your history settings.")))
-        self.set_content("Inputs", self._format_json(job.get("lineage") or job.get("inputs") or []))
+        self.set_content(
+            "Inputs",
+            self._format_json(
+                {
+                    "task_inputs": job.get("task_inputs") or {},
+                    "artifact_inputs": job.get("lineage") or job.get("inputs") or [],
+                }
+            ),
+        )
         self.set_content("Progress", self._format_json(job.get("attempts", [])))
         self.set_content("Events", self._format_json(job.get("events", [])))
         self.set_content("Files", self._format_json(job.get("artifacts", [])))
@@ -273,16 +285,13 @@ class TaskRunDetailView(QWidget):
 
     @staticmethod
     def _status_style(status: str) -> str:
-        colors = {
-            "COMPLETED": ("#166534", "#DCFCE7", "#86EFAC"),
-            "PARTIAL": ("#92400E", "#FEF3C7", "#FCD34D"),
-            "FAILED": ("#991B1B", "#FEE2E2", "#FCA5A5"),
-            "CANCELLED": ("#475569", "#F1F5F9", "#CBD5E1"),
-        }
-        foreground, background, border = colors.get(status, ("#1D4ED8", "#DBEAFE", "#93C5FD"))
+        presentation = status_presentation(status)
+        foreground = COLORS[presentation.color_token]
+        background = COLORS["bg.surface"]
+        border = COLORS[presentation.color_token]
         return (
             f"QLabel {{ color: {foreground}; background: {background}; border: 1px solid {border}; "
-            "border-radius: 10px; padding: 5px 10px; font-size: 13px; font-weight: 800; }"
+            "border-radius: 6px; padding: 5px 10px; font-size: 13px; font-weight: 700; }"
         )
 
     def selected_attempt(self) -> dict | None:

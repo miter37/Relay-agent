@@ -31,7 +31,7 @@ class ScheduleDetailView(QWidget):
         root = QVBoxLayout(self)
         header = QHBoxLayout()
         self.title_label = QLabel("Schedule")
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label.setObjectName("detailTitle")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel()
         header.addWidget(self.status_label)

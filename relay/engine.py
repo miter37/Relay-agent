@@ -137,6 +137,8 @@ class RelayEngine:
             request.task = path.read_text(encoding="utf-8")
         if not request.task or not request.task.strip():
             raise RelayError("TASK_REQUIRED", "A task string or --task-file is required")
+        if not isinstance(request.inputs, dict):
+            raise RelayError("INVALID_REQUEST", "Task inputs must be a JSON object.")
         request.result_format = request.result_format.lower()
         if request.result_format not in {"json", "txt"}:
             raise RelayError("INVALID_REQUEST", "Result format must be json or txt")
@@ -145,6 +147,48 @@ class RelayEngine:
                 self.agent_registry.get_definition(request.worker)
             except KeyError:
                 raise RelayError("INVALID_REQUEST", f"Unsupported worker: {request.worker}") from None
+
+    @staticmethod
+    def _validate_task_inputs(request: JobRequest, task_definition: dict[str, Any] | None) -> None:
+        """Validate the small JSON-Schema subset used by registered Task inputs."""
+        if not task_definition or not task_definition.get("input_schema"):
+            return
+        schema = task_definition["input_schema"]
+        if isinstance(schema, str):
+            try:
+                schema = json.loads(schema)
+            except json.JSONDecodeError as exc:
+                raise RelayError("TASK_INVALID", f"Task input schema is not valid JSON: {exc}") from exc
+        if not isinstance(schema, dict):
+            raise RelayError("TASK_INVALID", "Task input schema must be a JSON object.")
+        inputs = request.inputs
+        required = schema.get("required") or []
+        missing = [name for name in required if name not in inputs]
+        if missing:
+            raise RelayError(
+                "INPUT_SCHEMA_MISMATCH", f"Required Task inputs are missing: {', '.join(map(str, missing))}"
+            )
+        properties = schema.get("properties") or {}
+        if schema.get("additionalProperties") is False:
+            unknown = [name for name in inputs if name not in properties]
+            if unknown:
+                raise RelayError("INPUT_SCHEMA_MISMATCH", f"Unknown Task inputs: {', '.join(map(str, unknown))}")
+        type_checks = {
+            "string": lambda value: isinstance(value, str),
+            "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+            "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+            "boolean": lambda value: isinstance(value, bool),
+            "object": lambda value: isinstance(value, dict),
+            "array": lambda value: isinstance(value, list),
+            "null": lambda value: value is None,
+        }
+        for name, definition in properties.items():
+            if name not in inputs or not isinstance(definition, dict):
+                continue
+            expected = definition.get("type")
+            check = type_checks.get(expected)
+            if check and not check(inputs[name]):
+                raise RelayError("INPUT_SCHEMA_MISMATCH", f"Task input {name!r} must be {expected}.")
 
     def _history_display_mode(self) -> str:
         mode = str(self.config.get("history_display_mode") or self.config.get("history_mode", "metadata"))
@@ -224,6 +268,7 @@ class RelayEngine:
             "task": request.task,
             "task_file": request.task_file,
             "attachments": list(request.attachments),
+            "inputs": dict(request.inputs or {}),
             "artifact_inputs": artifact_inputs or [],
             "worker": request.worker,
             "fallback": request.fallback,
@@ -338,6 +383,7 @@ class RelayEngine:
         task_definition: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         self._resolve_request_task(request)
+        self._validate_task_inputs(request, task_definition)
         self.config.reload()
         resolved_inputs = self._resolve_artifact_inputs(request)
         requested_target = request.target_path or infer_target_path(request.task)
@@ -367,7 +413,12 @@ class RelayEngine:
                     f"Service workspace is outside the configured workspace root: {workspace_root}",
                 )
         computed_hash = task_hash(
-            request.task, request.attachments, request.profile, request.worker, request.result_format
+            request.task,
+            request.attachments,
+            request.profile,
+            request.worker,
+            request.result_format,
+            request.inputs,
         )
         if target:
             validate_target_path(target, self.config.home, ())
@@ -806,6 +857,11 @@ class RelayEngine:
                     materialized_artifacts = materialize_artifact_payloads(
                         value, ctx.artifact_dir, max_artifact_files, max_artifact_bytes
                     )
+                declared_roles = {
+                    item["relative_path"]: item["role"]
+                    for item in (value or {}).get("artifacts", [])
+                    if isinstance(item, dict) and isinstance(item.get("relative_path"), str) and item.get("role")
+                }
                 target_workspace = paths.get("target")
                 target_delta = calculate_delta(target_workspace) if target_workspace else None
                 if (
@@ -821,7 +877,9 @@ class RelayEngine:
                     )
                 if target_workspace and target_delta and (target_delta.changed or target_delta.deleted):
                     copy_delta_to_artifacts(target_workspace, target_delta, ctx.artifact_dir)
-                artifact_records = scan_artifacts(ctx.artifact_dir, max_artifact_files, max_artifact_bytes)
+                artifact_records = scan_artifacts(
+                    ctx.artifact_dir, max_artifact_files, max_artifact_bytes, declared_roles
+                )
                 if value is not None:
                     value = reconcile_json_artifacts(value, artifact_records)
                     ctx.result_file.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -864,7 +922,7 @@ class RelayEngine:
                         size=item["size"],
                         sha256=item["sha256"],
                         artifact_uid=new_artifact_uid(),
-                        role="output",
+                        role=item.get("role") or "output",
                         producer_attempt_id=attempt_id,
                     )
                 receipt = {
@@ -924,7 +982,7 @@ class RelayEngine:
                                 **item,
                                 "job_id": job_id,
                                 "run_id": job_id,
-                                "role": "output",
+                                "role": item.get("role") or "output",
                             }
                             for item in artifact_records
                         ],
@@ -1203,6 +1261,7 @@ class RelayEngine:
             base.fallback = request.fallback if request.fallback is not None else base.fallback
             base.attachments = list(request.attachments)
             base.artifact_inputs = list(request.artifact_inputs)
+            base.inputs = dict(request.inputs or {})
             base.request_id = request.request_id
             base.output_path = request.output_path
             base.artifact_path = request.artifact_path
@@ -1287,6 +1346,7 @@ class RelayEngine:
             base.fallback = request.fallback if request.fallback is not None else base.fallback
             base.attachments = list(request.attachments)
             base.artifact_inputs = list(request.artifact_inputs)
+            base.inputs = dict(request.inputs or {})
             base.request_id = request.request_id
             base.output_path = request.output_path
             base.artifact_path = request.artifact_path

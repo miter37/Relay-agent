@@ -89,6 +89,22 @@ class ProjectRuntime:
             if not job:
                 continue
             job_status = job.get("status")
+            step_run_status = {
+                "QUEUED": "queued",
+                "RUNNING": "running",
+                "VALIDATING": "running",
+                "DELIVERING": "running",
+                "COMPLETED": "completed",
+                "PARTIAL": "completed",
+                "FAILED": "failed",
+                "CANCELLED": "cancelled",
+            }.get(job_status)
+            if step_run_status:
+                self.db.update_project_step_run(
+                    task_run_id,
+                    status=step_run_status,
+                    completed_at=utc_now() if step_run_status in _STEP_TERMINAL else None,
+                )
             if job_status in _TASK_SUCCESS_STATUSES:
                 # Skip if step already processed (prevents duplicate checkpoint pausing on restart)
                 if step["status"] in {"awaiting_approval", "completed"}:
@@ -180,7 +196,8 @@ class ProjectRuntime:
                 self.db.update_project_step(project_run_id, step["node_id"], status="ready")
 
         # 5. Finalize Project Run when appropriate.
-        self._maybe_finalize(project_run_id, steps, spec)
+        fresh_steps = self.db.list_project_steps(project_run_id)
+        self._maybe_finalize(project_run_id, fresh_steps, spec)
 
     def _dependencies_completed(self, spec: ProjectSpec, node_id: str, step_by_id: dict[str, dict[str, Any]]) -> bool:
         for upstream_id in spec.predecessor_map()[node_id]:

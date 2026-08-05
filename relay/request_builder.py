@@ -94,6 +94,7 @@ def build_request_markdown(
         )
         or "- None"
     )
+    task_input_lines = json.dumps(request.inputs or {}, ensure_ascii=False, indent=2)
     profile_rules = {
         "web-research": (
             "- Use current web sources where available.\n"
@@ -137,6 +138,11 @@ def build_request_markdown(
 
 ## Artifact Inputs (immutable snapshots)
 {artifact_input_lines}
+
+## Task Inputs (optional)
+```json
+{task_input_lines}
+```
 
 ## User Task
 {task_text}

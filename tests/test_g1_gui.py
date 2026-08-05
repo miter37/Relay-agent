@@ -45,8 +45,9 @@ class G1GuiTests(unittest.TestCase):
         self.assertEqual(self.window.windowTitle(), "Relay-agent")
         self.assertEqual(self.window.sidebar.minimumWidth(), 0)
         self.assertIn("Relay Home:", self.window.statusBar().currentMessage())
-        self.assertFalse(hasattr(self.window, "health_timer"))
+        self.assertTrue(self.window.health_timer.isActive())
         self.assertIn("Health:", self.window.health_label.text())
+        self.assertEqual(self.window.new_task_button.text(), "+ New Task Run")
 
     def test_new_task_keeps_working_folder_separate_from_files_folder(self):
         view = self.window.new_task_view

@@ -91,6 +91,7 @@ from .cleanup import CleanupManager
 from .compatibility import relay_home_id
 from .config import Config
 from .db import Database
+from .doctor import Doctor
 from .engine import RelayEngine
 from .errors import RelayError
 from .models import JobRequest
@@ -877,6 +878,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/v1/notifications/test":
                 self._json(HTTPStatus.OK, notify_test_api(self.daemon.engine, self._body()))
+                return
+            if path == "/v1/doctor/deep":
+                worker = str(self._body().get("worker") or "").strip().lower()
+                if not worker:
+                    raise RelayError("INVALID_REQUEST", "worker is required")
+                report = Doctor(self.daemon.config, self.daemon.db).audit([worker], deep=True)
+                self._json(HTTPStatus.OK, {"ok": bool(report.get("ok")), "doctor": report})
                 return
             if path == "/v1/export":
                 self._json(HTTPStatus.OK, export_data_api(self.daemon.engine, self._body()))

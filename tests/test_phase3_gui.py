@@ -34,6 +34,8 @@ class TasksWidgetTests(unittest.TestCase):
 
     def test_task_list_renders_filters_and_emits_select(self):
         view = TaskListView()
+        self.assertEqual(view.create_button.text(), "Register Task")
+        self.assertFalse(view.empty_label.isHidden())
         view.set_tasks(
             [
                 {"task_id": "alpha", "name": "Weekly HBM", "version": 2, "default_worker": "codex"},
@@ -41,6 +43,7 @@ class TasksWidgetTests(unittest.TestCase):
             ]
         )
         self.assertEqual(view.list_widget.count(), 2)
+        self.assertTrue(view.empty_label.isHidden())
         view.search_edit.setText("report")
         self.assertEqual(view.list_widget.count(), 1)
         view.search_edit.setText("")
@@ -53,6 +56,9 @@ class TasksWidgetTests(unittest.TestCase):
         view._item_activated(view.list_widget.currentItem())
         self.assertIn("alpha", seen)
         self.assertIn("beta", seen)
+        view.search_edit.setText("missing")
+        self.assertFalse(view.empty_label.isHidden())
+        self.assertIn("match", view.empty_label.text())
 
     def test_task_detail_renders_definition_and_runs(self):
         view = TaskDetailView()
@@ -87,6 +93,7 @@ class TasksWidgetTests(unittest.TestCase):
 
     def test_task_editor_payload_validates_input_schema_json(self):
         dialog = TaskEditorDialog()
+        self.assertEqual(dialog.windowTitle(), "Register Task")
         dialog.name_edit.setText("Weekly Report")
         dialog.instructions_edit.setPlainText("Produce the weekly HBM report")
         with self.assertRaises(ValueError):
@@ -115,6 +122,11 @@ class TasksWidgetTests(unittest.TestCase):
         overrides = dialog.overrides()
         self.assertIn("worker", overrides)
         self.assertNotIn("profile", overrides)
+        dialog.inputs_edit.setPlainText('{"period": "previous-week"}')
+        self.assertEqual(dialog.overrides()["inputs"], {"period": "previous-week"})
+        dialog.inputs_edit.setPlainText("[]")
+        with self.assertRaisesRegex(ValueError, "JSON object"):
+            dialog.overrides()
 
     def test_save_run_as_task_dialog_requires_name(self):
         dialog = SaveRunAsTaskDialog(run_id="job-deadbeef")

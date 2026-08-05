@@ -65,11 +65,14 @@ class TaskListView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QHBoxLayout()
-        header.addWidget(QLabel("<b>Registered Tasks</b>"), 1)
+        title = QLabel("Registered Tasks")
+        title.setObjectName("sectionTitle")
+        header.addWidget(title, 1)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         header.addWidget(self.refresh_button)
-        self.create_button = QPushButton("New Task")
+        self.create_button = QPushButton("Register Task")
+        self.create_button.setObjectName("primaryAction")
         self.create_button.clicked.connect(self.create_task_requested.emit)
         header.addWidget(self.create_button)
         layout.addLayout(header)
@@ -80,6 +83,11 @@ class TaskListView(QWidget):
         self.search_edit.setPlaceholderText("Filter by name")
         self.search_edit.textChanged.connect(self._rerender)
         layout.addWidget(self.search_edit)
+        self.empty_label = QLabel("No registered Tasks yet. Create a Task to begin.")
+        self.empty_label.setObjectName("emptyHint")
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.empty_label)
         self.list_widget = QListWidget()
         self.list_widget.itemActivated.connect(self._item_activated)
         layout.addWidget(self.list_widget, 1)
@@ -106,6 +114,12 @@ class TaskListView(QWidget):
             self.list_widget.addItem(item)
             visible += 1
         total = len(self.tasks)
+        self.empty_label.setText(
+            "No Tasks match this filter."
+            if total and query and not visible
+            else "No registered Tasks yet. Create a Task to begin."
+        )
+        self.empty_label.setVisible(not visible)
         if not total:
             self.count_label.setText("No registered Tasks")
         elif query and visible != total:
@@ -139,17 +153,20 @@ class TaskDetailView(QWidget):
         self.title_label.setObjectName("pageTitle")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel("")
+        self.status_label.setObjectName("mutedText")
         header.addWidget(self.status_label)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self._on_refresh)
         header.addWidget(self.refresh_button)
-        self.run_button = QPushButton("Run")
+        self.run_button = QPushButton("Run Task")
+        self.run_button.setObjectName("primaryAction")
         self.run_button.clicked.connect(self._on_run)
         header.addWidget(self.run_button)
         self.edit_button = QPushButton("Edit")
         self.edit_button.clicked.connect(self._on_edit)
         header.addWidget(self.edit_button)
         self.delete_button = QPushButton("Delete")
+        self.delete_button.setObjectName("dangerAction")
         self.delete_button.clicked.connect(self._on_delete)
         header.addWidget(self.delete_button)
         layout.addLayout(header)
@@ -207,8 +224,10 @@ class TaskDetailView(QWidget):
         self.task_id = None
         self.title_label.setText("Task")
         self.status_label.setText("")
-        for browser in (self.overview_browser, self.instructions_browser, self.policy_browser, self.run_browser):
-            browser.clear()
+        self.overview_browser.setHtml("<p>No Task selected. Choose a Task from the list.</p>")
+        self.instructions_browser.clear()
+        self.policy_browser.clear()
+        self.run_browser.setHtml("<p>No Runs are available until a Task is selected.</p>")
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(False)
 
@@ -252,7 +271,7 @@ class TaskEditorDialog(QDialog):
 
     def __init__(self, *, task=None, available_workers=None, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Edit Task" if task else "New Task")
+        self.setWindowTitle("Edit Task" if task else "Register Task")
         self.resize(640, 620)
         self._task_id = str(task.get("task_id") or "") if task else ""
 
@@ -431,7 +450,17 @@ class TaskRunDialog(QDialog):
         self.notes_edit = QLineEdit()
         self.notes_edit.setPlaceholderText("Optional notes saved with the Run")
         form.addRow("Notes", self.notes_edit)
+        self.inputs_edit = QTextEdit()
+        self.inputs_edit.setAcceptRichText(False)
+        self.inputs_edit.setPlaceholderText('{"period": "previous-week", "audience": "executive-team"}')
+        self.inputs_edit.setMinimumHeight(80)
+        form.addRow("Optional inputs (JSON)", self.inputs_edit)
         layout.addLayout(form)
+
+        self.error_label = QLabel()
+        self.error_label.setObjectName("errorText")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
         buttons.accepted.connect(self._on_accept)
@@ -439,7 +468,12 @@ class TaskRunDialog(QDialog):
         layout.addWidget(buttons)
 
     def _on_accept(self) -> None:
-        self.accepted_overrides.emit(self.overrides())
+        try:
+            overrides = self.overrides()
+        except ValueError as exc:
+            self.error_label.setText(str(exc))
+            return
+        self.accepted_overrides.emit(overrides)
         self.accept()
 
     def overrides(self) -> dict:
@@ -456,6 +490,15 @@ class TaskRunDialog(QDialog):
         notes = self.notes_edit.text().strip()
         if notes:
             overrides["notes"] = notes
+        inputs_text = self.inputs_edit.toPlainText().strip()
+        if inputs_text:
+            try:
+                inputs = json.loads(inputs_text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Optional inputs must be valid JSON: {exc}") from exc
+            if not isinstance(inputs, dict):
+                raise ValueError("Optional inputs must be a JSON object.")
+            overrides["inputs"] = inputs
         return overrides
 
 
@@ -525,7 +568,6 @@ class TasksView(QWidget):
         self.tasks_index: dict[str, dict] = {}
 
         root = QVBoxLayout(self)
-        root.addWidget(QLabel("<h2>Registered Tasks</h2>"))
 
         body = QHBoxLayout()
         self.list = TaskListView()

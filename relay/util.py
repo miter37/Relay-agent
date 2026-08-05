@@ -55,12 +55,20 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def task_hash(task: str, attachments: Iterable[str], profile: str, worker: str, result_format: str) -> str:
+def task_hash(
+    task: str,
+    attachments: Iterable[str],
+    profile: str,
+    worker: str,
+    result_format: str,
+    inputs: dict[str, Any] | None = None,
+) -> str:
     payload: dict[str, Any] = {
         "task": " ".join(task.split()),
         "profile": profile,
         "worker": worker,
         "format": result_format,
+        "inputs": inputs or {},
         "attachments": [],
     }
     for item in attachments:

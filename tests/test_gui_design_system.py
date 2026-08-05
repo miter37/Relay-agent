@@ -10,12 +10,13 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtGui import QPalette
     from PySide6.QtWidgets import QApplication
 except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
-from relay.gui.design_styles import application_stylesheet
-from relay.gui.design_tokens import COLORS, status_presentation
+from relay.gui.design_styles import application_palette, application_stylesheet
+from relay.gui.design_tokens import COLORS, contrast_ratio, status_presentation
 from relay.gui.design_widgets import EmptyState, StatusBadge
 
 
@@ -23,13 +24,16 @@ class DesignSystemTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        cls.app.setPalette(application_palette())
+        cls.app.setStyleSheet(application_stylesheet())
 
     def test_status_badge_uses_shared_semantic_state_and_text(self):
         badge = StatusBadge("RUNNING")
 
         self.assertEqual(badge.text(), "Running")
         self.assertEqual(badge.property("state"), "running")
-        self.assertIn(COLORS["state.info"], badge.styleSheet())
+        self.assertEqual(badge.styleSheet(), "")
+        self.assertIn('QLabel#statusBadge[state="running"]', application_stylesheet())
         self.assertEqual(status_presentation("unknown").label, "Unavailable")
 
     def test_empty_state_explains_next_safe_action(self):
@@ -45,8 +49,19 @@ class DesignSystemTests(unittest.TestCase):
         self.assertIn("#sidebarNav", stylesheet)
         self.assertIn("#topBar", stylesheet)
         self.assertIn("QPushButton#primaryAction", stylesheet)
-        self.assertIn('QWidget#statusBadge[state="running"]', stylesheet)
+        self.assertIn('QLabel#statusBadge[state="running"]', stylesheet)
         self.assertIn(COLORS["border.focus"], stylesheet)
+        for surface in ("bg.canvas", "bg.surface", "bg.surfaceRaised", "bg.input"):
+            self.assertGreaterEqual(contrast_ratio(COLORS["text.primary"], COLORS[surface]), 4.5)
+            self.assertGreaterEqual(contrast_ratio(COLORS["text.secondary"], COLORS[surface]), 4.5)
+        self.assertGreaterEqual(contrast_ratio(COLORS["text.muted"], COLORS["bg.surfaceRaised"]), 4.5)
+        self.assertGreaterEqual(contrast_ratio(COLORS["text.primary"], COLORS["accent.primary"]), 4.5)
+
+    def test_application_palette_pins_default_text_and_input_roles(self):
+        palette = application_palette()
+        self.assertEqual(palette.color(QPalette.WindowText).name().upper(), COLORS["text.primary"])
+        self.assertEqual(palette.color(QPalette.Base).name().upper(), COLORS["bg.input"])
+        self.assertEqual(palette.color(QPalette.PlaceholderText).name().upper(), COLORS["text.muted"])
 
     def test_main_window_marks_the_shared_shell_and_primary_action(self):
         from relay.compatibility import relay_home_id

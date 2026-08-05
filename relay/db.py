@@ -2155,6 +2155,17 @@ class Database:
             )
             return attempt
 
+    def update_project_step_run(self, task_run_id: str, **changes: Any) -> None:
+        """Mirror the current Task Run state in the Project step-run ledger."""
+        if not changes:
+            return
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE project_step_runs SET {','.join(f'{key}=?' for key in keys)} WHERE task_run_id=?",
+                [changes[key] for key in keys] + [task_run_id],
+            )
+
     def list_project_step_runs(
         self, project_run_id: str | None = None, node_id: str | None = None, *, task_run_id: str | None = None
     ) -> list[dict[str, Any]]:

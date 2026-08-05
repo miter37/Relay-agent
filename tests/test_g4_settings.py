@@ -48,6 +48,23 @@ class G4SettingsTests(unittest.TestCase):
         self.assertFalse(view.antigravity_button.isEnabled())
         self.assertIn("Checking", view.antigravity_button.text())
 
+    def test_worker_deep_doctor_status_and_pending_state(self):
+        view = SettingsView()
+        view.set_worker_health(
+            {
+                "healthy": ["codex"],
+                "unhealthy": [{"agent_id": "claude", "code": "AUTH_REQUIRED"}],
+            }
+        )
+        self.assertEqual(view.doctor_status_labels["codex"].text(), "Deep doctor passed")
+        self.assertIn("AUTH_REQUIRED", view.doctor_status_labels["claude"].text())
+        view.set_doctor_pending("antigravity", True)
+        self.assertFalse(view.doctor_buttons["antigravity"].isEnabled())
+        self.assertIn("Running", view.doctor_buttons["antigravity"].text())
+        view.set_doctor_result("antigravity", {"ok": True, "workers": [{"worker": "antigravity", "status": "healthy"}]})
+        self.assertTrue(view.doctor_buttons["antigravity"].isEnabled())
+        self.assertEqual(view.doctor_status_labels["antigravity"].text(), "Deep doctor passed")
+
 
 if __name__ == "__main__":
     unittest.main()

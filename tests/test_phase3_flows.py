@@ -79,6 +79,36 @@ class TaskEngineFlowTests(unittest.TestCase):
         )
         self.assertEqual(job["requested_worker"], "claude")
 
+    def test_registered_task_run_accepts_optional_inputs_and_pins_them(self):
+        task = self._create_task(
+            input_schema=json.dumps(
+                {
+                    "type": "object",
+                    "required": ["period"],
+                    "properties": {"period": {"type": "string"}},
+                    "additionalProperties": False,
+                }
+            )
+        )
+        job, _, _ = self.engine.run_task(
+            task["task_id"],
+            request=JobRequest(task="", inputs={"period": "previous-week"}),
+            queued=True,
+            submitted_via="cli",
+        )
+        self.assertEqual(json.loads(job["request_json"])["inputs"], {"period": "previous-week"})
+        self.assertEqual(json.loads(job["task_snapshot_json"])["inputs"], {"period": "previous-week"})
+
+    def test_registered_task_rejects_invalid_optional_inputs(self):
+        task = self._create_task(input_schema=json.dumps({"type": "object", "required": ["period"]}))
+        with self.assertRaisesRegex(RelayError, "INPUT_SCHEMA_MISMATCH"):
+            self.engine.run_task(
+                task["task_id"],
+                request=JobRequest(task="", inputs={}),
+                queued=True,
+                submitted_via="cli",
+            )
+
     def test_editing_task_does_not_corrupt_past_run(self):
         task = self._create_task(instructions="v1 instructions")
         first, _, _ = self.engine.run_task(task["task_id"], queued=True, submitted_via="cli")

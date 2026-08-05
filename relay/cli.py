@@ -98,6 +98,10 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("--timeout", dest="timeout_seconds", type=int)
     parser.add_argument("--caller", default="human")
     parser.add_argument("--request-id")
+    parser.add_argument(
+        "--inputs-json",
+        help="Optional JSON object passed to a registered Task Run",
+    )
     parser.add_argument("--attach", action="append", default=[], dest="attachments")
     parser.add_argument(
         "--input-artifact",
@@ -949,7 +953,9 @@ def _catalog_cli_request(args, config: Config) -> Any:
             "cursor": args.cursor,
             "updated_since": args.updated_since,
         }
-        return client.request("GET", "/v1/catalog/tasks?" + urlencode({k: v for k, v in values.items() if v is not None}))
+        return client.request(
+            "GET", "/v1/catalog/tasks?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
     if command == "task-runs":
         values = {
             "limit": args.limit,
@@ -1413,6 +1419,14 @@ def _artifact_inputs_from_args(values: list[str]) -> list[dict[str, str]]:
 
 
 def _request_from_args(args, config: Config) -> JobRequest:
+    inputs: dict[str, Any] = {}
+    if args.inputs_json:
+        try:
+            inputs = json.loads(args.inputs_json)
+        except json.JSONDecodeError as exc:
+            raise RelayError("INVALID_REQUEST", f"--inputs-json must be valid JSON: {exc}") from exc
+        if not isinstance(inputs, dict):
+            raise RelayError("INVALID_REQUEST", "--inputs-json must contain a JSON object.")
     return JobRequest(
         task=args.task or "",
         title=args.title,
@@ -1435,6 +1449,7 @@ def _request_from_args(args, config: Config) -> JobRequest:
         machine=args.machine,
         force_new=args.force_new,
         model=args.model,
+        inputs=inputs,
     )
 
 

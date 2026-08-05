@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .design_tokens import COLORS
+
 
 def _format_fields(payload):
     if not payload:
@@ -455,7 +457,7 @@ class RoutineEditorDialog(QDialog):
         self.preview_browser.setHtml(f"<b>Next occurrences</b><ul>{rows}</ul>")
 
     def set_preview_error(self, message):
-        self.preview_browser.setHtml(f"<span style='color:#991B1B'>{escape(str(message))}</span>")
+        self.preview_browser.setHtml(f"<span style='color:{COLORS['state.danger']}'>{escape(str(message))}</span>")
 
     def _populate(self, routine):
         self.name_edit.setText(str(routine.get("name") or ""))

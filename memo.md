@@ -5,5 +5,5 @@
 - [ ] Extend lifecycle import/export from Task Runs to full Project/Routine operational-history restoration.
 - [ ] Define and implement overlap `queue`/`cancel_previous` semantics for Routines; current tested behavior is `skip`, `allow_parallel`, and due/recovery handling.
 - [ ] Resolve pre-existing repository-wide Ruff format-check violations before release acceptance; focused changed-file checks and full tests pass.
-- [ ] Complete the screen-by-screen GUI rollout in `docs/design_inst.md`; new screens must use the implemented shared design system.
-- [ ] Validate and fix GUI user-action flows per `docs/superpowers/plans/2026-08-04-gui-user-scenario-validation.md`; source GUI currently enters read-only mode against the installed legacy daemon.
+- [ ] Implement `docs/Relay_GUI_Readability_and_Usability_Hardening_Plan_v1.0.md` as the GUI P0 before further decorative or screen rollout work; verify every screen and popup.
+- [ ] Validate and fix GUI user-action flows per `docs/superpowers/plans/2026-08-04-gui-user-scenario-validation.md` after the readability P0 is complete.
