@@ -12,6 +12,112 @@ from ..validation import normalize_summary
 _ALIAS_PATTERN = re.compile(r"^A[1-9][0-9]*$")
 _POLICY_VALUES = {"stop"}
 
+# Machine-readable contract for `relay project schema`. Callers that only have the
+# CLI cannot read this module, and the binding rules below are enforced at run time
+# rather than at registration, so they have to be stated explicitly.
+PROJECT_DEFINITION_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Relay Project definition",
+    "type": "object",
+    "required": ["name", "nodes"],
+    "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string"},
+        "project_summary": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Shown in `relay catalog projects`; make it specific enough to choose by.",
+        },
+        "failure_policy": {"type": "string", "enum": sorted(_POLICY_VALUES), "default": "stop"},
+        "nodes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "required": ["node_id", "task_id"],
+                "properties": {
+                    "node_id": {"type": "string", "minLength": 1, "description": "Unique within the Project."},
+                    "task_id": {"type": "string", "description": "An existing registered Task."},
+                    "checkpoint": {
+                        "type": "object",
+                        "description": "Pause for human approval after this node.",
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                            "deliver_to": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["kind", "path"],
+                                    "properties": {
+                                        "kind": {"type": "string", "enum": ["folder"]},
+                                        "path": {"type": "string"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "connections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["from_node", "from_role", "to_node", "to_alias"],
+                "properties": {
+                    "from_node": {"type": "string"},
+                    "from_role": {
+                        "type": "string",
+                        "description": "Artifact role produced by from_node. See rules.artifact_roles.",
+                    },
+                    "to_node": {"type": "string"},
+                    "to_alias": {"type": "string", "pattern": _ALIAS_PATTERN.pattern},
+                },
+            },
+        },
+        "output_selection": {
+            "type": "array",
+            "description": "Final deliverables of the Project.",
+            "items": {
+                "type": "object",
+                "required": ["node_id", "role"],
+                "properties": {"node_id": {"type": "string"}, "role": {"type": "string"}},
+            },
+        },
+    },
+}
+
+PROJECT_DEFINITION_RULES: dict[str, Any] = {
+    "artifact_roles": {
+        "result": "Relay labels each Run's result file `result`. Reserved: a Worker cannot declare it. Always exactly one per successful Run, so it is the safest thing to bind.",
+        "declared": "A Worker may set `role` on an entry in its result JSON `artifacts` array. Lowercase, ^[a-z][a-z0-9_-]{0,31}$.",
+        "output": "Default role for any produced file that declared none.",
+    },
+    "exactly_one_match": (
+        "Every connection and every output_selection entry resolves by (node, role) and must match "
+        "exactly one Artifact. Zero matches fail with PROJECT_ARTIFACT_MISSING; two or more fail with "
+        "PROJECT_ARTIFACT_AMBIGUOUS. A node that emits several files consumed separately must give each "
+        "a distinct role."
+    ),
+    "input_delivery": (
+        "A bound Artifact arrives in the consuming Task Run under input/ named "
+        "{node_id}__{alias}__{source_relative_path}, and is listed by alias in the request's "
+        "Artifact Inputs section. The filename is not the alias."
+    ),
+    "validated_at_registration": [
+        "PROJECT_INVALID: no nodes, blank node_id, duplicate node_id, to_alias not matching A1/A2/..., "
+        "output_selection referencing an unknown node, unknown failure_policy",
+        "PROJECT_TASK_MISSING: node task_id is not a registered Task",
+        "PROJECT_CYCLE: the connection graph is not a DAG",
+        "PROJECT_INPUT_CONFLICT: two connections target the same (to_node, to_alias)",
+        "DELIVERY_PATH_NOT_ALLOWED: checkpoint deliver_to path outside allowed_delivery_roots",
+    ],
+    "validated_at_run_time": [
+        "PROJECT_ARTIFACT_MISSING / PROJECT_ARTIFACT_AMBIGUOUS: see exactly_one_match",
+        "ARTIFACT_CHANGED: a bound Artifact changed size or sha256 since it was produced",
+    ],
+}
+
 
 @dataclass(slots=True)
 class ProjectNode:

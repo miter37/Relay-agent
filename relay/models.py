@@ -16,7 +16,13 @@ class JobRequest:
     result_format: str = "json"
     output_path: str | None = None
     artifact_path: str | None = None
-    profile: str = "web-research"
+    # None is a real "caller did not specify" sentinel here, matching `fallback`
+    # below: run_task/run_task_from_snapshot merge a dispatch-built JobRequest
+    # onto the Task snapshot's own profile with `request.profile or base.profile`,
+    # so a non-None default would silently override every Task's configured
+    # profile whenever the dispatcher (e.g. Project execution) doesn't set one.
+    profile: str | None = None
+    profile_snapshot: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: int | None = None
     caller: str = "human"
     request_id: str | None = None
@@ -125,6 +131,13 @@ class TaskSpec:
             )
         if self.result_format and self.result_format not in {"json", "txt"}:
             raise RelayError("TASK_INVALID", "result_format must be json or txt.")
+        if self.input_schema:
+            from .task_inputs import parse_schema
+
+            try:
+                parse_schema(self.input_schema)
+            except ValueError as exc:
+                raise RelayError("TASK_INVALID", str(exc)) from exc
 
     def to_row(self) -> dict[str, Any]:
         from .util import new_job_id, utc_now

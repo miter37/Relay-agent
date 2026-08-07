@@ -51,7 +51,16 @@ class RoutineRuntime:
 
     def tick_once(self, now_utc: datetime | None = None) -> dict[str, int]:
         now = (now_utc or datetime.now(UTC)).astimezone(UTC)
-        result = {"queued": 0, "skipped": 0, "failed": 0, "reconciled": 0}
+        result = {
+            "queued": 0,
+            "skipped": 0,
+            "failed": 0,
+            "reconciled": 0,
+            # overlap=queue held this many occurrences for a later tick
+            "queued_waiting": 0,
+            # overlap=cancel_previous cancelled this many in-flight Runs
+            "cancelled": 0,
+        }
         self._reconcile_active_runs(result)
         for routine in self.db.list_routines(limit=200):
             try:
@@ -107,10 +116,25 @@ class RoutineRuntime:
         if routine.get("missed_policy", "skip") == "run_once_on_recovery" and len(pending) > 1:
             pending = [pending[-1]]
         # Apply overlap policy
-        if routine.get("overlap_policy", "skip") == "skip" and self.db.active_runs_for_routine(routine["routine_id"]):
-            self._advance(routine, pending[-1])
-            result["skipped"] += len(pending)
-            return result
+        overlap = routine.get("overlap_policy", "skip")
+        active = self.db.active_runs_for_routine(routine["routine_id"]) if overlap != "allow_parallel" else []
+        if active:
+            if overlap == "skip":
+                self._advance(routine, pending[-1])
+                result["skipped"] += len(pending)
+                return result
+            if overlap == "queue":
+                # Hold this occurrence without advancing so the next tick retries it
+                # once the in-flight Run finishes. Order is preserved because
+                # next_run_at_utc still points at the oldest pending occurrence.
+                result["queued_waiting"] += len(pending)
+                return result
+            if overlap == "cancel_previous":
+                self._cancel_active_runs(active, result)
+        if overlap == "queue":
+            # Dispatch one occurrence per tick so queued occurrences run in order
+            # instead of bursting all at once when the previous Run finishes.
+            pending = pending[:1]
         for occ in pending:
             trigger = "routine"
             grace = timedelta(seconds=int(routine.get("missed_grace_seconds", 43200)))
@@ -124,6 +148,25 @@ class RoutineRuntime:
             self._claim_and_process(routine, occ, trigger, result)
             self._advance(routine, occ)
         return result
+
+    def _cancel_active_runs(self, active: list[dict[str, Any]], result: dict[str, int]) -> None:
+        """Cancel in-flight Runs so a newer occurrence can take over.
+
+        Cancellation is best effort: a Run that finished between the query and
+        here is simply left alone rather than failing the whole tick.
+        """
+        for run in active:
+            try:
+                if run.get("task_run_id"):
+                    self.engine.cancel(run["task_run_id"])
+                elif run.get("project_run_id"):
+                    self.engine.project_service.cancel_project_run(run["project_run_id"])
+            except RelayError:
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("cancel_previous failed for routine run %s: %s", run.get("run_id"), exc)
+            self.db.update_routine_run(run["run_id"], status="cancelled")
+            result["cancelled"] += 1
 
     def _claim_skipped(self, routine: dict[str, Any], occ: Occurrence) -> None:
         run = self._build_run(routine, occ, status="skipped")

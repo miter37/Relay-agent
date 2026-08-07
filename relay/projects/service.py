@@ -103,8 +103,6 @@ class ProjectService:
             raise RelayError("ARTIFACT_CHANGED", f"Artifact size changed: {artifact['artifact_uid']}")
         if recorded_digest and digest != recorded_digest:
             raise RelayError("ARTIFACT_CHANGED", f"Artifact sha256 changed: {artifact['artifact_uid']}")
-        if not (Path(self.engine.config.path_value("artifact_root")) / artifact["job_id"]):
-            pass
         destination = snapshot_root / f"{node_id}__{alias}__{artifact['relative_path']}"
         shutil.copy2(source, destination)
         dest_digest = sha256_file(destination)
@@ -275,7 +273,10 @@ class ProjectService:
         resolved: list[dict[str, Any]] = []
         for entry in manifest:
             if entry.get("artifact_uid") and entry.get("snapshot"):
-                resolved.append(entry)
+                enriched = dict(entry)
+                enriched.setdefault("from_node", entry.get("from_node"))
+                enriched.setdefault("from_role", entry.get("from_role"))
+                resolved.append(enriched)
                 continue
             # External input lookup.
             external = next(
@@ -287,7 +288,10 @@ class ProjectService:
                 None,
             )
             if external:
-                resolved.append(external)
+                enriched = dict(external)
+                enriched.setdefault("from_node", None)
+                enriched.setdefault("from_role", "external")
+                resolved.append(enriched)
                 continue
             # Connection: find source Task Run's Artifact matching from_role.
             source_node = entry["from_node"]
@@ -326,7 +330,10 @@ class ProjectService:
             snapshot_staged = self._stage_external_input(
                 snapshot["project_id"], project_run_id, node_id, entry["to_alias"], src
             )
-            resolved.append(snapshot_staged)
+            enriched = dict(snapshot_staged)
+            enriched["from_node"] = source_node
+            enriched["from_role"] = from_role
+            resolved.append(enriched)
         return resolved
 
     def _project_spec_from_snapshot(self, snapshot: dict[str, Any]) -> ProjectSpec:
@@ -363,7 +370,7 @@ class ProjectService:
                 self.db.update_project_step(
                     project_run_id, s["node_id"], status="pending", error_code=None, error_message=None
                 )
-        self.db.update_project_run(project_run_id, status="running", completed_at=None)
+        self.db.update_project_run(project_run_id, status="running", completed_at=None, started_at=None)
         return {"project_run": self.db.get_project_run(project_run_id), "target_node": target_node}
 
     def _collect_descendants(self, project_run_id: str, node_id: str, all_nodes: set[str]) -> set[str]:
@@ -469,7 +476,7 @@ class ProjectService:
                     payload["resolved_connections_json"] = canonical_json({"worker_override": worker})
                 self.db.update_project_step(project_run_id, s["node_id"], **payload)
 
-        self.db.update_project_run(project_run_id, status="running", completed_at=None)
+        self.db.update_project_run(project_run_id, status="running", completed_at=None, started_at=None)
         return {
             "ok": True,
             "project_run": self.db.get_project_run(project_run_id),

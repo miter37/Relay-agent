@@ -155,6 +155,14 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
         raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     detail = engine.show(job_id)
     request = _load_request(raw)
+    snapshot: dict[str, Any] = {}
+    try:
+        if raw.get("task_snapshot_json"):
+            value = json.loads(raw["task_snapshot_json"])
+            if isinstance(value, dict):
+                snapshot = value
+    except json.JSONDecodeError:
+        pass
     safe_request = {
         key: request[key]
         for key in (
@@ -179,7 +187,14 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
             if key in request:
                 safe_request[key] = request[key]
     detail["request"] = safe_request
-    detail["task_inputs"] = request.get("inputs") or {}
+    snapshot_inputs = snapshot.get("inputs")
+    detail["task_inputs"] = snapshot_inputs if isinstance(snapshot_inputs, dict) else request.get("inputs") or {}
+    detail["task_input_schema"] = (snapshot.get("task_definition") or {}).get("input_schema")
+    detail["input_integrity_warning"] = (
+        "This historical Task Run did not preserve its Task input values."
+        if detail.get("task_id") and not detail["task_inputs"] and detail.get("task_input_schema")
+        else None
+    )
     detail["task_preview"] = _task_preview(request.get("task") or raw.get("task_text") or raw.get("task_preview"))
     status = raw.get("status")
     can_schedule = False
@@ -711,6 +726,23 @@ def create_task(engine, payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "task": _task_public(task)}
 
 
+def list_profiles(engine) -> dict[str, Any]:
+    return {"ok": True, "profiles": engine.profiles.list()}
+
+
+def create_profile(engine, payload: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "profile": engine.profiles.create(payload)}
+
+
+def update_profile(engine, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "profile": engine.profiles.update(profile_id, payload)}
+
+
+def delete_profile(engine, profile_id: str) -> dict[str, Any]:
+    engine.profiles.delete(profile_id)
+    return {"ok": True, "profile_id": profile_id, "deleted": True}
+
+
 def get_task(engine, task_id: str) -> dict[str, Any]:
     task = engine.db.get_task(task_id)
     if not task:
@@ -732,19 +764,39 @@ def run_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     from .models import JobRequest
 
     overrides = payload.get("request") or {}
+    if not isinstance(overrides, dict):
+        raise RelayError("INVALID_REQUEST", "request must be an object.")
     request = None
-    if overrides or payload.get("worker") or payload.get("format") or payload.get("inputs") is not None:
+    request_fields = {
+        "worker",
+        "format",
+        "profile",
+        "timeout_seconds",
+        "fallback",
+        "attachments",
+        "artifact_inputs",
+        "request_id",
+        "inputs",
+        "model",
+    }
+    if overrides or any(field in payload for field in request_fields):
+
+        def value(name, default=None):
+            return overrides[name] if name in overrides else payload.get(name, default)
+
         request = JobRequest(
-            task=overrides.get("task") or "",
-            worker=overrides.get("worker") or payload.get("worker") or "auto",
-            result_format=overrides.get("result_format") or payload.get("format") or "json",
-            profile=overrides.get("profile"),
-            timeout_seconds=overrides.get("timeout_seconds"),
-            attachments=list(overrides.get("attachments") or []),
-            artifact_inputs=list(overrides.get("artifact_inputs") or []),
-            request_id=overrides.get("request_id"),
+            task=value("task", "") or "",
+            worker=value("worker", "auto") or "auto",
+            result_format=value("result_format", value("format", "json")) or "json",
+            profile=value("profile"),
+            timeout_seconds=value("timeout_seconds"),
+            fallback=value("fallback"),
+            attachments=list(value("attachments", []) or []),
+            artifact_inputs=list(value("artifact_inputs", []) or []),
+            request_id=value("request_id"),
             caller=overrides.get("caller", "human"),
-            inputs=overrides.get("inputs") or payload.get("inputs") or {},
+            inputs=dict(value("inputs", {}) or {}),
+            model=value("model"),
         )
     job, reused, task = engine.run_task(
         task_id,
@@ -901,17 +953,21 @@ def _catalog_project_run(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "project_run_id": run["project_run_id"],
         "project_id": run.get("project_id"),
+        "project_name": run.get("project_name"),
         "project_version": run.get("project_version"),
         "project_summary": snapshot.get("project_summary"),
         "status": status,
         "step_count": int(run.get("step_count") or 0),
         "completed_step_count": int(run.get("completed_step_count") or 0),
         "failed_step_count": int(run.get("failed_step_count") or 0),
+        "blocked_step_count": int(run.get("blocked_step_count") or 0),
+        "failed_node_id": run.get("failed_node_id"),
         "final_artifact_count": len(final_ids),
         "final_artifact_roles": sorted({str(item.get("role")) for item in final_ids if item.get("role")}),
         "failure_reason": failure_reason,
         "trigger_type": run.get("trigger_type") or "manual",
         "created_at": run.get("created_at"),
+        "started_at": run.get("started_at"),
         "completed_at": run.get("completed_at"),
     }
 

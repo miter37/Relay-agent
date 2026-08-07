@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .design_typography import apply_type
+from .design_widgets import IconButton
+
 
 def _format_json(value):
     return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
@@ -59,17 +62,23 @@ class ProjectsListView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QHBoxLayout()
-        header.addWidget(QLabel("<b>Projects</b>"), 1)
-        self.refresh_button = QPushButton("Refresh")
+        title = QLabel("Projects")
+        title.setObjectName("sectionTitle")
+        apply_type(title, "title.section")
+        header.addWidget(title, 1)
+        self.refresh_button = IconButton("refresh", "Refresh the Project list")
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         header.addWidget(self.refresh_button)
-        self.create_button = QPushButton("New Project")
+        self.create_button = IconButton("plus", "Register a new Project", tone="accent")
         self.create_button.clicked.connect(self.create_project_requested.emit)
         header.addWidget(self.create_button)
         layout.addLayout(header)
+        # Own row: this column is narrow, and sharing the header row clipped both
+        # the count and the title.
         self.count_label = QLabel("")
         self.count_label.setObjectName("mutedText")
-        header.addWidget(self.count_label)
+        apply_type(self.count_label, "caption")
+        layout.addWidget(self.count_label)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by name")
         self.search_edit.textChanged.connect(self._rerender)
@@ -131,19 +140,20 @@ class ProjectDetailView(QWidget):
         header = QHBoxLayout()
         self.title_label = QLabel("Project")
         self.title_label.setObjectName("pageTitle")
+        apply_type(self.title_label, "title.detail")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel("")
         header.addWidget(self.status_label)
-        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button = IconButton("refresh", "Refresh this Project")
         self.refresh_button.clicked.connect(self._on_refresh)
         header.addWidget(self.refresh_button)
-        self.run_button = QPushButton("Run")
+        self.run_button = IconButton("play", "Run this Project", tone="accent")
         self.run_button.clicked.connect(self._on_run)
         header.addWidget(self.run_button)
-        self.edit_button = QPushButton("Edit")
+        self.edit_button = IconButton("pencil", "Edit this Project")
         self.edit_button.clicked.connect(self._on_edit)
         header.addWidget(self.edit_button)
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = IconButton("trash", "Delete this Project", tone="danger")
         self.delete_button.clicked.connect(self._on_delete)
         header.addWidget(self.delete_button)
         layout.addLayout(header)
@@ -273,9 +283,9 @@ class ProjectEditorDialog(QDialog):
         self.nodes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         root.addWidget(self.nodes_table, 2)
         node_buttons = QHBoxLayout()
-        self.add_node_button = QPushButton("Add node")
+        self.add_node_button = IconButton("plus", "Add a node")
         self.add_node_button.clicked.connect(self._on_add_node)
-        self.remove_node_button = QPushButton("Remove node")
+        self.remove_node_button = IconButton("minus", "Remove the selected node")
         self.remove_node_button.clicked.connect(self._on_remove_node)
         node_buttons.addWidget(self.add_node_button)
         node_buttons.addWidget(self.remove_node_button)
@@ -288,9 +298,9 @@ class ProjectEditorDialog(QDialog):
         self.connections_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         root.addWidget(self.connections_table, 2)
         conn_buttons = QHBoxLayout()
-        self.add_conn_button = QPushButton("Add connection")
+        self.add_conn_button = IconButton("plus", "Add a connection")
         self.add_conn_button.clicked.connect(self._on_add_connection)
-        self.remove_conn_button = QPushButton("Remove connection")
+        self.remove_conn_button = IconButton("minus", "Remove the selected connection")
         self.remove_conn_button.clicked.connect(self._on_remove_connection)
         conn_buttons.addWidget(self.add_conn_button)
         conn_buttons.addWidget(self.remove_conn_button)
@@ -303,9 +313,9 @@ class ProjectEditorDialog(QDialog):
         self.outputs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         root.addWidget(self.outputs_table, 1)
         output_buttons = QHBoxLayout()
-        self.add_output_button = QPushButton("Add output")
+        self.add_output_button = IconButton("plus", "Add a final output")
         self.add_output_button.clicked.connect(self._on_add_output)
-        self.remove_output_button = QPushButton("Remove output")
+        self.remove_output_button = IconButton("minus", "Remove the selected output")
         self.remove_output_button.clicked.connect(self._on_remove_output)
         output_buttons.addWidget(self.add_output_button)
         output_buttons.addWidget(self.remove_output_button)
@@ -566,12 +576,12 @@ class ProjectRunMonitorDialog(QDialog):
         self.steps_browser = QTextBrowser()
         root.addWidget(self.steps_browser, 3)
         action_row = QHBoxLayout()
-        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button = IconButton("refresh", "Refresh this Project Run")
         self.refresh_button.clicked.connect(
             lambda: self.accepted_action.emit("refresh", {"project_run_id": self.project_run_id})
         )
         action_row.addWidget(self.refresh_button)
-        self.cancel_button = QPushButton("Cancel run")
+        self.cancel_button = IconButton("stop", "Cancel this Project Run", tone="danger")
         self.cancel_button.clicked.connect(
             lambda: self.accepted_action.emit("cancel", {"project_run_id": self.project_run_id})
         )
@@ -666,8 +676,9 @@ class ProjectsView(QWidget):
         self.delivery_roots = []
         self.editor = None
         self.run_dialog = None
+        # No section heading here: the top bar names the section and the list
+        # column carries its own title.
         root = QVBoxLayout(self)
-        root.addWidget(QLabel("<h2>Projects</h2>"))
         body = QHBoxLayout()
         self.list = ProjectsListView()
         self.list.refresh_requested.connect(self.refresh_requested.emit)

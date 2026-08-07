@@ -2035,6 +2035,20 @@ class Database:
                 [changes[key] for key in keys] + [project_run_id],
             )
 
+    def ensure_project_run_started(self, project_run_id: str, started_at: str) -> bool:
+        """Record the Project Run's first dispatch timestamp.
+
+        Uses ``COALESCE`` so concurrent dispatches only record the earliest
+        timestamp. Returns True when the column was updated.
+        """
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE project_runs SET started_at=COALESCE(started_at, ?), updated_at=? "
+                "WHERE project_run_id=? AND started_at IS NULL",
+                (started_at, utc_now(), project_run_id),
+            )
+            return cursor.rowcount > 0
+
     def list_project_runs(
         self, *, project_id: str | None = None, status: str | None = None, limit: int = 50
     ) -> list[dict[str, Any]]:
@@ -2084,11 +2098,16 @@ class Database:
             where.append("(pr.created_at<? OR (pr.created_at=? AND pr.project_run_id<?))")
             params.extend([cursor[0], cursor[0], cursor[1]])
         sql = (
-            "SELECT pr.*, COUNT(ps.node_id) AS step_count, "
+            "SELECT pr.*, p.name AS project_name, "
+            "COUNT(ps.node_id) AS step_count, "
             "SUM(CASE WHEN ps.status='completed' THEN 1 ELSE 0 END) AS completed_step_count, "
-            "SUM(CASE WHEN ps.status='failed' THEN 1 ELSE 0 END) AS failed_step_count "
-            "FROM project_runs pr LEFT JOIN project_run_steps ps "
-            "ON ps.project_run_id=pr.project_run_id"
+            "SUM(CASE WHEN ps.status='failed' THEN 1 ELSE 0 END) AS failed_step_count, "
+            "SUM(CASE WHEN ps.status='blocked' THEN 1 ELSE 0 END) AS blocked_step_count, "
+            "(SELECT ps2.node_id FROM project_run_steps ps2 "
+            "WHERE ps2.project_run_id=pr.project_run_id AND ps2.status='failed' "
+            "ORDER BY COALESCE(ps2.completed_at, ps2.updated_at) ASC, ps2.node_id ASC LIMIT 1) AS failed_node_id "
+            "FROM project_runs pr LEFT JOIN projects p ON p.project_id=pr.project_id "
+            "LEFT JOIN project_run_steps ps ON ps.project_run_id=pr.project_run_id"
         )
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -2122,7 +2141,10 @@ class Database:
     def list_project_steps(self, project_run_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM project_run_steps WHERE project_run_id=? ORDER BY node_id",
+                "SELECT ps.*, "
+                "(SELECT COUNT(*) FROM project_step_runs x "
+                "WHERE x.project_run_id=ps.project_run_id AND x.node_id=ps.node_id) AS attempt_count "
+                "FROM project_run_steps ps WHERE ps.project_run_id=? ORDER BY ps.node_id",
                 (project_run_id,),
             ).fetchall()
             return [dict(row) for row in rows]

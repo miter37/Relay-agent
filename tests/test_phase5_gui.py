@@ -82,7 +82,11 @@ class RoutinesWidgetTests(unittest.TestCase):
         self.assertEqual(payload["target_type"], "task")
         self.assertEqual(payload["target_id"], "t-1")
         self.assertEqual(payload["rule"]["timezone"], "UTC")
-        self.assertNotIn("queue", [dialog.overlap_combo.itemText(i) for i in range(dialog.overlap_combo.count())])
+        # Every policy the core accepts is now implemented, so the editor offers all of them.
+        from relay.routines.models import _VALID_OVERLAP
+
+        offered = [dialog.overlap_combo.itemText(i) for i in range(dialog.overlap_combo.count())]
+        self.assertEqual(sorted(offered), sorted(_VALID_OVERLAP))
         dialog.rule_edit.setPlainText("not json")
         with self.assertRaisesRegex(ValueError, "Rule must be valid JSON"):
             dialog.payload()
@@ -164,7 +168,7 @@ class RoutinesMainWindowRoutingTests(unittest.TestCase):
         window, temp, requests = self._build()
         try:
             window._show_routines()
-            self.assertEqual(window.detail_view_mode, "routines")
+            self.assertEqual(window.active_section, "routines")
             self.assertEqual(
                 requests,
                 [

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -16,6 +17,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+
+from .design_typography import apply_type
 
 
 class ScheduleEditorDialog(QDialog):
@@ -37,7 +40,7 @@ class ScheduleEditorDialog(QDialog):
         self.resize(560, 620)
 
         root = QVBoxLayout(self)
-        form = QFormLayout()
+        self.form = form = QFormLayout()
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("Schedule name")
         form.addRow("Schedule name", self.name_edit)
@@ -52,7 +55,7 @@ class ScheduleEditorDialog(QDialog):
         self.times_edit.setPlaceholderText("09:00, 13:00")
         form.addRow("Times", self.times_edit)
 
-        weekday_row = QHBoxLayout()
+        self.weekday_row = weekday_row = QHBoxLayout()
         self.weekday_checks: list[QCheckBox] = []
         for day, label in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"), start=1):
             checkbox = QCheckBox(label)
@@ -134,11 +137,17 @@ class ScheduleEditorDialog(QDialog):
         actions.addStretch(1)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.reject)
-        actions.addWidget(self.cancel_button)
         self.save_button = QPushButton("Create schedule")
+        self.save_button.setObjectName("primaryAction")
+        apply_type(self.save_button, "body.strong")
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(lambda: self.save_requested.emit(self.payload()))
-        actions.addWidget(self.save_button)
+        # QDialogButtonBox orders accept/reject per platform convention, matching the
+        # dialogs that build their footer from it directly.
+        footer = QDialogButtonBox()
+        footer.addButton(self.save_button, QDialogButtonBox.AcceptRole)
+        footer.addButton(self.cancel_button, QDialogButtonBox.RejectRole)
+        actions.addWidget(footer)
         root.addLayout(actions)
 
         self._rule_type_changed()
@@ -146,22 +155,19 @@ class ScheduleEditorDialog(QDialog):
 
     def _rule_type_changed(self) -> None:
         rule_type = self.type_combo.currentData()
-        for widget in (
-            self.weekday_checks,
-            self.month_days_edit,
-            self.interval_days,
-            self.anchor_date_edit,
-            self.run_at_local_edit,
-        ):
-            if isinstance(widget, list):
-                for item in widget:
-                    item.setVisible(rule_type == "weekly")
-            else:
-                widget.setVisible(
-                    (rule_type == "monthly" and widget is self.month_days_edit)
-                    or (rule_type == "n_days" and widget in {self.interval_days, self.anchor_date_edit})
-                    or (rule_type == "once" and widget is self.run_at_local_edit)
-                )
+        # Hide the whole form row, not just the field: hiding a field on its own
+        # leaves its label behind as an orphan with nothing next to it.
+        visibility = {
+            self.weekday_row: rule_type == "weekly",
+            self.month_days_edit: rule_type == "monthly",
+            self.interval_days: rule_type == "n_days",
+            self.anchor_date_edit: rule_type == "n_days",
+            self.run_at_local_edit: rule_type == "once",
+        }
+        for widget, visible in visibility.items():
+            self.form.setRowVisible(widget, visible)
+        for item in self.weekday_checks:
+            item.setVisible(rule_type == "weekly")
 
     def _retention_changed(self, mode: str) -> None:
         self.retention_value.setEnabled(mode != "forever")

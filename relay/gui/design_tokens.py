@@ -9,27 +9,50 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 COLORS: dict[str, str] = {
-    "bg.canvas": "#0F172A",
-    "bg.sidebar": "#111C2E",
-    "bg.topbar": "#162238",
-    "bg.surface": "#1B2A40",
-    "bg.surfaceRaised": "#263A55",
-    "bg.input": "#121F33",
-    "border.subtle": "#354A66",
-    "border.focus": "#6DD6F7",
-    "text.primary": "#F3F7FC",
-    "text.secondary": "#C3D0E0",
-    "text.muted": "#9AAAC0",
-    "accent.primary": "#1769AA",
-    "accent.cyan": "#6DD6F7",
-    "state.success": "#70E0A0",
-    "state.warning": "#FFD166",
-    "state.danger": "#FF8A8F",
-    "state.info": "#9BB8FF",
+    # Surfaces (4-tier neutral dark)
+    "bg.canvas": "#131313",
+    "bg.sidebar": "#181818",
+    "bg.topbar": "#181818",
+    "bg.surface": "#1C1C1C",
+    "bg.surfaceRaised": "#242424",
+    "bg.input": "#1F1F1F",
+    # Interactive surfaces
+    "bg.hover": "#2A2A2A",
+    "bg.pressed": "#303030",
+    "bg.selected": "#26364F",
+    # Borders
+    "border.subtle": "#2E2E2E",
+    "border.strong": "#3D3D3D",
+    "border.focus": "#7AA2F7",
+    # Text
+    "text.primary": "#EDEDED",
+    "text.secondary": "#B0B0B0",
+    "text.muted": "#999999",
+    # Accent (selection, focus, progress, active indicators)
+    "accent.primary": "#4C8DFF",
+    "accent.onPrimary": "#0B0B0B",
+    # Primary action button (neutral bright, Codex/Linear style)
+    "action.primaryBg": "#EDEDED",
+    "action.primaryFg": "#131313",
+    # State
+    "state.success": "#5BD48A",
+    "state.warning": "#E3B341",
+    "state.danger": "#F07A75",
+    "state.info": "#79A9FF",
 }
 
-SPACING = {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24, "xxl": 32}
-RADIUS = {"control": 6, "panel": 10}
+SPACING = {"xxs": 2, "xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24, "xxl": 32}
+RADIUS = {"badge": 4, "control": 5, "panel": 8}
+METRICS = {
+    "controlHeight": 28,
+    "iconButton": 28,
+    "iconSize": 16,
+    "navIconSize": 18,
+    "rowHeight": 26,
+    "rowPadding": 5,
+    "topBarHeight": 48,
+    "sidebarWidth": 200,
+}
 
 
 def contrast_ratio(foreground: str, background: str) -> float:

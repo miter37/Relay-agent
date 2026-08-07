@@ -1,10 +1,11 @@
 ---
 name: use_relay_agent
 description: >
-  Relay CLI를 통해 Claude Code, Codex CLI, Antigravity CLI에 독립적인 일회성 작업을
-  안전하게 위임하고, 비동기 작업의 상태를 추적하여 JSON/TXT 결과와 아티팩트를 회수한 뒤
-  현재 대화 채널(예: Telegram, CLI)에 전달한다. 사용자가 Relay 사용 또는 특정 외부
-  AI 작업자를 명시했거나, 긴 조사·코딩·분석·산출물 작업을 독립 서브태스크로 나눌 때 사용한다.
+  Relay CLI로 Claude Code, Codex CLI, Antigravity CLI에 작업을 위임하고 결과를 회수한다.
+  일회성 위임(submit/run), 재사용 Task 등록·실행, 여러 Task를 파일로 연결하는 Project 작성·실행,
+  Routine/Schedule 자동 반복, 과거 Run·Artifact 검색과 재사용까지 Relay의 전체 기능을 다룬다.
+  사용자가 Relay 사용 또는 특정 외부 AI 작업자를 명시했거나, 긴 조사·코딩·분석·산출물 작업을
+  독립 서브태스크로 나눌 때, 또는 반복 작업을 자동화하거나 과거 작업물을 찾을 때 사용한다.
 ---
 
 # use_relay_agent
@@ -60,6 +61,26 @@ Relay는 결과 내용의 사실성, 최신성, 출처 신뢰도, 논리적 타�
 - 매우 짧고 단순해 현재 에이전트가 즉시 처리하는 편이 더 나은 일
 - 독립적으로 완료할 수 없고 다른 서브태스크와 지속적으로 상태를 공유해야 하는 일
 - 결과 내용의 정확성을 Relay 자체가 검증해 줄 것이라고 기대하는 일
+
+### 어떤 기능을 쓸지 고르기
+
+Relay는 일회성 위임 말고도 재사용·자동화·조회 기능을 갖고 있다. 요청 성격에 따라 아래로 분기한다.
+
+| 요청 성격 | 쓸 것 | 문서 |
+|---|---|---|
+| 지금 한 번만 시키면 되는 일 | `relay submit` (비동기) / `relay run` (동기) | 이 문서 §8, §14 |
+| 같은 작업을 앞으로도 반복할 것 | 등록 Task (`relay task create`) 후 `task run` | `references/tasks.md` |
+| 매번 다른 값을 넣어 같은 작업을 돌릴 것 | 등록 Task + 입력 스키마 + `--inputs-json` | `references/tasks.md` §3 |
+| 여러 단계가 파일을 주고받아야 하는 일 | Project (`relay project create`) | `references/projects.md` |
+| 정해진 시각에 자동 반복 | Routine (Task/Project 대상) 또는 Schedule (과거 Run 재생) | `references/automation.md` |
+| 전에 한 작업·산출물을 찾거나 재사용 | `relay search`, `relay catalog`, `relay artifact` | `references/retrieval.md` |
+| 실패·품질·승인 대기 확인 | `relay attention`, `relay quality`, `relay operations` | `references/retrieval.md` §5 |
+
+**어떤 경우에도 먼저 조회한다.** 새 Task나 Project를 만들기 전에 `relay catalog`와 `relay search`로
+이미 있는 정의·결과를 확인한다. 중복 등록은 나중에 어느 것을 써야 할지 모르게 만든다.
+
+단계 사이에 **파일을 넘길 필요가 없으면 Project를 만들지 않는다.** Task 하나로 끝낸다.
+한 번만 할 일이면 **Task로 등록하지 않는다.** `submit`으로 끝낸다.
 
 ---
 
@@ -169,7 +190,7 @@ Relay를 실행하기 전에 다음 항목을 결정한다.
 | 작업 범위 | 한 worker가 추가 질문 없이 독립적으로 끝낼 수 있는가 |
 | worker | 사용자 지정 또는 작업 성격에 따른 선택 |
 | format | 기본 `json`, 단순 원문 산출만 필요할 때 `txt` |
-| profile | `web-research`, `analysis-only`, `general-artifact` |
+| profile | `evidence-research`, `decision-brief`, `data-validation`, `analysis-only`, `artifact-production`, `code-review` |
 | task file | UTF-8 Markdown 파일 |
 | attachments | 분석에 필요한 개별 파일 |
 | result path | 허용 output root 아래의 고유 경로 |
@@ -223,17 +244,27 @@ relay model-check --worker codex --model gpt-5.6-terra --machine
 
 ### Profile 선택
 
-- `web-research`
-  - 최신 웹 조사
-  - URL 출처가 필요한 작업
-  - 사실과 추정 구분이 중요한 작업
-- `analysis-only`
-  - 제공된 입력을 변경하지 않고 분석만 수행
-- `general-artifact`
-  - 코드, 보고서, HTML, 이미지용 데이터, 기타 파일 산출물이 필요한 작업
+| Profile ID | 쓰는 상황 |
+|---|---|
+| `evidence-research` | 최신 웹 조사, URL 출처가 필요한 작업, 사실과 추정 구분이 중요한 작업 |
+| `decision-brief` | 의사결정용 요약. 짧고 결론 중심 |
+| `data-validation` | 데이터 검증·정합성 확인 |
+| `analysis-only` | 제공된 입력을 변경하지 않고 분석만 수행 |
+| `artifact-production` | 코드, 보고서, HTML, 이미지 등 파일 산출물이 필요한 작업 |
+| `code-review` | 코드 리뷰 |
+
+레거시 ID도 아직 받아들여지며 각각 위 ID로 매핑된다:
+`web-research`→`evidence-research`, `report`→`decision-brief`, `analysis`·`analysis-only`→`analysis-only`,
+`general-artifact`→`artifact-production`, `code`→`code-review`.
+**새로 만들 때는 위 표의 현재 ID를 쓴다.**
+
+사용자 정의 Profile이 있을 수 있으므로 확실하지 않으면 현재 목록을 확인한다.
+
+```sh
+relay config show --machine
+```
 
 profile을 생략하면 설치 설정의 기본 profile이 사용된다.
-Relay 0.5.0 기본값은 일반적으로 `web-research`다.
 
 ### Format 선택
 
@@ -480,7 +511,7 @@ relay submit \
   --format json \
   --out "<RESULT_PATH>" \
   --artifacts "<ARTIFACT_DIR>" \
-  --profile "<web-research|analysis-only|general-artifact>" \
+  --profile "<evidence-research|analysis-only|artifact-production>" \
   --timeout 1200 \
   --request-id "<REQUEST_ID>" \
   --caller hermes \
@@ -496,7 +527,7 @@ relay submit `
   --format json `
   --out "<RESULT_PATH>" `
   --artifacts "<ARTIFACT_DIR>" `
-  --profile "<web-research|analysis-only|general-artifact>" `
+  --profile "<evidence-research|analysis-only|artifact-production>" `
   --timeout 1200 `
   --request-id "<REQUEST_ID>" `
   --caller hermes `
@@ -709,6 +740,31 @@ Relay는 최종 전달 과정에서 실제 파일을 스캔하고 다음 객체 
 
 따라서 최종 결과 parser는 artifacts 항목이 문자열이라고만 가정하지 말고,
 객체의 `relative_path`를 우선 처리한다.
+
+#### Artifact role
+
+각 Artifact에는 role이 붙는다. Project 연결과 최종 산출물 선택이 `(노드, role)`로 해석되므로,
+Project 노드로 쓸 Task를 작성할 때 이 값이 중요하다.
+
+| role | 붙는 방식 |
+|---|---|
+| `result` | Relay가 결과 파일에 자동으로 붙인다. **예약어이며 Worker가 선언할 수 없다** (선언하면 `SCHEMA_MISMATCH`) |
+| Worker 선언 role | 결과 JSON의 `artifacts[].role`. 소문자 `^[a-z][a-z0-9_-]{0,31}$` |
+| `output` | role을 선언하지 않은 나머지 파일의 기본값 |
+
+```json
+{
+  "relative_path": "portrait.jpg",
+  "description": "인물 대표 이미지",
+  "encoding": "base64",
+  "content": "...",
+  "role": "image"
+}
+```
+
+한 Run이 파일 여러 개를 만들고 뒷 단계가 그걸 따로 소비한다면 **각각 다른 role을 선언**하게 지시서에 명시한다.
+같은 role이 2개 이상이면 Project 실행이 `PROJECT_ARTIFACT_AMBIGUOUS`로 실패한다.
+자세한 내용은 `references/projects.md` §3.
 
 실제 파일 경로:
 
@@ -1056,7 +1112,7 @@ relay submit `
   --format json `
   --out "D:\Relay\results\telegram-123-8821.json" `
   --artifacts "D:\Relay\artifacts\telegram-123-8821" `
-  --profile web-research `
+  --profile evidence-research `
   --timeout 1800 `
   --request-id "telegram-123-8821" `
   --caller hermes `
@@ -1116,7 +1172,7 @@ relay submit \
   --format json \
   --out "/relay/results/code-fix-204.json" \
   --artifacts "/relay/artifacts/code-fix-204" \
-  --profile general-artifact \
+  --profile artifact-production \
   --attach "/relay/input/app.py" \
   --attach "/relay/input/test_app.py" \
   --request-id "cli-session7-turn204" \
@@ -1273,8 +1329,14 @@ Relay 내부 정리가 실패했다고 최종 결과 파일을 임의 삭제하�
 
 ## 23. 최소 실행 알고리즘
 
+아래는 **일회성 위임**의 최소 경로다. 요청이 재사용·다단계·자동화·조회에 해당하면
+§2의 분기표를 먼저 보고 해당 레퍼런스로 간다.
+
 ```text
-IF 사용자가 Relay 또는 특정 외부 worker 사용을 요청했거나
+IF 요청이 반복 등록·다단계 연결·정기 실행·과거 결과 조회에 해당한다:
+    references/{tasks|projects|automation|retrieval}.md 로 간다.
+
+ELSE IF 사용자가 Relay 또는 특정 외부 worker 사용을 요청했거나
    독립적인 긴 서브태스크 위임이 유효하다:
     1. 보안 및 허용 경로를 확인한다.
     2. worker, profile, format, fallback을 결정한다.

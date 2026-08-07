@@ -8,6 +8,7 @@ from pathlib import Path
 from .errors import RelayError
 from .models import JobRequest
 from .util import ensure_dir, sha256_file
+from .validation import ARTIFACT_ROLE_PATTERN, RESERVED_ARTIFACT_ROLES
 
 STANDARD_JSON_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15,7 +16,10 @@ STANDARD_JSON_SCHEMA = {
     "additionalProperties": False,
     "required": ["schema_version", "status", "answer", "sources", "uncertainties", "missing_items", "artifacts"],
     "properties": {
-        "schema_version": {"type": "string"},
+        # const, not just type, so a Worker sees the required literal instead of
+        # guessing a plausible-looking value like "1.0.0" and getting a hard
+        # SCHEMA_MISMATCH the schema gave it no way to anticipate.
+        "schema_version": {"type": "string", "const": "1.0"},
         "status": {"type": "string", "enum": ["complete", "partial", "failed"]},
         "answer": {"type": "string"},
         "summary": {"type": "string", "maxLength": 1000},
@@ -33,6 +37,7 @@ STANDARD_JSON_SCHEMA = {
                     "description": {"type": "string"},
                     "encoding": {"type": "string", "enum": ["utf-8", "base64"]},
                     "content": {"type": "string"},
+                    "role": {"type": "string", "pattern": ARTIFACT_ROLE_PATTERN.pattern},
                 },
             },
         },
@@ -81,7 +86,13 @@ def build_request_markdown(
         "and exact content. Use encoding=utf-8 for text and encoding=base64 for binary content. Relay "
         "materializes this payload into the artifact directory, so a valid payload is sufficient to complete "
         "the artifact request. You may also create the file directly. relative_path is relative to the artifact "
-        "directory; do not prefix it with artifacts/."
+        "directory; do not prefix it with artifacts/.\n"
+        "- An artifacts entry may set an optional role to label what the file is for "
+        f"(lowercase, matching {ARTIFACT_ROLE_PATTERN.pattern}). Files without a role get role=output. "
+        f"Roles reserved by Relay and rejected here: {', '.join(sorted(RESERVED_ARTIFACT_ROLES))}.\n"
+        "- Downstream Project steps select an input by (source node, role), and that selection must match "
+        "exactly one file. If this run produces several artifacts that a later step consumes separately, "
+        "give each one a distinct role."
         if request.result_format == "json"
         else "Return a non-empty UTF-8 plain-text result."
     )
@@ -105,6 +116,8 @@ def build_request_markdown(
         "analysis-only": "- Do not modify input files.\n- Produce analysis only.",
         "general-artifact": "- Produce the requested result and any requested supporting artifacts.",
     }.get(request.profile, "- Complete the requested task faithfully.")
+    if request.profile_snapshot.get("instructions"):
+        profile_rules = "- " + str(request.profile_snapshot["instructions"]).replace("\n", "\n- ")
     task_text = request.task.strip()
     if target_working_copy and request.target_path:
         task_text = re.sub(rf"{re.escape(request.target_path)}[\\/]*", "target/", task_text, flags=re.IGNORECASE)

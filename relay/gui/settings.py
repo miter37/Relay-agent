@@ -4,6 +4,8 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QCheckBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget
 
 from .agent_apps import AgentAppListView
+from .design_tokens import SPACING
+from .design_typography import apply_type
 
 
 class SettingsView(QWidget):
@@ -18,19 +20,28 @@ class SettingsView(QWidget):
         self.tabs = QTabWidget()
         general = QWidget()
         general_layout = QVBoxLayout(general)
-        general_layout.addWidget(QLabel("<b>Settings</b>"))
-        general_layout.addWidget(QLabel("Relay daemon"))
+        # The top bar already names this section, so start at the first real group.
+        daemon_title = QLabel("Relay daemon")
+        daemon_title.setObjectName("sectionTitle")
+        apply_type(daemon_title, "title.section")
+        general_layout.addWidget(daemon_title)
         self.autostart_status = QLabel("Auto-start status unavailable")
+        self.autostart_status.setObjectName("mutedText")
+        apply_type(self.autostart_status, "caption")
         self.autostart_status.setWordWrap(True)
         general_layout.addWidget(self.autostart_status)
         self.autostart_button = QPushButton("Enable auto-start")
         self.autostart_button.clicked.connect(self._toggle_autostart)
-        general_layout.addWidget(self.autostart_button)
+        autostart_row = QHBoxLayout()
+        autostart_row.addWidget(self.autostart_button)
+        autostart_row.addStretch(1)
+        general_layout.addLayout(autostart_row)
 
         doctor_group = QGroupBox("Worker deep doctor")
         doctor_layout = QVBoxLayout(doctor_group)
         doctor_help = QLabel("Run a deep unattended probe for a Worker before using it in automated Tasks or Projects.")
         doctor_help.setObjectName("mutedText")
+        apply_type(doctor_help, "caption")
         doctor_help.setWordWrap(True)
         doctor_layout.addWidget(doctor_help)
         self.doctor_status_labels: dict[str, QLabel] = {}
@@ -52,13 +63,19 @@ class SettingsView(QWidget):
             self.doctor_buttons[worker] = button
         general_layout.addWidget(doctor_group)
 
-        general_layout.addWidget(QLabel("<br><b>Worker Security Bypasses</b>"))
-        general_layout.addWidget(
-            QLabel(
-                "<i>These switches change the running daemon immediately. They disable permission checks or "
-                "sandbox restrictions for the selected worker.</i>"
-            )
+        bypass_title = QLabel("Worker Security Bypasses")
+        bypass_title.setObjectName("sectionTitle")
+        apply_type(bypass_title, "title.section")
+        bypass_title.setContentsMargins(0, SPACING["lg"], 0, 0)
+        general_layout.addWidget(bypass_title)
+        bypass_help = QLabel(
+            "These switches change the running daemon immediately. They disable permission checks or "
+            "sandbox restrictions for the selected worker."
         )
+        bypass_help.setObjectName("mutedText")
+        apply_type(bypass_help, "caption")
+        bypass_help.setWordWrap(True)
+        general_layout.addWidget(bypass_help)
         self.codex_full_cb = QCheckBox("Codex: Full Access Mode (bypass sandbox and approvals)")
         self.codex_full_cb.toggled.connect(lambda checked: self.full_access_mode_changed.emit("codex", checked))
         general_layout.addWidget(self.codex_full_cb)
@@ -69,13 +86,23 @@ class SettingsView(QWidget):
         self.agy_full_cb.toggled.connect(lambda checked: self.full_access_mode_changed.emit("antigravity", checked))
         general_layout.addWidget(self.agy_full_cb)
 
-        general_layout.addWidget(QLabel("<br><b>Antigravity safety</b>"))
+        antigravity_title = QLabel("Antigravity safety")
+        antigravity_title.setObjectName("sectionTitle")
+        apply_type(antigravity_title, "title.section")
+        antigravity_title.setContentsMargins(0, SPACING["lg"], 0, 0)
+        general_layout.addWidget(antigravity_title)
         self.antigravity_status = QLabel("Antigravity status unavailable")
+        self.antigravity_status.setObjectName("mutedText")
+        apply_type(self.antigravity_status, "caption")
         self.antigravity_status.setWordWrap(True)
         general_layout.addWidget(self.antigravity_status)
-        self.antigravity_button = QPushButton("Verify & enable Antigravity")
+        # "&&" escapes the ampersand; a single "&" is consumed as a Qt mnemonic.
+        self.antigravity_button = QPushButton("Verify && enable Antigravity")
         self.antigravity_button.clicked.connect(self._activate_antigravity)
-        general_layout.addWidget(self.antigravity_button)
+        antigravity_row = QHBoxLayout()
+        antigravity_row.addWidget(self.antigravity_button)
+        antigravity_row.addStretch(1)
+        general_layout.addLayout(antigravity_row)
         general_layout.addStretch(1)
         self.tabs.addTab(general, "General")
         self.agent_apps_view = AgentAppListView()
@@ -184,15 +211,15 @@ class SettingsView(QWidget):
             self.antigravity_button.setEnabled(False)
         elif state == "ready":
             text = f"Ready to enable; version {version}; deep audit passed"
-            self.antigravity_button.setText("Verify & enable Antigravity")
+            self.antigravity_button.setText("Verify && enable Antigravity")
             self.antigravity_button.setEnabled(not self._antigravity_pending)
         elif state == "unavailable":
             text = "Antigravity CLI was not found. Install it and refresh this view."
-            self.antigravity_button.setText("Verify & enable Antigravity")
+            self.antigravity_button.setText("Verify && enable Antigravity")
             self.antigravity_button.setEnabled(False)
         elif state == "needs_audit":
             text = f"Deep audit required before enabling; version {version}"
-            self.antigravity_button.setText("Verify & enable Antigravity")
+            self.antigravity_button.setText("Verify && enable Antigravity")
             self.antigravity_button.setEnabled(not self._antigravity_pending)
         else:
             text = "Status unavailable"
@@ -208,7 +235,7 @@ class SettingsView(QWidget):
     def set_antigravity_error(self, message: str) -> None:
         self._antigravity_pending = False
         self.antigravity_status.setText(f"Activation failed: {message}")
-        self.antigravity_button.setText("Verify & enable Antigravity")
+        self.antigravity_button.setText("Verify && enable Antigravity")
         self.antigravity_button.setEnabled(True)
 
     def _activate_antigravity(self) -> None:

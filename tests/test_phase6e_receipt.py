@@ -28,7 +28,7 @@ class Phase6eReceiptTests(unittest.TestCase):
 
         # Verify DB persistence
         db_job = self.db.get_job(job["job_id"])
-        self.assertEqual(db_job.get("receipt_schema_version"), 2)
+        self.assertEqual(db_job.get("receipt_schema_version"), 3)
 
         # Verify API response
         detail = job_detail(self.engine, job["job_id"])
@@ -36,13 +36,13 @@ class Phase6eReceiptTests(unittest.TestCase):
 
     def test_get_receipt_schema_version_api(self):
         ver = get_receipt_schema_version()
-        self.assertEqual(ver["receipt_schema_version"], 2)
+        self.assertEqual(ver["receipt_schema_version"], 3)
 
     def test_failure_receipt_contains_normalized_summary_fields(self):
         job, _ = self.engine.create_job(JobRequest(task="Test failure"), queued=True)
         receipt = self.engine._fail_job(job["job_id"], "AUTH_REQUIRED", "  Agent login\nexpired.  ", [])
 
-        self.assertEqual(receipt["receipt_schema_version"], 2)
+        self.assertEqual(receipt["receipt_schema_version"], 3)
         self.assertIn("task_summary", receipt)
         self.assertIsNone(receipt["result_summary"])
         self.assertEqual(receipt["failure_reason"], "Agent login expired.")

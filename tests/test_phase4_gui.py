@@ -226,7 +226,7 @@ class ProjectsMainWindowRoutingTests(unittest.TestCase):
         window, tmp = self._build()
         try:
             window._show_projects()
-            self.assertEqual(window.detail_view_mode, "projects")
+            self.assertEqual(window.active_section, "projects")
             self.assertEqual(self.requests[0][0], "projects")
             self.assertEqual(self.requests[0][1], "/v1/projects")
             self.assertEqual(self.requests[1][0], "project_tasks")

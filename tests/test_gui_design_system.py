@@ -17,6 +17,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
 
 from relay.gui.design_styles import application_palette, application_stylesheet
 from relay.gui.design_tokens import COLORS, contrast_ratio, status_presentation
+from relay.gui.design_typography import TYPE_SCALE, application_font, font_for
 from relay.gui.design_widgets import EmptyState, StatusBadge
 
 
@@ -24,6 +25,7 @@ class DesignSystemTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        cls.app.setFont(application_font())
         cls.app.setPalette(application_palette())
         cls.app.setStyleSheet(application_stylesheet())
 
@@ -51,11 +53,33 @@ class DesignSystemTests(unittest.TestCase):
         self.assertIn("QPushButton#primaryAction", stylesheet)
         self.assertIn('QLabel#statusBadge[state="running"]', stylesheet)
         self.assertIn(COLORS["border.focus"], stylesheet)
-        for surface in ("bg.canvas", "bg.surface", "bg.surfaceRaised", "bg.input"):
+        surfaces = ("bg.canvas", "bg.surface", "bg.surfaceRaised", "bg.input", "bg.hover", "bg.pressed")
+        for surface in surfaces:
             self.assertGreaterEqual(contrast_ratio(COLORS["text.primary"], COLORS[surface]), 4.5)
             self.assertGreaterEqual(contrast_ratio(COLORS["text.secondary"], COLORS[surface]), 4.5)
-        self.assertGreaterEqual(contrast_ratio(COLORS["text.muted"], COLORS["bg.surfaceRaised"]), 4.5)
-        self.assertGreaterEqual(contrast_ratio(COLORS["text.primary"], COLORS["accent.primary"]), 4.5)
+            self.assertGreaterEqual(contrast_ratio(COLORS["text.muted"], COLORS[surface]), 4.5)
+        self.assertGreaterEqual(contrast_ratio(COLORS["accent.onPrimary"], COLORS["accent.primary"]), 4.5)
+        self.assertGreaterEqual(contrast_ratio(COLORS["action.primaryFg"], COLORS["action.primaryBg"]), 4.5)
+
+    def test_stylesheet_avoids_qt_unsupported_css_properties(self):
+        stylesheet = application_stylesheet()
+
+        for unsupported in ("letter-spacing", "line-height", "box-shadow", "transition", "text-transform"):
+            self.assertNotIn(unsupported, stylesheet)
+
+    def test_stylesheet_font_size_limited_to_documented_subcontrol_exceptions(self):
+        stylesheet = application_stylesheet()
+
+        occurrences = stylesheet.count("font-size")
+        exceptions = stylesheet.count("type-scale exception")
+        self.assertEqual(occurrences, exceptions)
+
+    def test_type_scale_roles_produce_usable_fonts(self):
+        for role in TYPE_SCALE:
+            font = font_for(role)
+            self.assertNotEqual(font.families(), [])
+            self.assertNotEqual(font.families()[0], "")
+            self.assertGreater(font.pixelSize(), 0)
 
     def test_application_palette_pins_default_text_and_input_roles(self):
         palette = application_palette()
@@ -75,7 +99,8 @@ class DesignSystemTests(unittest.TestCase):
             try:
                 self.assertEqual(window.top_bar.objectName(), "topBar")
                 self.assertEqual(window.sidebar.objectName(), "sidebarNav")
-                self.assertEqual(window.new_task_button.objectName(), "primaryAction")
+                self.assertEqual(window.register_task_button.objectName(), "iconAction")
+                self.assertEqual(window.register_task_button.accessibleName(), "Register a new Task")
                 self.assertEqual(window.tasks_button.objectName(), "sidebarButton")
                 window._show_tasks()
                 self.assertTrue(window.tasks_button.isChecked())

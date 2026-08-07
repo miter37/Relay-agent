@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from .design_tokens import COLORS
+from .design_typography import apply_type
+from .design_widgets import IconButton
 
 
 def _format_fields(payload):
@@ -67,17 +69,23 @@ class RoutinesListView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QHBoxLayout()
-        header.addWidget(QLabel("<b>Routines</b>"), 1)
-        self.count_label = QLabel("")
-        self.count_label.setObjectName("mutedText")
-        header.addWidget(self.count_label)
-        self.refresh_button = QPushButton("Refresh")
+        title = QLabel("Routines")
+        title.setObjectName("sectionTitle")
+        apply_type(title, "title.section")
+        header.addWidget(title, 1)
+        self.refresh_button = IconButton("refresh", "Refresh the Routine list")
         self.refresh_button.clicked.connect(self.refresh_requested.emit)
         header.addWidget(self.refresh_button)
-        self.create_button = QPushButton("New Routine")
+        self.create_button = IconButton("plus", "Register a new Routine", tone="accent")
         self.create_button.clicked.connect(self.create_routine_requested.emit)
         header.addWidget(self.create_button)
         layout.addLayout(header)
+        # Own row: this column is narrow, and sharing the header row clipped both
+        # the count and the title.
+        self.count_label = QLabel("")
+        self.count_label.setObjectName("mutedText")
+        apply_type(self.count_label, "caption")
+        layout.addWidget(self.count_label)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Filter by name")
         self.search_edit.textChanged.connect(self._rerender)
@@ -142,19 +150,20 @@ class RoutineDetailView(QWidget):
         header = QHBoxLayout()
         self.title_label = QLabel("Routine")
         self.title_label.setObjectName("pageTitle")
+        apply_type(self.title_label, "title.detail")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel("")
         header.addWidget(self.status_label)
-        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button = IconButton("refresh", "Refresh this Routine")
         self.refresh_button.clicked.connect(self._on_refresh)
         header.addWidget(self.refresh_button)
-        self.run_button = QPushButton("Run now")
+        self.run_button = IconButton("play", "Run this Routine now", tone="accent")
         self.run_button.clicked.connect(self._on_run)
         header.addWidget(self.run_button)
-        self.edit_button = QPushButton("Edit")
+        self.edit_button = IconButton("pencil", "Edit this Routine")
         self.edit_button.clicked.connect(self._on_edit)
         header.addWidget(self.edit_button)
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = IconButton("trash", "Delete this Routine", tone="danger")
         self.delete_button.clicked.connect(self._on_delete)
         header.addWidget(self.delete_button)
         layout.addLayout(header)
@@ -280,8 +289,9 @@ class RoutineEditorDialog(QDialog):
     preview_requested = Signal(dict)
 
     _TARGET_TYPES = ("task", "project")
-    # queue/cancel_previous are not implemented by the current core runtime.
-    _OVERLAP = ("skip", "allow_parallel")
+    # Sourced from the core so the editor can never offer a policy the runtime
+    # does not honour, or hide one it does.
+    _OVERLAP = ("skip", "queue", "cancel_previous", "allow_parallel")
     _MISSED = ("skip", "run_once_on_recovery", "replay_all")
     _VERSION_POLICIES = ("latest", "pinned")
 
@@ -586,8 +596,9 @@ class RoutinesView(QWidget):
         self.projects_index = {}
         self.editor = None
 
+        # No section heading here: the top bar names the section and the list
+        # column carries its own title.
         root = QVBoxLayout(self)
-        root.addWidget(QLabel("<h2>Routines</h2>"))
 
         body = QHBoxLayout()
         self.list = RoutinesListView()

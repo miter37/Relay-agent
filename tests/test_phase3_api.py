@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import tempfile
 import threading
@@ -10,6 +11,7 @@ from relay.api import (
     create_task,
     delete_task,
     get_task,
+    job_detail,
     list_tasks,
     run_task,
     runs_for_task,
@@ -67,6 +69,41 @@ class TaskAPITests(unittest.TestCase):
         runs = runs_for_task(self.engine, task["task_id"])
         self.assertEqual(len(runs["runs"]), 1)
         self.assertEqual(runs["runs"][0]["job_id"], run_res["run"]["job_id"])
+
+    def test_api_run_task_accepts_gui_input_and_attachment_overrides(self):
+        attachment = self.home / "weather-source.txt"
+        attachment.write_text("source", encoding="utf-8")
+        task = create_task(
+            self.engine,
+            {
+                "name": "Weather",
+                "instructions": "Research the supplied city and period.",
+                "input_schema": json.dumps(
+                    {
+                        "type": "object",
+                        "required": ["city"],
+                        "properties": {"city": {"type": "string"}},
+                        "additionalProperties": False,
+                    }
+                ),
+            },
+        )["task"]
+
+        run = run_task(
+            self.engine,
+            task["task_id"],
+            {
+                "queued": True,
+                "request": {"profile": "analysis", "inputs": {"city": "Seoul"}, "attachments": [str(attachment)]},
+            },
+        )["run"]
+
+        request = json.loads(run["request_json"])
+        self.assertEqual(request["profile"], "analysis-only")
+        self.assertEqual(request["inputs"], {"city": "Seoul"})
+        self.assertEqual(request["attachments"], [str(attachment)])
+        self.assertEqual(json.loads(run["task_snapshot_json"])["inputs"], {"city": "Seoul"})
+        self.assertEqual(job_detail(self.engine, run["job_id"])["task_inputs"], {"city": "Seoul"})
 
     def test_api_save_run_as_task(self):
         job, _ = self.engine.create_job(
@@ -131,6 +168,32 @@ class DaemonTaskRouteTests(unittest.TestCase):
 
         deleted = self.client.request("DELETE", f"/v1/tasks/{task_id}")
         self.assertTrue(deleted["deleted"])
+
+    def test_daemon_preserves_nested_task_inputs_in_run_detail(self):
+        created = self.client.request(
+            "POST",
+            "/v1/tasks",
+            {
+                "name": "Input route",
+                "instructions": "Use the supplied input values.",
+                "input_schema": json.dumps(
+                    {
+                        "type": "object",
+                        "required": ["City"],
+                        "properties": {"City": {"type": "string"}, "Include chart": {"type": "boolean"}},
+                        "additionalProperties": False,
+                    }
+                ),
+            },
+        )
+        task_id = created["task"]["task_id"]
+        run = self.client.request(
+            "POST",
+            f"/v1/tasks/{task_id}/run",
+            {"queued": True, "request": {"inputs": {"City": "Seoul", "Include chart": False}}},
+        )["run"]
+        detail = self.client.request("GET", f"/v1/jobs/{run['job_id']}")
+        self.assertEqual(detail["task_inputs"], {"City": "Seoul", "Include chart": False})
 
 
 if __name__ == "__main__":

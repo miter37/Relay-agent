@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QTabWidget,
     QTextBrowser,
     QVBoxLayout,
@@ -19,7 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from .design_tokens import COLORS, status_presentation
-from .design_widgets import StatusBadge
+from .design_typography import apply_type
+from .design_widgets import IconButton, StatusBadge
 
 
 class TaskRunDetailView(QWidget):
@@ -27,7 +27,6 @@ class TaskRunDetailView(QWidget):
     check_requested = Signal(str)
     rerun_requested = Signal(str)
     schedule_requested = Signal(str)
-    save_as_task_requested = Signal()
     tab_requested = Signal(str)
     open_folder_requested = Signal(str)
     open_log_requested = Signal(str)
@@ -42,30 +41,23 @@ class TaskRunDetailView(QWidget):
         header = QHBoxLayout()
         self.title_label = QLabel("Task Run")
         self.title_label.setObjectName("pageTitle")
+        apply_type(self.title_label, "title.detail")
         header.addWidget(self.title_label, 1)
         self.status_label = StatusBadge()
         header.addWidget(self.status_label)
-        self.cancel_button = QPushButton("Stop task")
-        self.cancel_button.setObjectName("dangerAction")
+        self.cancel_button = IconButton("stop", "Stop this Task Run", tone="danger")
         self.cancel_button.clicked.connect(self._cancel)
         header.addWidget(self.cancel_button)
-        self.check_button = QPushButton("Check progress")
+        self.check_button = IconButton("activity", "Check progress now")
         self.check_button.clicked.connect(self._check)
         header.addWidget(self.check_button)
-        self.rerun_button = QPushButton("Run again")
-        self.rerun_button.setObjectName("primaryAction")
+        self.rerun_button = IconButton("rerun", "Run again with the same inputs", tone="accent")
         self.rerun_button.clicked.connect(self._rerun)
         header.addWidget(self.rerun_button)
-        self.schedule_button = QPushButton("Schedule")
+        self.schedule_button = IconButton("clock", "Create a Schedule from this Run")
         self.schedule_button.clicked.connect(self._schedule)
         header.addWidget(self.schedule_button)
-        self.copy_task_button = QPushButton("Copy task")
-        self.copy_task_button.clicked.connect(self._copy_task)
-        header.addWidget(self.copy_task_button)
-        self.save_as_task_button = QPushButton("Save as Task")
-        self.save_as_task_button.clicked.connect(lambda: self.save_as_task_requested.emit())
-        header.addWidget(self.save_as_task_button)
-        self.open_folder_button = QPushButton("Open folder")
+        self.open_folder_button = IconButton("folder-open", "Open the output folder")
         self.open_folder_button.clicked.connect(self._open_folder)
         header.addWidget(self.open_folder_button)
         layout.addLayout(header)
@@ -82,7 +74,7 @@ class TaskRunDetailView(QWidget):
         self.auto_scroll_check = QCheckBox("Auto-scroll")
         self.auto_scroll_check.setChecked(True)
         log_controls.addWidget(self.auto_scroll_check)
-        self.open_log_button = QPushButton("Open full log")
+        self.open_log_button = IconButton("file-text", "Open the full log file")
         self.open_log_button.clicked.connect(self._open_log)
         log_controls.addWidget(self.open_log_button)
         log_controls.addStretch(1)
@@ -103,7 +95,7 @@ class TaskRunDetailView(QWidget):
                 answer_layout.setContentsMargins(0, 0, 0, 0)
                 answer_actions = QHBoxLayout()
                 answer_actions.addStretch(1)
-                self.copy_answer_button = QPushButton("Copy answer")
+                self.copy_answer_button = IconButton("copy", "Copy the answer")
                 self.copy_answer_button.clicked.connect(self._copy_answer)
                 answer_actions.addWidget(self.copy_answer_button)
                 answer_layout.addLayout(answer_actions)
@@ -118,6 +110,16 @@ class TaskRunDetailView(QWidget):
         self.task_text = ""
         self._check_pending = False
         self._can_check_progress = False
+        # No Run is selected yet, so no Run action applies. ``set_job`` re-shows
+        # each button according to the Run's own ``actions`` payload.
+        for button in (
+            self.cancel_button,
+            self.check_button,
+            self.rerun_button,
+            self.schedule_button,
+            self.open_folder_button,
+        ):
+            button.setVisible(False)
         self.set_answer(None)
 
     def set_job(self, job: dict) -> None:
@@ -135,17 +137,27 @@ class TaskRunDetailView(QWidget):
         status = str(job.get("status") or "UNKNOWN")
         self.status_label.set_status(status)
         actions = job.get("actions") or {}
-        self.cancel_button.setEnabled(bool(actions.get("can_cancel")))
+        can_cancel = bool(actions.get("can_cancel"))
+        self.cancel_button.setVisible(can_cancel)
+        self.cancel_button.setEnabled(can_cancel)
         self._can_check_progress = bool(actions.get("can_check_progress"))
+        self.check_button.setVisible(self._can_check_progress)
         self.check_button.setEnabled(self._can_check_progress and not self._check_pending)
-        self.rerun_button.setEnabled(bool(actions.get("can_rerun")))
-        self.schedule_button.setEnabled(bool(actions.get("can_schedule")))
-        self.schedule_button.setToolTip(
+        can_rerun = bool(actions.get("can_rerun"))
+        self.rerun_button.setVisible(can_rerun)
+        self.rerun_button.setEnabled(can_rerun)
+        self.rerun_button.set_tooltip("Creates a new Task Run using this Run's saved Task snapshot and input values.")
+        can_schedule = bool(actions.get("can_schedule"))
+        self.schedule_button.setVisible(can_schedule)
+        self.schedule_button.setEnabled(can_schedule)
+        self.schedule_button.set_tooltip(
             "Service isolation must be acknowledged before saving a schedule."
             if actions.get("schedule_requires_isolation")
             else "Schedule this completed task"
         )
-        self.open_folder_button.setEnabled(bool(actions.get("can_open_folder")))
+        can_open_folder = bool(actions.get("can_open_folder"))
+        self.open_folder_button.setVisible(can_open_folder)
+        self.open_folder_button.setEnabled(can_open_folder)
         self.attempt_combo.blockSignals(True)
         self.attempt_combo.clear()
         for attempt in job.get("attempts") or []:
@@ -174,8 +186,6 @@ class TaskRunDetailView(QWidget):
         request = job.get("request") or {}
         task_text = str(request.get("task") or job.get("task_text") or job.get("task_preview") or "").strip()
         self.task_text = task_text
-        self.copy_task_button.setEnabled(bool(task_text) and bool(actions.get("can_copy", True)))
-        self.save_as_task_button.setEnabled(bool(task_text) and bool(actions.get("can_copy", True)))
         request_preview = job.get("task_preview") or task_text
         self.set_content(
             "Overview",
@@ -188,14 +198,19 @@ class TaskRunDetailView(QWidget):
             ),
         )
         self.set_content("Task", escape(str(task_text or "Task details are hidden by your history settings.")))
+        task_inputs = job.get("task_inputs") or {}
+        warning = job.get("input_integrity_warning")
+        task_input_html = (
+            self._format_json(task_inputs) if task_inputs else "<i>No Task input values were supplied.</i>"
+        )
+        artifact_html = self._format_json(job.get("lineage") or job.get("inputs") or [])
         self.set_content(
             "Inputs",
-            self._format_json(
-                {
-                    "task_inputs": job.get("task_inputs") or {},
-                    "artifact_inputs": job.get("lineage") or job.get("inputs") or [],
-                }
-            ),
+            "<h3>Task input values</h3>"
+            + (f"<p>{escape(str(warning))}</p>" if warning else "")
+            + task_input_html
+            + "<h3>Artifact inputs and lineage</h3>"
+            + artifact_html,
         )
         self.set_content("Progress", self._format_json(job.get("attempts", [])))
         self.set_content("Events", self._format_json(job.get("events", [])))
@@ -263,16 +278,12 @@ class TaskRunDetailView(QWidget):
 
     def set_check_pending(self, pending: bool) -> None:
         self._check_pending = pending
-        self.check_button.setText("Checking…" if pending else "Check progress")
+        self.check_button.set_tooltip("Checking…" if pending else "Check progress now")
         self.check_button.setEnabled(self._can_check_progress and not pending)
 
     def _copy_answer(self) -> None:
         if self.answer_text:
             QApplication.clipboard().setText(self.answer_text)
-
-    def _copy_task(self) -> None:
-        if self.task_text:
-            QApplication.clipboard().setText(self.task_text)
 
     @staticmethod
     def _status_text(status: str) -> str:

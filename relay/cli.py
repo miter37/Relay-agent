@@ -23,9 +23,38 @@ from .doctor import Doctor
 from .engine import RelayEngine
 from .errors import RelayError
 from .models import JobRequest
+from .profiles import BUILTIN_PROFILES
 from .rpc import RPCClient
 from .security import security_posture, set_full_access_mode
 from .util import entrypoint_command, utc_now
+
+_PROFILE_HELP = (
+    "Execution profile. Built-in: " + ", ".join(p["profile_id"] for p in BUILTIN_PROFILES) + ". "
+    "Custom profiles registered in this installation are also accepted; "
+    "run 'relay config show --machine' to list them."
+)
+_INPUT_SCHEMA_HELP = (
+    "JSON Schema (object) describing the values this Task accepts at run time, "
+    "supplied later through 'relay task run --inputs-json'."
+)
+
+
+def _read_input_schema(inline: str | None, path: str | None) -> str | None:
+    """Return a validated JSON Schema string from --input-schema/--input-schema-file."""
+    from .task_inputs import parse_schema
+
+    if inline and path:
+        raise RelayError("INVALID_REQUEST", "Use either --input-schema or --input-schema-file, not both.")
+    raw = inline
+    if path:
+        raw = Path(path).read_text(encoding="utf-8")
+    if raw is None:
+        return None
+    try:
+        parsed = parse_schema(raw)
+    except ValueError as exc:
+        raise RelayError("INPUT_SCHEMA_INVALID", str(exc)) from exc
+    return json.dumps(parsed, ensure_ascii=False)
 
 COMMANDS = {
     "run",
@@ -94,7 +123,7 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("--format", dest="result_format", choices=["json", "txt"])
     parser.add_argument("--out", dest="output_path")
     parser.add_argument("--artifacts", dest="artifact_path")
-    parser.add_argument("--profile")
+    parser.add_argument("--profile", help=_PROFILE_HELP)
     parser.add_argument("--timeout", dest="timeout_seconds", type=int)
     parser.add_argument("--caller", default="human")
     parser.add_argument("--request-id")
@@ -223,10 +252,12 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     fallback.add_argument("--fallback", action="store_true", default=None)
     fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
     create.add_argument("--timeout", type=int)
-    create.add_argument("--profile", default="web-research")
+    create.add_argument("--profile", default="evidence-research", help=_PROFILE_HELP)
     create.add_argument("--format", default="json", choices=["json", "txt"])
     create.add_argument("--description")
     create.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
+    create.add_argument("--input-schema", help=_INPUT_SCHEMA_HELP)
+    create.add_argument("--input-schema-file", help="Path to a UTF-8 file containing the input JSON Schema")
     create.add_argument("--machine", action="store_true")
 
     list_p = task_sub.add_parser("list", help="List registered Tasks")
@@ -248,10 +279,12 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     up_fallback.add_argument("--fallback", action="store_true", default=None)
     up_fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
     update.add_argument("--timeout", type=int)
-    update.add_argument("--profile")
+    update.add_argument("--profile", help=_PROFILE_HELP)
     update.add_argument("--format", choices=["json", "txt"])
     update.add_argument("--description")
     update.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
+    update.add_argument("--input-schema", help=_INPUT_SCHEMA_HELP)
+    update.add_argument("--input-schema-file", help="Path to a UTF-8 file containing the input JSON Schema")
     update.add_argument("--machine", action="store_true")
 
     delete_p = task_sub.add_parser("delete", help="Delete a Task definition")
@@ -292,6 +325,9 @@ def _task_cli_request(args, config: Config) -> Any:
             "profile": args.profile,
             "result_format": args.format,
         }
+        input_schema = _read_input_schema(args.input_schema, args.input_schema_file)
+        if input_schema is not None:
+            payload["input_schema"] = input_schema
         return client.request("POST", "/v1/tasks", payload)
     if cmd == "list":
         path = "/v1/tasks"
@@ -323,6 +359,9 @@ def _task_cli_request(args, config: Config) -> Any:
             payload["profile"] = args.profile
         if args.format:
             payload["result_format"] = args.format
+        input_schema = _read_input_schema(args.input_schema, args.input_schema_file)
+        if input_schema is not None:
+            payload["input_schema"] = input_schema
         return client.request("POST", f"/v1/tasks/{args.task_id}", payload)
     if cmd == "delete":
         return client.request("DELETE", f"/v1/tasks/{args.task_id}")
@@ -346,11 +385,25 @@ def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
     )
     proj_sub = project.add_subparsers(dest="project_command", required=True)
 
-    create = proj_sub.add_parser("create", help="Create a Project from a definition file or inline JSON")
+    create = proj_sub.add_parser(
+        "create",
+        help="Create a Project from a definition file or inline JSON",
+        description=(
+            "Create a Project. Run 'relay project schema --machine' for the definition "
+            "schema and the binding rules the definition must satisfy."
+        ),
+    )
     create.add_argument("--file", help="Path to a UTF-8 JSON file with the Project definition")
     create.add_argument("--name", help="Name used when --file is omitted")
     create.add_argument("--json", help="Inline JSON string (alternative to --file)")
     create.add_argument("--machine", action="store_true")
+
+    schema_p = proj_sub.add_parser(
+        "schema",
+        help="Print the Project definition schema and binding rules",
+        description="Emit the JSON Schema for a Project definition plus the rules the engine enforces at run time.",
+    )
+    schema_p.add_argument("--machine", action="store_true")
 
     list_p = proj_sub.add_parser("list", help="List registered Projects")
     list_p.add_argument("--name")
@@ -415,8 +468,14 @@ def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
 
 
 def _project_cli_request(args, config: Config) -> Any:
-    client = _ensure_daemon(config)
     cmd = args.project_command
+    if cmd == "schema":
+        # Static contract: answerable without a daemon so a caller can read it
+        # before anything is running.
+        from .projects.models import PROJECT_DEFINITION_RULES, PROJECT_DEFINITION_SCHEMA
+
+        return {"ok": True, "schema": PROJECT_DEFINITION_SCHEMA, "rules": PROJECT_DEFINITION_RULES}
+    client = _ensure_daemon(config)
     if cmd == "create":
         payload = _load_project_payload(args)
         if "name" not in payload:

@@ -7,6 +7,7 @@ a desktop session.
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 
@@ -18,7 +19,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
 from relay.gui.tasks import (
-    SaveRunAsTaskDialog,
+    InputDefinitionDialog,
     TaskDetailView,
     TaskEditorDialog,
     TaskListView,
@@ -34,7 +35,7 @@ class TasksWidgetTests(unittest.TestCase):
 
     def test_task_list_renders_filters_and_emits_select(self):
         view = TaskListView()
-        self.assertEqual(view.create_button.text(), "Register Task")
+        self.assertEqual(view.create_button.accessibleName(), "Register a new Task")
         self.assertFalse(view.empty_label.isHidden())
         view.set_tasks(
             [
@@ -91,19 +92,40 @@ class TasksWidgetTests(unittest.TestCase):
         self.assertEqual(view.title_label.text(), "Task")
         self.assertFalse(view.run_button.isEnabled())
 
-    def test_task_editor_payload_validates_input_schema_json(self):
+    def test_task_editor_builds_input_schema_from_user_definitions(self):
         dialog = TaskEditorDialog()
         self.assertEqual(dialog.windowTitle(), "Register Task")
         dialog.name_edit.setText("Weekly Report")
         dialog.instructions_edit.setPlainText("Produce the weekly HBM report")
-        with self.assertRaises(ValueError):
-            dialog.input_schema_edit.setPlainText("{not json")
-            dialog.payload()
-        dialog.input_schema_edit.setPlainText('{"type":"object"}')
+        dialog.input_definitions.definitions = [
+            {
+                "name": "City",
+                "description": "Target city",
+                "value_type": "text",
+                "cardinality": "single",
+                "required": True,
+                "choices": [],
+                "has_default": False,
+                "default": None,
+            },
+            {
+                "name": "Symbols",
+                "description": "Symbols to compare",
+                "value_type": "choice",
+                "cardinality": "list",
+                "required": False,
+                "choices": ["A", "B"],
+                "has_default": True,
+                "default": ["A"],
+            },
+        ]
         payload = dialog.payload()
+        schema = json.loads(payload["input_schema"])
+        self.assertEqual(schema["required"], ["City"])
+        self.assertEqual(schema["properties"]["Symbols"]["items"]["enum"], ["A", "B"])
+        self.assertEqual(schema["properties"]["Symbols"]["default"], ["A"])
         self.assertEqual(payload["name"], "Weekly Report")
         self.assertEqual(payload["result_format"], "json")
-        self.assertEqual(payload["input_schema"], '{"type":"object"}')
         dialog.show_error("previous server-side error")
         self.assertEqual(dialog.error_label.text(), "previous server-side error")
 
@@ -115,29 +137,61 @@ class TasksWidgetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "[Ii]nstructions"):
             dialog.payload()
 
-    def test_task_run_dialog_builds_overrides_only_for_changed_fields(self):
-        dialog = TaskRunDialog(task={"task_id": "alpha", "name": "Weekly"}, available_workers=["codex", "claude"])
-        self.assertEqual(dialog.overrides(), {})
+    def test_task_run_dialog_builds_schema_validated_inputs_and_overrides(self):
+        dialog = TaskRunDialog(
+            task={
+                "task_id": "alpha",
+                "name": "Weekly",
+                "input_schema": json.dumps(
+                    {
+                        "type": "object",
+                        "required": ["city", "period"],
+                        "properties": {"city": {"type": "string"}, "period": {"type": "string"}},
+                        "additionalProperties": False,
+                    }
+                ),
+            },
+            available_workers=["codex", "claude"],
+        )
+        with self.assertRaisesRegex(ValueError, "required"):
+            dialog.overrides()
+        dialog._input_fields["city"][0].setText("Seoul")
+        dialog._input_fields["period"][0].setText("2026-08-06..2026-08-10")
+        self.assertEqual(dialog.overrides()["inputs"], {"city": "Seoul", "period": "2026-08-06..2026-08-10"})
         dialog.worker_combo.setCurrentText("codex")
         overrides = dialog.overrides()
         self.assertIn("worker", overrides)
         self.assertNotIn("profile", overrides)
-        dialog.inputs_edit.setPlainText('{"period": "previous-week"}')
-        self.assertEqual(dialog.overrides()["inputs"], {"period": "previous-week"})
-        dialog.inputs_edit.setPlainText("[]")
-        with self.assertRaisesRegex(ValueError, "JSON object"):
-            dialog.overrides()
+        self.assertEqual(overrides["inputs"], {"city": "Seoul", "period": "2026-08-06..2026-08-10"})
 
-    def test_save_run_as_task_dialog_requires_name(self):
-        dialog = SaveRunAsTaskDialog(run_id="job-deadbeef")
-        sent = []
-        dialog.accepted_payload.connect(lambda payload: sent.append(payload))
-        dialog._on_save()
-        self.assertEqual(sent, [])
-        self.assertIn("required", dialog.error_label.text().casefold())
-        dialog.name_edit.setText("Weekly HBM report")
-        dialog._on_save()
-        self.assertEqual(sent, [{"name": "Weekly HBM report", "description": None}])
+    def test_input_editor_and_run_form_preserve_number_and_boolean_lists(self):
+        editor = InputDefinitionDialog()
+        editor.name_edit.setText("Thresholds")
+        editor.type_combo.setCurrentText("Number")
+        editor.shape_combo.setCurrentText("List")
+        editor.has_default.setChecked(True)
+        editor.default.setPlainText("1\n2.5")
+        self.assertEqual(editor.value()["default"], [1.0, 2.5])
+
+        dialog = TaskRunDialog(
+            task={
+                "task_id": "alpha",
+                "name": "Analyze",
+                "input_schema": json.dumps(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "thresholds": {"type": "array", "items": {"type": "number"}},
+                            "flags": {"type": "array", "items": {"type": "boolean"}},
+                        },
+                        "additionalProperties": False,
+                    }
+                ),
+            }
+        )
+        dialog._input_fields["thresholds"][0].setPlainText("1\n2.5")
+        dialog._input_fields["flags"][0].setPlainText("true\nfalse")
+        self.assertEqual(dialog.overrides()["inputs"], {"thresholds": [1.0, 2.5], "flags": [True, False]})
 
     def test_tasks_view_dispatches_signals_for_create_edit_and_run(self):
         view = TasksView()
@@ -168,11 +222,9 @@ class TasksWidgetTests(unittest.TestCase):
         view.task_run_submitted.connect(lambda tid, overrides: runs.append((tid, overrides)))
         view.show_run_dialog("alpha")
         view.runner.worker_combo.setCurrentText("codex")
-        view.runner.notes_edit.setText("manual")
         view.runner.accepted.emit()
         self.assertEqual(runs[0][0], "alpha")
         self.assertEqual(runs[0][1]["worker"], "codex")
-        self.assertEqual(runs[0][1]["notes"], "manual")
 
 
 class MainWindowTasksRoutingTests(unittest.TestCase):
@@ -206,8 +258,29 @@ class MainWindowTasksRoutingTests(unittest.TestCase):
         window, tmp = self._build()
         try:
             window._show_tasks()
-            self.assertEqual(window.detail_view_mode, "tasks")
-            self.assertEqual(self.requests, [["tasks", "/v1/tasks"]])
+            self.assertEqual(window.active_section, "tasks")
+            self.assertEqual(self.requests, [["tasks", "/v1/tasks"], ["profiles", "/v1/profiles"]])
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_global_register_task_action_only_creates_definition(self):
+        window, tmp = self._build()
+        try:
+            posts = []
+            window._request_post = lambda kind, path, payload: posts.append((kind, path, payload))
+
+            window._show_task_registration()
+
+            self.assertIs(window.detail_stack.currentWidget(), window.tasks_view)
+            self.assertIsNotNone(window.tasks_view.editor)
+            window.tasks_view.editor.name_edit.setText("Reusable weekly report")
+            window.tasks_view.editor.instructions_edit.setPlainText("Prepare the report from supplied inputs.")
+            window.tasks_view.editor._on_save()
+
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(posts[0][0:2], ("task_create", "/v1/tasks"))
+            self.assertNotEqual(posts[0][1], "/v1/jobs")
         finally:
             window.close()
             tmp.cleanup()
@@ -266,6 +339,41 @@ class MainWindowTasksRoutingTests(unittest.TestCase):
                 None,
             )
             self.assertIn("job-1", window.tasks_view.detail.run_browser.toPlainText().casefold())
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_submitted_task_run_is_visible_and_restored_from_runs(self):
+        window, tmp = self._build()
+        try:
+            window.pending[201] = ("task_run", "task-1")
+            window._handle_response(
+                201,
+                {
+                    "run": {
+                        "job_id": "run-1",
+                        "task_run_id": "run-1",
+                        "title": "Seoul weather",
+                        "status": "QUEUED",
+                    }
+                },
+                None,
+            )
+
+            self.assertEqual(window.selected_job_id, "run-1")
+            self.assertIn("run-1", window.jobs)
+            self.assertTrue(window.runs_button.isChecked())
+            self.assertIs(window.detail_stack.currentWidget(), window.runs_view)
+            self.assertGreater(window.runs_view.run_list.topLevelItemCount(), 0)
+
+            window._show_tasks()
+            self.assertEqual(window.selected_job_id, "run-1")
+            window._show_runs()
+
+            self.assertEqual(window.selected_job_id, "run-1")
+            self.assertTrue(window.runs_button.isChecked())
+            self.assertIs(window.detail_stack.currentWidget(), window.runs_view)
+            self.assertIn((("detail", "run-1"), "/v1/jobs/run-1"), map(tuple, self.requests))
         finally:
             window.close()
             tmp.cleanup()

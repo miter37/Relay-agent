@@ -12,6 +12,11 @@ from typing import Any
 from .errors import RelayError
 from .util import is_within, sha256_file
 
+# Relay labels its own result file with this role, and connection/output selection
+# must resolve to exactly one Artifact per (node, role).
+RESERVED_ARTIFACT_ROLES = frozenset({"result"})
+ARTIFACT_ROLE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
 REQUIRED_JSON_FIELDS = {
     "schema_version": str,
     "status": str,
@@ -164,6 +169,40 @@ def validate_text_result(path: Path, max_bytes: int) -> str:
     if not text.strip():
         raise RelayError("EMPTY_OUTPUT", "Text result contains only whitespace", True)
     return text
+
+
+def normalize_declared_roles(artifacts: Any) -> dict[str, str]:
+    """Map ``relative_path`` to the Artifact role a Worker declared in its result JSON.
+
+    Project connections and final-output selection resolve by ``(node, role)`` and
+    require exactly one match, so ``result`` stays reserved for the Relay-produced
+    result file and cannot be claimed by a Worker.
+    """
+    roles: dict[str, str] = {}
+    if not isinstance(artifacts, list):
+        return roles
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        relative_path = item.get("relative_path")
+        declared = item.get("role")
+        if not isinstance(relative_path, str) or declared is None or declared == "":
+            continue
+        role = str(declared).strip().lower()
+        if role in RESERVED_ARTIFACT_ROLES:
+            raise RelayError(
+                "SCHEMA_MISMATCH",
+                f"Artifact role '{role}' is reserved by Relay and cannot be declared: {relative_path}",
+                True,
+            )
+        if not ARTIFACT_ROLE_PATTERN.match(role):
+            raise RelayError(
+                "SCHEMA_MISMATCH",
+                f"Artifact role must match {ARTIFACT_ROLE_PATTERN.pattern}: {declared!r} for {relative_path}",
+                True,
+            )
+        roles[relative_path] = role
+    return roles
 
 
 def scan_artifacts(

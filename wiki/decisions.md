@@ -3,7 +3,13 @@
 ## Active
 
 - **Public execution terminology is Project/Task/Task Run/Project Run/Attempt.** `Job` and standalone `Run` are not new user-facing concepts; legacy `jobs` storage, `job_id`, `/v1/jobs`, and old CLI/search aliases remain only for compatibility.
-- **Phases 0–6 are CLI/daemon-core first.** Task, Project, Routine, approval, comparison, operations, and lifecycle GUI surfaces remain deferred.
+- **Task registration and execution are separate.** Registering a reusable Task creates no Task Run; a Run is created only by explicitly executing a previously registered Task and may supply different inputs each time.
+- **GUI Task inputs use a flat definition builder.** People define named text, number, Yes/No, or choice fields as single values or lists; Relay compiles the definition to JSON Schema internally, while advanced CLI/Agent schemas remain preserved but GUI-read-only.
+- **Task Run inputs are a first-class immutable execution record.** Validated resolved values are saved in the Run request and Task snapshot, carried into receipts, and shown separately from artifact lineage in Run detail.
+- **GUI execution begins from registered Tasks only.** The GUI exposes no ad-hoc `/v1/jobs` creation path; Task Runs are browsed in a master-detail Runs screen, and section navigation preserves each section's selection.
+- **Task Run actions are state-gated and execution-focused.** Stop and progress checks are shown only while a Run is active; terminal Runs may be repeated from their immutable snapshot after confirmation. Copying or promoting a historical Run to a Task is not part of the GUI model.
+- **Profiles are reusable execution-policy objects.** They define how work is performed, not the Task's business objective, Worker, or permissions. Six built-ins are read-only; custom Profiles are editable and every Run snapshots the resolved rules.
+- **Phases 0–6 are CLI/daemon-core first.** Task, Project, and Routine GUI surfaces are implemented; approval, comparison, operations, and lifecycle GUI surfaces remain deferred.
 - **Compatibility is additive.** Existing Task Run IDs, Schedules, Project/Task Runs, outputs, and Relay Home databases are preserved; legacy Job IDs remain aliases and schema v14 migrates forward with backups. Catalog fields and routes are additive.
 - **Artifact handoff is immutable and executable.** Project edges and explicit inputs resolve Artifact UIDs into verified snapshots and lineage before child execution.
 - **Projects and Routines are daemon-owned persistent state machines.** Claims are short atomic DB operations; Worker execution never holds a DB transaction.
@@ -19,7 +25,7 @@
 - **Custom Agent environments are allowlisted.** Operational variables and manifest-declared names are inherited; secret values are never stored in manifests.
 - **Schedules produce ordinary Task Runs.** Schedule lifecycle data remains separate while history and outputs survive Schedule deletion.
 - **Schedule eligibility is separate from schedule permission.** A successful replayable Task Run may open the Schedule editor; saving still requires service-isolation acknowledgement.
-- **GUI health is user-triggered.** Health is checked at startup and by an explicit refresh action, not on a continuous timer.
+- **GUI health is low-frequency.** Health is checked at startup, every 600 seconds, and by an explicit refresh action.
 - **Finished history is hierarchical.** The GUI uses a collapsible Finished/date/task tree; task names and result states are separate columns.
 - **Task-entry safety defaults are explicit.** GUI-created Task Runs default fallback, force-new, and overwrite to enabled, with inline help explaining the consequences.
 - **Unified Full Access Mode:** Workers support a unified `full_access_mode` flag which toggles their respective security bypasses (e.g., YOLO, skip permissions). GUI and CLI read the same daemon/config state; a running daemon is updated through `/v1/security/full-access/{worker}`. When disabled, sandbox/permission errors return specific guidance advising the user about this setting.

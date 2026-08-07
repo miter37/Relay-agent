@@ -24,9 +24,11 @@ from .api import (
     catalog_tasks,
     check_job_progress,
     compare_runs,
+    create_profile,
     create_project,
     create_routine,
     create_task,
+    delete_profile,
     delete_project,
     delete_routine,
     delete_task,
@@ -48,6 +50,7 @@ from .api import (
     list_agents,
     list_approvals,
     list_jobs,
+    list_profiles,
     list_projects,
     list_routines,
     list_runs,
@@ -82,6 +85,7 @@ from .api import (
     search_artifacts,
     search_runs,
     semantic_search_api,
+    update_profile,
     update_project,
     update_routine,
     update_task,
@@ -303,6 +307,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "limit must be an integer.")
                 return
             self._json(HTTPStatus.OK, list_tasks(self.daemon.engine, name=name, limit=limit))
+            return
+        if path == "/v1/profiles":
+            self._json(HTTPStatus.OK, list_profiles(self.daemon.engine))
+            return
+        if path.startswith("/v1/profiles/"):
+            profile_id = path[len("/v1/profiles/") :]
+            try:
+                self._json(HTTPStatus.OK, {"ok": True, "profile": self.daemon.engine.profiles.get(profile_id)})
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message)
             return
         if path == "/v1/catalog":
             self._json(HTTPStatus.OK, catalog_capability())
@@ -787,6 +801,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             if path == "/v1/tasks":
                 self._json(HTTPStatus.OK, create_task(self.daemon.engine, self._body()))
                 return
+            if path == "/v1/profiles":
+                self._json(HTTPStatus.OK, create_profile(self.daemon.engine, self._body()))
+                return
+            if path.startswith("/v1/profiles/"):
+                profile_id = path[len("/v1/profiles/") :]
+                self._json(HTTPStatus.OK, update_profile(self.daemon.engine, profile_id, self._body()))
+                return
             if path == "/v1/runs/save-as-task":
                 run_id = self._body().get("run_id")
                 self._json(HTTPStatus.OK, save_run_as_task(self.daemon.engine, run_id, self._body()))
@@ -1045,6 +1066,13 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
         path = urlsplit(self.path).path
+        if path.startswith("/v1/profiles/"):
+            try:
+                profile_id = path[len("/v1/profiles/") :]
+                self._json(HTTPStatus.OK, delete_profile(self.daemon.engine, profile_id))
+            except RelayError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/tasks/"):
             try:
                 task_id = path[len("/v1/tasks/") :]

@@ -47,7 +47,7 @@ class CatalogContractTests(unittest.TestCase):
         self.assertEqual(result["summary"], "result summary")
 
     def test_catalog_receipt_contract_names_summary_keys(self):
-        self.assertEqual(CATALOG_RECEIPT_SCHEMA_VERSION, 2)
+        self.assertEqual(CATALOG_RECEIPT_SCHEMA_VERSION, 3)
         self.assertEqual(RECEIPT_SUMMARY_KEYS, ("task_summary", "result_summary", "failure_reason"))
 
 

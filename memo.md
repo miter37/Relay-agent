@@ -1,9 +1,15 @@
+- [ ] Build the Project Runs screen per `docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md`; backend gaps and GUI Phases 1+2 (master-detail, list grouping, verdict, steps table, final artifact strip, retry/reexecute/cancel/open-output/approve/reject, node inspector) shipped; remaining phases 3–4 (pipeline view, timeline view) still to come.
+- [ ] GUI Project Runs screen design doc §9 phase 3 (pipeline view: level layout from snapshot topology, node cards with status + retry badge + error, dimmed/dashed blocked nodes, dashed failed→blocked edges).
+- [ ] GUI Project Runs screen design doc §9 phase 4 (timeline view: per-node attempt bars using step started/completed plus receipt task_runs).
+- [ ] Approve/reject UI for `awaiting_approval` Project Runs shipped; edit-with-files (`approve ... /edit`) deferred.
+- [ ] Backend `resolve_step_inputs` now tags each resolved entry with `from_node`/`from_role` so receipt `resolved_inputs` can render "A1 <- pick(result)" in the inspector; legacy resolved entries written before this change still need a backfill pass (or the GUI keeps reading `input_manifest_json` as a fallback — current inspector already does this).
 - [ ] Review and merge Draft PR #14 (`feat/g5-custom-agent-apps`) after confirming the final G5 scope.
 - [ ] Reconcile README's legacy `relay add-agent` description with the current manifest-backed Agent App workflow.
 - [ ] Start G6 packaging/platform operations only after G5 is accepted.
 - [ ] Add a production embedding backend; current semantic search intentionally falls back to FTS5.
 - [ ] Extend lifecycle import/export from Task Runs to full Project/Routine operational-history restoration.
-- [ ] Define and implement overlap `queue`/`cancel_previous` semantics for Routines; current tested behavior is `skip`, `allow_parallel`, and due/recovery handling.
 - [ ] Resolve pre-existing repository-wide Ruff format-check violations before release acceptance; focused changed-file checks and full tests pass.
-- [ ] Implement `docs/Relay_GUI_Readability_and_Usability_Hardening_Plan_v1.0.md` as the GUI P0 before further decorative or screen rollout work; verify every screen and popup.
-- [ ] Validate and fix GUI user-action flows per `docs/superpowers/plans/2026-08-04-gui-user-scenario-validation.md` after the readability P0 is complete.
+- [ ] Re-run `docs/Relay_GUI_Readability_and_Usability_Hardening_Plan_v1.0.md`'s own screen/popup checklist to confirm nothing beyond its cited contrast and color-literal defects (both fixed by the Design Grammar v1.1 rollout) remains open.
+- [ ] Validate and fix GUI user-action flows per `docs/superpowers/plans/2026-08-04-gui-user-scenario-validation.md`; visual grammar changed under the Design Grammar v1.1 rollout so prior validation notes may be stale.
+- [ ] `Relay_GUI_Design_Grammar_Modernization_Plan_v1.1.md` §13 item 11 is done for the six sections (1280x720 and 1024x700, DPI 100/125/150, populated data) and all nine dialogs; what remains unexercised is error/partial Run states and the approval flow, which need a real failing Run to reproduce.
+- [ ] GUI visual checks must run with the real Qt platform, never `QT_QPA_PLATFORM=offscreen`: this sandbox's offscreen backend has no fonts (`QFontDatabase.families()` is empty) so every glyph renders as a tofu box.

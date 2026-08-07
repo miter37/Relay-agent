@@ -19,6 +19,7 @@ from .delivery import atomic_deliver_pair
 from .errors import RelayError
 from .models import JobRequest, TaskSpec
 from .process_supervisor import run_supervised
+from .profiles import ProfileStore
 from .receipts import RECEIPT_SCHEMA_VERSION
 from .request_builder import build_request_markdown, copy_attachments, write_schema
 from .security import validate_attachment_paths, validate_requested_paths
@@ -33,6 +34,7 @@ from .target_workspace import (
     target_fingerprint,
     validate_target_path,
 )
+from .task_inputs import validate_inputs
 from .util import (
     canonical_json,
     ensure_dir,
@@ -49,6 +51,7 @@ from .util import (
 )
 from .validation import (
     materialize_artifact_payloads,
+    normalize_declared_roles,
     normalize_summary,
     reconcile_json_artifacts,
     scan_artifacts,
@@ -90,6 +93,7 @@ class RelayEngine:
         self.db = db or Database(self.config.path_value("database_path"))
         self.spec_root = self.config.path_value("adapter_spec_root")
         self.agent_registry = AgentRegistry(self.config, self.spec_root)
+        self.profiles = ProfileStore(self.config)
         self._running_processes: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._progress: dict[str, dict[str, Any]] = {}
@@ -147,48 +151,22 @@ class RelayEngine:
                 self.agent_registry.get_definition(request.worker)
             except KeyError:
                 raise RelayError("INVALID_REQUEST", f"Unsupported worker: {request.worker}") from None
+        profile = self.profiles.get(request.profile)
+        request.profile = profile["profile_id"]
+        request.profile_snapshot = {
+            key: profile[key]
+            for key in ("profile_id", "name", "description", "instructions", "builtin", "updated_at")
+            if key in profile
+        }
 
     @staticmethod
     def _validate_task_inputs(request: JobRequest, task_definition: dict[str, Any] | None) -> None:
-        """Validate the small JSON-Schema subset used by registered Task inputs."""
         if not task_definition or not task_definition.get("input_schema"):
             return
-        schema = task_definition["input_schema"]
-        if isinstance(schema, str):
-            try:
-                schema = json.loads(schema)
-            except json.JSONDecodeError as exc:
-                raise RelayError("TASK_INVALID", f"Task input schema is not valid JSON: {exc}") from exc
-        if not isinstance(schema, dict):
-            raise RelayError("TASK_INVALID", "Task input schema must be a JSON object.")
-        inputs = request.inputs
-        required = schema.get("required") or []
-        missing = [name for name in required if name not in inputs]
-        if missing:
-            raise RelayError(
-                "INPUT_SCHEMA_MISMATCH", f"Required Task inputs are missing: {', '.join(map(str, missing))}"
-            )
-        properties = schema.get("properties") or {}
-        if schema.get("additionalProperties") is False:
-            unknown = [name for name in inputs if name not in properties]
-            if unknown:
-                raise RelayError("INPUT_SCHEMA_MISMATCH", f"Unknown Task inputs: {', '.join(map(str, unknown))}")
-        type_checks = {
-            "string": lambda value: isinstance(value, str),
-            "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
-            "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
-            "boolean": lambda value: isinstance(value, bool),
-            "object": lambda value: isinstance(value, dict),
-            "array": lambda value: isinstance(value, list),
-            "null": lambda value: value is None,
-        }
-        for name, definition in properties.items():
-            if name not in inputs or not isinstance(definition, dict):
-                continue
-            expected = definition.get("type")
-            check = type_checks.get(expected)
-            if check and not check(inputs[name]):
-                raise RelayError("INPUT_SCHEMA_MISMATCH", f"Task input {name!r} must be {expected}.")
+        try:
+            request.inputs = validate_inputs(request.inputs, task_definition["input_schema"])
+        except ValueError as exc:
+            raise RelayError("INPUT_SCHEMA_MISMATCH", str(exc)) from exc
 
     def _history_display_mode(self) -> str:
         mode = str(self.config.get("history_display_mode") or self.config.get("history_mode", "metadata"))
@@ -275,6 +253,7 @@ class RelayEngine:
             "fallback_agents": list(request.fallback_agents) if request.fallback_agents else None,
             "result_format": request.result_format,
             "profile": request.profile,
+            "profile_snapshot": request.profile_snapshot,
             "timeout_seconds": request.timeout_seconds,
             "model": request.model,
             "trigger_type": trigger_type,
@@ -309,7 +288,12 @@ class RelayEngine:
             source = safe_resolve(Path(str(artifact["final_path"])))
             if not source.is_file():
                 raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact file is not available: {source}")
-            if not is_within(source, self.config.path_value("artifact_root")):
+            # Both roots are Relay-managed storage. `result_root` holds the delivered
+            # result file, which is registered as the `result`-role Artifact and is the
+            # only role guaranteed to be unique per Run, so Project connections must be
+            # able to bind it. The check still refuses arbitrary filesystem paths.
+            managed_roots = (self.config.path_value("artifact_root"), self.config.path_value("result_root"))
+            if not any(is_within(source, root) for root in managed_roots):
                 raise RelayError("ARTIFACT_PATH_VIOLATION", f"Artifact is outside Relay artifact storage: {source}")
             size = source.stat().st_size
             digest = sha256_file(source)
@@ -857,11 +841,7 @@ class RelayEngine:
                     materialized_artifacts = materialize_artifact_payloads(
                         value, ctx.artifact_dir, max_artifact_files, max_artifact_bytes
                     )
-                declared_roles = {
-                    item["relative_path"]: item["role"]
-                    for item in (value or {}).get("artifacts", [])
-                    if isinstance(item, dict) and isinstance(item.get("relative_path"), str) and item.get("role")
-                }
+                declared_roles = normalize_declared_roles((value or {}).get("artifacts", []))
                 target_workspace = paths.get("target")
                 target_delta = calculate_delta(target_workspace) if target_workspace else None
                 if (
@@ -937,6 +917,7 @@ class RelayEngine:
                     "failure_reason": None,
                     "trigger_type": job.get("trigger_type", "manual"),
                     "task_snapshot": json.loads(job["task_snapshot_json"]) if job.get("task_snapshot_json") else None,
+                    "task_inputs": dict(request.inputs or {}),
                     "worker": worker,
                     "result_path": str(output_path),
                     "artifact_path": str(artifact_path),
@@ -1046,6 +1027,7 @@ class RelayEngine:
             "attempts": errors,
             "logs": log_paths,
             "content_verified": False,
+            "task_inputs": self._stored_task_inputs(self.db.get_job(job_id) or {}),
         }
         self.db.update_job(
             job_id,
@@ -1138,7 +1120,10 @@ class RelayEngine:
             raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         if job.get("receipt_json"):
             try:
-                return json.loads(job["receipt_json"])
+                receipt = json.loads(job["receipt_json"])
+                if isinstance(receipt, dict):
+                    receipt.setdefault("task_inputs", self._stored_task_inputs(job))
+                return receipt
             except json.JSONDecodeError:
                 pass
         schema_version = int(job.get("receipt_schema_version") or 1)
@@ -1155,8 +1140,9 @@ class RelayEngine:
             "artifact_path": job.get("artifact_path"),
             "error_code": job.get("error_code"),
             "error_message": job.get("error_message"),
+            "task_inputs": self._stored_task_inputs(job),
         }
-        if schema_version >= RECEIPT_SCHEMA_VERSION:
+        if schema_version >= 2:
             receipt.update(
                 {
                     "task_summary": self._receipt_summary(job, "task_summary"),
@@ -1165,6 +1151,22 @@ class RelayEngine:
                 }
             )
         return receipt
+
+    @staticmethod
+    def _stored_task_inputs(job: dict[str, Any]) -> dict[str, Any]:
+        try:
+            snapshot = json.loads(job.get("task_snapshot_json") or "{}")
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("inputs"), dict):
+                return snapshot["inputs"]
+        except json.JSONDecodeError:
+            pass
+        try:
+            request = json.loads(job.get("request_json") or "{}")
+            if isinstance(request, dict) and isinstance(request.get("inputs"), dict):
+                return request["inputs"]
+        except json.JSONDecodeError:
+            pass
+        return {}
 
     def show(self, job_id: str) -> dict[str, Any]:
         job = self.db.get_job(job_id)

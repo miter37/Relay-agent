@@ -1,0 +1,1123 @@
+"""Project Runs master/detail UI.
+
+Project Runs are persistent execution states for Project definitions. This view
+implements Phases 1 and 2 of the screen described in
+``docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md``: master/detail with a
+status-driven grouping, a one-line verdict header, a sortable steps table, a
+final-artifact strip with Approve/Reject actions for awaiting runs, and a
+node inspector that exposes attempt history, the active Task Run summary,
+resolved input bindings ("A1 <- pick(result)"), produced Artifacts, and
+node-level actions (open logs, open result, re-execute from node).
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from typing import Any
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .design_icons import icon
+from .design_tokens import COLORS
+from .design_typography import apply_type
+from .design_widgets import EmptyState, LabeledButton, StatusBadge
+
+_ERROR_HUMANIZATION: dict[str, str] = {
+    "ALL_WORKERS_FAILED": "All configured workers failed for this step.",
+    "SCHEMA_MISMATCH": "The Task result did not match the expected schema.",
+    "PROJECT_TASK_MISSING": "The Task snapshot was missing when this step tried to dispatch.",
+    "PROJECT_ARTIFACT_MISSING": "A required final Artifact was not produced.",
+    "PROJECT_ARTIFACT_AMBIGUOUS": "A final-output selection matched multiple Artifacts.",
+    "PROJECT_INVALID": "The Project definition was rejected by the engine.",
+    "CANCELLED": "This step was cancelled.",
+    "TERMINATED": "This step was terminated.",
+    "SIMULATED_FAILURE": "This step failed in a synthetic scenario.",
+    "WORKER_DISABLED": "The selected worker is disabled.",
+    "AUTH_REQUIRED": "The worker requires authentication.",
+    "DAEMON_RESTARTED": "The daemon restarted mid-Run; the step was retried.",
+    "ROUTINE_VERSION_PIN_INVALID": "A pinned Routine version no longer matches.",
+    "TASK_RUN_PARTIAL": "The Task finished but reported a partial result.",
+}
+
+
+def _humanize_error(code: str | None) -> str:
+    if not code:
+        return ""
+    key = str(code).strip().upper()
+    return _ERROR_HUMANIZATION.get(key, key.replace("_", " ").title())
+
+
+def _format_duration(started_at: str | None, ended_at: str | None, *, now: str | None = None) -> str:
+    def _parse(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    start = _parse(started_at)
+    end = _parse(ended_at) or _parse(now) or datetime.now(start.tzinfo) if start else None
+    if not start or not end:
+        return "—"
+    seconds = max(0, int((end - start).total_seconds()))
+    if seconds >= 3600:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds}s"
+
+
+def _local_relative(value: str | None) -> str:
+    if not value:
+        return "—"
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return str(value)[:16]
+    delta = datetime.now(moment.tzinfo) - moment
+    seconds = int(delta.total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _local_date(value: str | None) -> str:
+    if not value:
+        return "Unknown date"
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone().strftime("%b %d, %Y")
+    except ValueError:
+        return str(value)[:10]
+
+
+def _step_attempts(step: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = step.get("task_runs")
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+
+def _verdict(run: dict[str, Any]) -> str:
+    status = str(run.get("status") or "").casefold()
+    if status == "completed":
+        step_count = int(run.get("step_count") or 0)
+        artifact_count = int(run.get("final_artifact_count") or 0)
+        return f"Completed · {step_count} step{'s' if step_count != 1 else ''} · {artifact_count} final artifact{'s' if artifact_count != 1 else ''}"
+    if status == "failed":
+        failed_node = run.get("failed_node_id")
+        blocked = int(run.get("blocked_step_count") or 0)
+        error_code = run.get("error_code") or ""
+        if not error_code and isinstance(run.get("warnings"), list) and run["warnings"]:
+            error_code = str(run["warnings"][0].get("error_code") or "")
+        reason = _humanize_error(error_code) if error_code else "no error reported"
+        suffix = f" · {blocked} step{'s' if blocked != 1 else ''} blocked downstream" if blocked else ""
+        target = f"Failed at step {failed_node}" if failed_node else "Failed"
+        return f"{target} · {reason}{suffix}"
+    if status == "awaiting_approval":
+        blocked = int(run.get("blocked_step_count") or 0)
+        suffix = f" · {blocked} step{'s' if blocked != 1 else ''} waiting downstream" if blocked else ""
+        return f"Awaiting approval{suffix}"
+    if status in {"running", "queued", "accepted"}:
+        step_count = int(run.get("step_count") or 0)
+        completed = int(run.get("completed_step_count") or 0)
+        return f"Running · {completed}/{step_count} steps complete"
+    if status == "cancelled":
+        completed = int(run.get("completed_step_count") or 0)
+        total = int(run.get("step_count") or 0)
+        return f"Cancelled · {completed}/{total} steps reached"
+    return status.replace("_", " ").title() or "Unknown"
+
+
+class ProjectRunsView(QWidget):
+    """Browse Project Runs and render the selected Run beside the list."""
+
+    select_run_requested = Signal(str)
+    filters_changed = Signal()
+    action_requested = Signal(str, str, dict)
+    open_output_requested = Signal(str)
+    open_run_requested = Signal(str)
+    approve_requested = Signal(str, str)
+    reject_requested = Signal(str, str)
+    open_run_logs_requested = Signal(str)
+    open_run_answer_requested = Signal(str)
+    reexecute_from_node_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.runs: dict[str, dict[str, Any]] = {}
+        self.selected_run_id: str | None = None
+        self._tree_expanded: dict[str, bool] = {}
+
+        root = QVBoxLayout(self)
+
+        filters = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search Project Runs, projects, agents…")
+        self.search_edit.textChanged.connect(lambda _text: self._on_filters_changed())
+        filters.addWidget(self.search_edit, 2)
+        self.status_filter = self._combo(
+            "Status", ["All", "Needs action", "Running", "Completed", "Failed", "Awaiting approval"]
+        )
+        self.project_filter = self._combo("Project", ["All"])
+        self.trigger_filter = self._combo("Trigger", ["All", "Manual", "Schedule", "Routine"])
+        self.period_filter = self._combo("Period", ["Any time", "Today", "Last 7 days", "Last 30 days"])
+        for control in (self.status_filter, self.project_filter, self.trigger_filter, self.period_filter):
+            control.currentIndexChanged.connect(lambda _index: self._on_filters_changed())
+            filters.addWidget(control)
+        root.addLayout(filters)
+
+        body = QHBoxLayout()
+        left = QVBoxLayout()
+        self.run_list = QTreeWidget()
+        self.run_list.setHeaderLabels(["Project Run", "Status"])
+        self.run_list.setColumnWidth(0, 260)
+        self.run_list.setRootIsDecorated(True)
+        self.run_list.setAlternatingRowColors(True)
+        self.run_list.itemClicked.connect(self._on_item_clicked)
+        self.run_list.itemExpanded.connect(lambda item: self._remember_tree_state(item, True))
+        self.run_list.itemCollapsed.connect(lambda item: self._remember_tree_state(item, False))
+        left.addWidget(self.run_list, 1)
+        left_widget = QWidget()
+        left_widget.setLayout(left)
+        left_widget.setMaximumWidth(380)
+        body.addWidget(left_widget)
+
+        self.detail = ProjectRunDetailView()
+        self.detail.action_requested.connect(self.action_requested.emit)
+        self.detail.open_output_requested.connect(self.open_output_requested.emit)
+        self.detail.open_run_requested.connect(self.open_run_requested.emit)
+        self.detail.approve_requested.connect(self.approve_requested.emit)
+        self.detail.reject_requested.connect(self.reject_requested.emit)
+        self.detail.open_run_logs_requested.connect(self.open_run_logs_requested.emit)
+        self.detail.open_run_answer_requested.connect(self.open_run_answer_requested.emit)
+        self.detail.reexecute_from_node_requested.connect(self.reexecute_from_node_requested.emit)
+        body.addWidget(self.detail, 1)
+        root.addLayout(body, 1)
+
+    @staticmethod
+    def _combo(name: str, values: list[str]) -> QComboBox:
+        combo = QComboBox()
+        combo.setObjectName(f"project_runs_{name.lower().replace(' ', '_')}")
+        combo.addItems(values)
+        return combo
+
+    def filters(self) -> dict[str, str]:
+        return {
+            "search": self.search_edit.text().strip(),
+            "status": self.status_filter.currentText(),
+            "project": self.project_filter.currentText(),
+            "trigger": self.trigger_filter.currentText(),
+            "period": self.period_filter.currentText(),
+        }
+
+    def set_runs(
+        self, runs: list[dict[str, Any]] | dict[str, dict[str, Any]], *, selected_run_id: str | None = None
+    ) -> None:
+        if isinstance(runs, dict):
+            self.runs = {str(key): dict(value) for key, value in runs.items()}
+        else:
+            self.runs = {str(run.get("project_run_id")): dict(run) for run in runs if run.get("project_run_id")}
+        self._refresh_project_filter()
+        self.selected_run_id = selected_run_id
+        self._render()
+
+    def select_run(self, project_run_id: str | None) -> None:
+        self.selected_run_id = str(project_run_id) if project_run_id else None
+        self._render()
+
+    def set_run_detail(self, project_run_id: str, detail_payload: dict[str, Any]) -> None:
+        if str(project_run_id) != self.selected_run_id:
+            return
+        run = self.runs.setdefault(str(project_run_id), {})
+        run.setdefault("project_run_id", str(project_run_id))
+        if isinstance(detail_payload.get("snapshot"), dict):
+            run["snapshot"] = detail_payload["snapshot"]
+        if "steps" in detail_payload:
+            run["steps"] = detail_payload["steps"]
+        if "approvals" in detail_payload:
+            run["approvals"] = detail_payload["approvals"]
+        self.detail.set_run(self.runs.get(str(project_run_id), {}))
+
+    def set_run_steps(self, project_run_id: str, steps: list[dict[str, Any]]) -> None:
+        run = self.runs.setdefault(str(project_run_id), {})
+        run.setdefault("project_run_id", str(project_run_id))
+        run["steps"] = list(steps)
+        # Preserve cached receipt data so inspector attempt history survives.
+        existing_receipt_steps = self.detail._run.get("receipt_steps") if hasattr(self, "detail") else None
+        self.detail.set_run(self.runs.get(str(project_run_id), {}))
+        if existing_receipt_steps:
+            self.detail._run["receipt_steps"] = existing_receipt_steps
+            self.detail._refresh_inspector_for_current_selection()
+
+    def set_run_approvals(self, project_run_id: str, approvals: list[dict[str, Any]]) -> None:
+        run = self.runs.setdefault(str(project_run_id), {})
+        run.setdefault("project_run_id", str(project_run_id))
+        run["approvals"] = list(approvals)
+        self.detail.set_run(self.runs.get(str(project_run_id), {}))
+
+    def clear_selection(self) -> None:
+        self.selected_run_id = None
+        self.detail.set_run({})
+
+    def has_live_run_selected(self) -> bool:
+        if not self.selected_run_id:
+            return False
+        run = self.runs.get(self.selected_run_id) or {}
+        status = str(run.get("status") or "").casefold()
+        return status in {"running", "queued", "accepted", "awaiting_approval"}
+
+    def _refresh_project_filter(self) -> None:
+        current = self.project_filter.currentText()
+        seen = {"All"}
+        names: list[str] = []
+        for run in self.runs.values():
+            name = str(run.get("project_name") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        names.sort(key=str.casefold)
+        self.project_filter.blockSignals(True)
+        self.project_filter.clear()
+        self.project_filter.addItems(["All", *names])
+        if current and current in names:
+            self.project_filter.setCurrentText(current)
+        self.project_filter.blockSignals(False)
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
+        project_run_id = item.data(0, Qt.UserRole)
+        if project_run_id:
+            self.select_run_requested.emit(str(project_run_id))
+
+    def _on_filters_changed(self) -> None:
+        self._render()
+        self.filters_changed.emit()
+
+    def _remember_tree_state(self, item: QTreeWidgetItem, expanded: bool) -> None:
+        state_key = item.data(0, Qt.UserRole + 1)
+        if state_key:
+            self._tree_expanded[str(state_key)] = expanded
+
+    def _render(self) -> None:
+        for index in range(self.run_list.topLevelItemCount()):
+            group = self.run_list.topLevelItem(index)
+            state_key = group.data(0, Qt.UserRole + 1)
+            if state_key:
+                self._tree_expanded[str(state_key)] = group.isExpanded()
+            for child_index in range(group.childCount()):
+                child = group.child(child_index)
+                state_key = child.data(0, Qt.UserRole + 1)
+                if state_key:
+                    self._tree_expanded[str(state_key)] = child.isExpanded()
+        self.run_list.clear()
+
+        if not self.runs:
+            self.run_list.setVisible(False)
+            return
+
+        groups = (
+            ("Needs action", {"failed", "awaiting_approval"}),
+            ("Running", {"running", "queued", "accepted"}),
+            ("Completed", {"completed"}),
+            ("Cancelled", {"cancelled"}),
+        )
+        any_rendered = False
+        for group_name, statuses in groups:
+            rows = [
+                run
+                for run in self.runs.values()
+                if str(run.get("status") or "").casefold() in statuses and self._matches_filters(run)
+            ]
+            rows.sort(key=lambda run: run.get("created_at") or "", reverse=True)
+            if not rows:
+                continue
+            any_rendered = True
+            group_key = f"group:{group_name}"
+            header = QTreeWidgetItem([f"{group_name} · {len(rows)}", ""])
+            header.setData(0, Qt.UserRole + 1, group_key)
+            header.setFlags(Qt.ItemIsEnabled)
+            self.run_list.addTopLevelItem(header)
+            date_groups: dict[str, list[dict[str, Any]]] = {}
+            for run in rows:
+                date_groups.setdefault(_local_date(run.get("created_at")), []).append(run)
+            for date_name, date_rows in date_groups.items():
+                parent = header
+                if group_name == "Completed" or group_name == "Cancelled":
+                    date_group_key = f"date:{group_name}:{date_name}"
+                    parent = QTreeWidgetItem([f"{date_name} · {len(date_rows)}", ""])
+                    parent.setData(0, Qt.UserRole + 1, date_group_key)
+                    parent.setFlags(Qt.ItemIsEnabled)
+                    header.addChild(parent)
+                for run in date_rows:
+                    self._append_run_row(parent, run)
+                if parent is not header:
+                    parent.setExpanded(self._tree_expanded.get(f"date:{group_name}:{date_name}", True))
+            header.setExpanded(self._tree_expanded.get(group_key, True))
+        self.run_list.setVisible(any_rendered)
+
+    def _matches_filters(self, run: dict[str, Any]) -> bool:
+        filters = self.filters()
+        query = filters["search"].casefold()
+        haystack = " ".join(
+            str(run.get(key) or "")
+            for key in ("project_name", "project_id", "project_run_id", "failed_node_id", "status")
+        ).casefold()
+        if query and query not in haystack:
+            return False
+        if filters["status"] != "All":
+            target = filters["status"].casefold()
+            current = str(run.get("status") or "").casefold()
+            allowed: set[str] = set()
+            if target == "needs action":
+                allowed = {"failed", "awaiting_approval"}
+            elif target == "running":
+                allowed = {"running", "queued", "accepted"}
+            else:
+                allowed = {target.replace(" ", "_")}
+            if current not in allowed:
+                return False
+        if filters["project"] != "All" and str(run.get("project_name") or "") != filters["project"]:
+            return False
+        if filters["trigger"] != "All":
+            trigger = str(run.get("trigger_type") or "").casefold()
+            target = filters["trigger"].casefold()
+            if target == "manual" and trigger not in {"manual", ""}:
+                return False
+            if target != "manual" and trigger != target:
+                return False
+        if filters["period"] != "Any time":
+            days = {"Today": 0, "Last 7 days": 7, "Last 30 days": 30}[filters["period"]]
+            cutoff = datetime.now().astimezone() - (
+                __import__("datetime").timedelta(days=days) if days else __import__("datetime").timedelta(hours=12)
+            )
+            try:
+                created = datetime.fromisoformat(str(run.get("created_at") or "").replace("Z", "+00:00")).astimezone()
+            except ValueError:
+                created = None
+            if created and created < cutoff:
+                return False
+        return True
+
+    def _append_run_row(self, parent: QTreeWidgetItem, run: dict[str, Any]) -> None:
+        project_run_id = str(run.get("project_run_id") or "")
+        project_name = str(run.get("project_name") or run.get("project_id") or "Project")
+        status = str(run.get("status") or "UNKNOWN").casefold()
+        step_count = int(run.get("step_count") or 0)
+        completed = int(run.get("completed_step_count") or 0)
+        relative = _local_relative(run.get("created_at"))
+        suffix = ""
+        if status == "failed" and run.get("failed_node_id"):
+            suffix = f" · failed @ {run.get('failed_node_id')}"
+        elif status == "awaiting_approval":
+            suffix = " · awaiting"
+        title = f"{project_name} · {completed}/{step_count}{suffix}"
+        item = QTreeWidgetItem([title, relative])
+        item.setData(0, Qt.UserRole, project_run_id)
+        item.setToolTip(0, _verdict(run))
+        item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+        self._apply_status_colors(item, status)
+        parent.addChild(item)
+        if project_run_id and project_run_id == self.selected_run_id:
+            self.run_list.setCurrentItem(item)
+
+    @staticmethod
+    def _apply_status_colors(item: QTreeWidgetItem, status: str) -> None:
+        colors = {
+            "completed": (COLORS["state.success"], COLORS["bg.surface"]),
+            "running": (COLORS["state.info"], COLORS["bg.surface"]),
+            "queued": (COLORS["state.warning"], COLORS["bg.surface"]),
+            "accepted": (COLORS["state.warning"], COLORS["bg.surface"]),
+            "awaiting_approval": (COLORS["state.warning"], COLORS["bg.surface"]),
+            "failed": (COLORS["state.danger"], COLORS["bg.surface"]),
+            "cancelled": (COLORS["text.muted"], COLORS["bg.surface"]),
+        }
+        if status not in colors:
+            return
+        foreground, background = colors[status]
+        for column in range(2):
+            item.setForeground(column, QColor(foreground))
+            item.setBackground(column, QColor(background))
+
+
+class ProjectRunDetailView(QWidget):
+    """Right-hand verdict + actions + steps table + final artifact strip + node inspector."""
+
+    action_requested = Signal(str, str, dict)
+    open_output_requested = Signal(str)
+    open_run_requested = Signal(str)
+    approve_requested = Signal(str, str)
+    reject_requested = Signal(str, str)
+    open_run_logs_requested = Signal(str)
+    open_run_answer_requested = Signal(str)
+    reexecute_from_node_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._run: dict[str, Any] = {}
+        self._steps: list[dict[str, Any]] = []
+        self._task_run_details: dict[str, dict[str, Any]] = {}
+        self._node_artifacts: dict[str, list[dict[str, Any]]] = {}
+
+        layout = QVBoxLayout(self)
+
+        self.header_row = QHBoxLayout()
+        self.status_badge = StatusBadge("unavailable")
+        self.header_row.addWidget(self.status_badge)
+        self.verdict_label = QLabel("Select a Project Run to view its overview.")
+        self.verdict_label.setObjectName("projectRunVerdict")
+        self.verdict_label.setWordWrap(True)
+        self.header_row.addWidget(self.verdict_label, 1)
+
+        self.actions_row = QHBoxLayout()
+        self.retry_button = LabeledButton("rerun", "Retry from failure", tone="primary")
+        self.retry_button.clicked.connect(lambda: self._emit_action("retry"))
+        self.reexec_button = LabeledButton("play", "Re-execute from node…")
+        self.reexec_button.clicked.connect(lambda: self._emit_action("reexec"))
+        self.cancel_button = LabeledButton("stop", "Cancel Run", tone="danger")
+        self.cancel_button.clicked.connect(lambda: self._emit_action("cancel"))
+        self.output_button = LabeledButton("folder-open", "Open output folder")
+        self.output_button.clicked.connect(self._emit_open_output)
+        for button in (self.retry_button, self.reexec_button, self.cancel_button, self.output_button):
+            self.actions_row.addWidget(button)
+        self.actions_row.addStretch(1)
+        self.header_row.addLayout(self.actions_row)
+
+        layout.addLayout(self.header_row)
+
+        self.approval_row = QHBoxLayout()
+        self.approval_label = QLabel("")
+        self.approval_label.setObjectName("mutedText")
+        self.approval_label.setVisible(False)
+        self.approval_row.addWidget(self.approval_label, 1)
+        self.approve_button = LabeledButton("check-circle", "Approve", tone="primary")
+        self.approve_button.clicked.connect(self._emit_approve)
+        self.reject_button = LabeledButton("x-circle", "Reject", tone="danger")
+        self.reject_button.clicked.connect(self._emit_reject)
+        self.approval_row.addWidget(self.approve_button)
+        self.approval_row.addWidget(self.reject_button)
+        self.approval_row.addStretch(1)
+        layout.addLayout(self.approval_row)
+
+        self.steps_table = QTableWidget(0, 7)
+        self.steps_table.setHorizontalHeaderLabels(
+            ["Node", "Status", "Attempts", "Duration", "Worker", "Error", "Task Run"]
+        )
+        self.steps_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.steps_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.steps_table.verticalHeader().setVisible(False)
+        header = self.steps_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.steps_table.itemSelectionChanged.connect(self._on_step_selection_changed)
+        layout.addWidget(self.steps_table, 1)
+
+        self.inspector = ProjectRunInspectorView()
+        self.inspector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self.inspector)
+
+        # Forward inspector signals to the outer detail view so MainWindow can wire them.
+        self.inspector.open_run_logs_requested.connect(self.open_run_logs_requested.emit)
+        self.inspector.open_run_answer_requested.connect(self.open_run_answer_requested.emit)
+        self.inspector.open_artifact_requested.connect(self.open_output_requested.emit)
+        self.inspector.reexecute_from_node_requested.connect(self.reexecute_from_node_requested.emit)
+
+        self.artifact_strip = QHBoxLayout()
+        self.artifact_label = QLabel("")
+        self.artifact_label.setObjectName("mutedText")
+        self.artifact_label.setWordWrap(True)
+        self.artifact_strip.addWidget(self.artifact_label, 1)
+        self.artifact_buttons_layout = QHBoxLayout()
+        self.artifact_strip.addLayout(self.artifact_buttons_layout)
+        self.artifact_strip.addStretch(1)
+        layout.addLayout(self.artifact_strip)
+
+        self.empty = EmptyState(
+            "No Project Run selected",
+            "Pick a Run from the list to see its verdict, steps, and outputs.",
+            action_text="",
+        )
+        self.empty.setVisible(True)
+        layout.addWidget(self.empty)
+
+        self.set_run({})
+
+    def set_run(self, run: dict[str, Any]) -> None:
+        self._run = dict(run) if isinstance(run, dict) else {}
+        self._steps = list(self._run.get("steps") or []) if isinstance(self._run.get("steps"), list) else []
+
+        if not self._run.get("project_run_id"):
+            self.empty.setVisible(True)
+            self.status_badge.setVisible(False)
+            self.verdict_label.setText("Select a Project Run to view its overview.")
+            self.steps_table.setVisible(False)
+            self.artifact_label.setVisible(False)
+            self._clear_action_buttons()
+            self._clear_artifact_buttons()
+            self.approve_button.setVisible(False)
+            self.reject_button.setVisible(False)
+            self.approval_label.setVisible(False)
+            self.inspector.clear()
+            return
+        self.empty.setVisible(False)
+        self.status_badge.setVisible(True)
+        self.steps_table.setVisible(True)
+        self.artifact_label.setVisible(True)
+
+        status = str(self._run.get("status") or "unavailable").casefold()
+        self.status_badge.set_status(status)
+        self.verdict_label.setText(_verdict(self._run))
+
+        is_failed = status == "failed"
+        is_terminal = status in {"completed", "failed", "cancelled"}
+        self.retry_button.setVisible(is_failed)
+        self.reexec_button.setVisible(True)
+        self.cancel_button.setVisible(not is_terminal)
+        self.output_button.setVisible(status == "completed" and bool(self._run.get("final_artifact_ids")))
+
+        self._render_steps()
+        self._render_artifacts()
+        self._render_approvals()
+        self._refresh_inspector_for_current_selection()
+
+    def _render_steps(self) -> None:
+        steps = sorted(self._steps, key=lambda item: str(item.get("node_id") or ""))
+        self.steps_table.setRowCount(len(steps))
+        for row, step in enumerate(steps):
+            node_id = str(step.get("node_id") or "")
+            status = str(step.get("status") or "unavailable").casefold()
+            attempt_count = int(step.get("attempt_count") or len(_step_attempts(step)))
+            duration = _format_duration(step.get("started_at"), step.get("completed_at"))
+            worker = str(step.get("worker_override") or "").strip() or "—"
+            attempts = _step_attempts(step)
+            if attempts and not step.get("worker_override"):
+                worker = str(attempts[-1].get("worker_override") or "").strip() or "—"
+            error_code = str(step.get("error_code") or "").strip()
+            error_text = _humanize_error(error_code) if error_code else "—"
+            task_run_id = str(step.get("active_task_run_id") or "")
+
+            values = [node_id, status.title(), str(attempt_count), duration, worker, error_text, task_run_id]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 6 and value:
+                    item.setData(Qt.UserRole, value)
+                    item.setForeground(QColor(COLORS["accent.primary"]))
+                item.setToolTip(value)
+                self.steps_table.setItem(row, column, item)
+
+    def _render_artifacts(self) -> None:
+        self._clear_artifact_buttons()
+        final = self._run.get("final_artifact_ids")
+        items = [item for item in (final or []) if isinstance(item, dict)] if isinstance(final, list) else []
+        if not items:
+            self.artifact_label.setText("No final artifacts yet.")
+            return
+        label_parts = []
+        for entry in items:
+            role = str(entry.get("role") or "output")
+            node = str(entry.get("node_id") or "")
+            label_parts.append(f"{role} ({node})" if node else role)
+        self.artifact_label.setText(f"Final artifacts: {', '.join(label_parts)}")
+        for entry in items:
+            artifact_uid = str(entry.get("artifact_uid") or "")
+            if not artifact_uid:
+                continue
+            button = QToolButton()
+            button.setText(str(entry.get("role") or "output"))
+            button.setIcon(icon("external-link", "default"))
+            button.setToolTip(f"Open {entry.get('role') or 'output'}")
+            button.clicked.connect(lambda _checked=False, uid=artifact_uid: self.open_output_requested.emit(uid))
+            self.artifact_buttons_layout.addWidget(button)
+
+    def _on_step_selection_changed(self) -> None:
+        self._refresh_inspector_for_current_selection()
+
+    def _refresh_inspector_for_current_selection(self) -> None:
+        items = self.steps_table.selectedItems()
+        if not items:
+            self.inspector.clear()
+            return
+        row = items[0].row()
+        node_id_item = self.steps_table.item(row, 0)
+        node_id = str(node_id_item.text() if node_id_item else "")
+        if not node_id:
+            self.inspector.clear()
+            return
+        step = next((s for s in self._steps if str(s.get("node_id")) == node_id), {})
+        receipt_step = self._find_receipt_step(node_id)
+        task_run_id = str(step.get("active_task_run_id") or "")
+        cached = self._task_run_details.get(task_run_id) if task_run_id else None
+        artifacts = self._node_artifacts.get(node_id) or []
+        self.inspector.set_node(
+            str(self._run.get("project_run_id") or ""),
+            node_id,
+            step,
+            receipt_step,
+            cached,
+            artifacts,
+        )
+
+    def _find_receipt_step(self, node_id: str) -> dict[str, Any]:
+        steps = self._run.get("receipt_steps") or []
+        for entry in steps:
+            if isinstance(entry, dict) and str(entry.get("node_id")) == node_id:
+                return entry
+        return {}
+
+    def cache_receipt(self, receipt: dict[str, Any]) -> None:
+        if not isinstance(receipt, dict):
+            return
+        steps = receipt.get("steps") or []
+        if isinstance(steps, list):
+            self._run["receipt_steps"] = [s for s in steps if isinstance(s, dict)]
+        self._refresh_inspector_for_current_selection()
+
+    def cache_task_run_detail(self, task_run_id: str, detail: dict[str, Any]) -> None:
+        self._task_run_details[str(task_run_id)] = dict(detail) if isinstance(detail, dict) else {}
+        self._refresh_inspector_for_current_selection()
+
+    def cache_node_artifacts(self, node_id: str, artifacts: list[dict[str, Any]]) -> None:
+        self._node_artifacts[str(node_id)] = [item for item in artifacts if isinstance(item, dict)]
+        self._refresh_inspector_for_current_selection()
+
+    def _render_approvals(self) -> None:
+        status = str(self._run.get("status") or "").casefold()
+        approvals = self._run.get("approvals") or []
+        awaiting = status == "awaiting_approval"
+        has_pending = any(
+            str(item.get("status") or "").casefold() == "pending" for item in approvals if isinstance(item, dict)
+        )
+        self.approve_button.setVisible(awaiting and has_pending)
+        self.reject_button.setVisible(awaiting and has_pending)
+        if awaiting:
+            pending = [
+                item
+                for item in approvals
+                if isinstance(item, dict) and str(item.get("status") or "").casefold() == "pending"
+            ]
+            if pending:
+                token = str(pending[0].get("token") or "")
+                self.approval_label.setText(f"Awaiting approval · token {token[:8]}")
+                self.approval_label.setVisible(True)
+                self._pending_token = token
+                self._pending_node_id = str(pending[0].get("node_id") or "")
+                return
+        self.approval_label.setVisible(False)
+        self._pending_token = ""
+        self._pending_node_id = ""
+
+    def _emit_action(self, action: str) -> None:
+        project_run_id = str(self._run.get("project_run_id") or "")
+        if not project_run_id:
+            return
+        self.action_requested.emit(project_run_id, action, {"project_run_id": project_run_id})
+
+    def _emit_open_output(self) -> None:
+        final = self._run.get("final_artifact_ids") or []
+        items = [item for item in final if isinstance(item, dict)]
+        if not items:
+            return
+        first = items[0]
+        artifact_uid = str(first.get("artifact_uid") or "")
+        if artifact_uid:
+            self.open_output_requested.emit(artifact_uid)
+
+    def _emit_approve(self) -> None:
+        token = getattr(self, "_pending_token", "")
+        project_run_id = str(self._run.get("project_run_id") or "")
+        if token and project_run_id:
+            self.approve_requested.emit(project_run_id, token)
+
+    def _emit_reject(self) -> None:
+        token = getattr(self, "_pending_token", "")
+        project_run_id = str(self._run.get("project_run_id") or "")
+        if token and project_run_id:
+            self.reject_requested.emit(project_run_id, token)
+
+    def _clear_action_buttons(self) -> None:
+        for button in (self.retry_button, self.reexec_button, self.cancel_button, self.output_button):
+            button.setVisible(False)
+
+    def _clear_artifact_buttons(self) -> None:
+        while self.artifact_buttons_layout.count():
+            item = self.artifact_buttons_layout.takeAt(0)
+            widget = item.widget() if item else None
+            if widget is not None:
+                widget.deleteLater()
+
+
+def _format_attempt_label(step_attempt: int | None) -> str:
+    if step_attempt is None:
+        return "Attempt"
+    return f"Attempt {int(step_attempt)}"
+
+
+class ProjectRunInspectorView(QWidget):
+    """Per-node detail panel for a selected Project Run.
+
+    Renders five sections described in design doc §5 (Node Inspector):
+    attempt history, active Task Run summary, resolved inputs ("A1 <- pick(result)"),
+    produced Artifacts, and node-level actions (open logs, open result,
+    re-execute from node).  All sections are filled from the daemon
+    responses that ``ProjectRunsView`` already loads; this widget holds no
+    network state of its own.
+    """
+
+    open_run_logs_requested = Signal(str)
+    open_run_answer_requested = Signal(str)
+    open_artifact_requested = Signal(str)
+    reexecute_from_node_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_run_id: str | None = None
+        self._node_id: str | None = None
+        self._step: dict[str, Any] = {}
+        self._receipt_step: dict[str, Any] = {}
+        self._task_run_detail: dict[str, Any] | None = None
+        self._artifacts: list[dict[str, Any]] = []
+
+        layout = QVBoxLayout(self)
+
+        self.header_label = QLabel("Select a step to inspect.")
+        self.header_label.setObjectName("sectionTitle")
+        apply_type(self.header_label, "title.section")
+        self.header_label.setWordWrap(True)
+        layout.addWidget(self.header_label)
+
+        self.body = QWidget()
+        body_layout = QVBoxLayout(self.body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+
+        body_layout.addWidget(self._build_attempts_section())
+        body_layout.addWidget(self._build_task_run_section())
+        body_layout.addWidget(self._build_inputs_section())
+        body_layout.addWidget(self._build_outputs_section())
+        body_layout.addWidget(self._build_actions_section())
+        body_layout.addStretch(1)
+        layout.addWidget(self.body, 1)
+
+        self.empty = EmptyState(
+            "No step selected",
+            "Click a row in the steps table above to see that step's attempt history, inputs, outputs, and actions.",
+            action_text="",
+        )
+        layout.addWidget(self.empty)
+        self._set_empty(True)
+
+    def _set_empty(self, empty: bool) -> None:
+        self.body.setVisible(not empty)
+        self.empty.setVisible(empty)
+        self.header_label.setVisible(not empty or empty)
+
+    def _build_attempts_section(self) -> QWidget:
+        section = QFrame()
+        section.setObjectName("inspectorSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Attempt history")
+        title.setObjectName("sectionTitle")
+        apply_type(title, "overline")
+        layout.addWidget(title)
+        self.attempts_table = QTableWidget(0, 5)
+        self.attempts_table.setHorizontalHeaderLabels(["Attempt", "Status", "Worker", "Started", "Completed"])
+        self.attempts_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.attempts_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.attempts_table.verticalHeader().setVisible(False)
+        header = self.attempts_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.attempts_table.setMinimumHeight(110)
+        layout.addWidget(self.attempts_table)
+        return section
+
+    def _build_task_run_section(self) -> QWidget:
+        section = QFrame()
+        section.setObjectName("inspectorSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Active Task Run")
+        title.setObjectName("sectionTitle")
+        apply_type(title, "overline")
+        layout.addWidget(title)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        self.task_run_id_label = QLabel("—")
+        self.requested_worker_label = QLabel("—")
+        self.actual_worker_label = QLabel("—")
+        self.task_run_status_label = QLabel("—")
+        self.task_run_error_label = QLabel("—")
+        for label in (
+            self.task_run_id_label,
+            self.requested_worker_label,
+            self.actual_worker_label,
+            self.task_run_status_label,
+            self.task_run_error_label,
+        ):
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form.addRow("Task Run", self.task_run_id_label)
+        form.addRow("Requested worker", self.requested_worker_label)
+        form.addRow("Actual worker", self.actual_worker_label)
+        form.addRow("Status", self.task_run_status_label)
+        form.addRow("Error", self.task_run_error_label)
+        layout.addLayout(form)
+        return section
+
+    def _build_inputs_section(self) -> QWidget:
+        section = QFrame()
+        section.setObjectName("inspectorSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Inputs")
+        title.setObjectName("sectionTitle")
+        apply_type(title, "overline")
+        layout.addWidget(title)
+        self.inputs_label = QLabel("No inputs recorded.")
+        self.inputs_label.setObjectName("mutedText")
+        self.inputs_label.setWordWrap(True)
+        self.inputs_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.inputs_label)
+        return section
+
+    def _build_outputs_section(self) -> QWidget:
+        section = QFrame()
+        section.setObjectName("inspectorSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Artifacts produced")
+        title.setObjectName("sectionTitle")
+        apply_type(title, "overline")
+        layout.addWidget(title)
+        self.outputs_table = QTableWidget(0, 4)
+        self.outputs_table.setHorizontalHeaderLabels(["Role", "File", "Size", "Sha256"])
+        self.outputs_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.outputs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.outputs_table.verticalHeader().setVisible(False)
+        header = self.outputs_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.outputs_table.setMinimumHeight(110)
+        layout.addWidget(self.outputs_table)
+        return section
+
+    def _build_actions_section(self) -> QWidget:
+        section = QFrame()
+        section.setObjectName("inspectorSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Actions")
+        title.setObjectName("sectionTitle")
+        apply_type(title, "overline")
+        layout.addWidget(title)
+        actions = QHBoxLayout()
+        self.open_logs_button = LabeledButton("file-text", "Open logs")
+        self.open_logs_button.clicked.connect(self._emit_open_logs)
+        self.open_answer_button = LabeledButton("external-link", "Open answer")
+        self.open_answer_button.clicked.connect(self._emit_open_answer)
+        self.reexec_button = LabeledButton("play", "Re-execute from this node")
+        self.reexec_button.clicked.connect(self._emit_reexec)
+        actions.addWidget(self.open_logs_button)
+        actions.addWidget(self.open_answer_button)
+        actions.addWidget(self.reexec_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        return section
+
+    def clear(self) -> None:
+        self._project_run_id = None
+        self._node_id = None
+        self._step = {}
+        self._receipt_step = {}
+        self._task_run_detail = None
+        self._artifacts = []
+        self._set_empty(True)
+        self.header_label.setText("Select a step to inspect.")
+
+    def set_node(
+        self,
+        project_run_id: str,
+        node_id: str,
+        step: dict[str, Any],
+        receipt_step: dict[str, Any] | None,
+        task_run_detail: dict[str, Any] | None,
+        artifacts: list[dict[str, Any]],
+    ) -> None:
+        self._project_run_id = project_run_id
+        self._node_id = node_id
+        self._step = dict(step) if isinstance(step, dict) else {}
+        self._receipt_step = dict(receipt_step) if isinstance(receipt_step, dict) else {}
+        self._task_run_detail = dict(task_run_detail) if isinstance(task_run_detail, dict) else None
+        self._artifacts = [item for item in artifacts if isinstance(item, dict)]
+        self._render()
+
+    def _render(self) -> None:
+        if not self._node_id:
+            self._set_empty(True)
+            return
+        self._set_empty(False)
+
+        task_label = self._step.get("task_id") or ""
+        status = str(self._step.get("status") or "unavailable")
+        node_label = f"{self._node_id} · task {task_label} · {status}" if task_label else f"{self._node_id} · {status}"
+        self.header_label.setText(node_label)
+
+        self._render_attempts()
+        self._render_task_run()
+        self._render_inputs()
+        self._render_outputs()
+        self._render_actions()
+
+    def _render_attempts(self) -> None:
+        attempts = list(self._receipt_step.get("task_runs") or [])
+        if not attempts:
+            attempts = [
+                {
+                    "step_attempt": 1,
+                    "worker_override": self._step.get("worker_override"),
+                    "status": self._step.get("status"),
+                    "created_at": self._step.get("started_at"),
+                    "completed_at": self._step.get("completed_at"),
+                }
+            ]
+        attempts = sorted(attempts, key=lambda item: int(item.get("step_attempt") or 0))
+        self.attempts_table.setRowCount(len(attempts))
+        for row, attempt in enumerate(attempts):
+            attempt_value = attempt.get("step_attempt")
+            status = str(attempt.get("status") or "").casefold()
+            worker = str(attempt.get("worker_override") or "").strip() or "—"
+            started = str(attempt.get("created_at") or "")[:19]
+            completed = str(attempt.get("completed_at") or "")[:19]
+            values = [_format_attempt_label(attempt_value), status, worker, started or "—", completed or "—"]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.attempts_table.setItem(row, column, item)
+
+    def _render_task_run(self) -> None:
+        detail = self._task_run_detail
+        active_task_run_id = str(self._step.get("active_task_run_id") or "")
+        if not active_task_run_id:
+            self.task_run_id_label.setText("—")
+            self.requested_worker_label.setText("—")
+            self.actual_worker_label.setText("—")
+            self.task_run_status_label.setText("—")
+            self.task_run_error_label.setText("—")
+            return
+        self.task_run_id_label.setText(active_task_run_id)
+        if detail:
+            requested = str(detail.get("requested_worker") or "").strip() or "—"
+            actual = str(detail.get("actual_worker") or "").strip()
+            status = str(detail.get("status") or "").strip() or "—"
+            error = str(detail.get("error_code") or "").strip()
+            if not actual or actual.lower() == requested.lower():
+                actual_label = actual or requested
+            else:
+                actual_label = f"{actual} (requested {requested})"
+            self.requested_worker_label.setText(requested)
+            self.actual_worker_label.setText(actual_label)
+            self.task_run_status_label.setText(status)
+            self.task_run_error_label.setText(error or "—")
+        else:
+            self.requested_worker_label.setText("Loading…")
+            self.actual_worker_label.setText("Loading…")
+            self.task_run_status_label.setText("Loading…")
+            self.task_run_error_label.setText("Loading…")
+
+    def _render_inputs(self) -> None:
+        inputs = self._receipt_step.get("resolved_inputs") or self._step.get("input_manifest_json")
+        if isinstance(inputs, str):
+            try:
+                inputs = json.loads(inputs or "[]")
+            except (TypeError, json.JSONDecodeError):
+                inputs = []
+        if not isinstance(inputs, list) or not inputs:
+            self.inputs_label.setText("No inputs recorded.")
+            return
+        parts: list[str] = []
+        for entry in inputs:
+            if not isinstance(entry, dict):
+                continue
+            alias = str(entry.get("to_alias") or "")
+            from_node = str(entry.get("from_node") or "").strip()
+            from_role = str(entry.get("from_role") or "").strip()
+            artifact_uid = str(entry.get("artifact_uid") or "").strip()
+            if from_node and from_role:
+                line = f"{alias} ← {from_node}({from_role})"
+            elif alias:
+                line = f"{alias} ← external input"
+            else:
+                line = alias or "(unlabeled input)"
+            if artifact_uid:
+                line += f" · {artifact_uid[:12]}"
+            parts.append(line)
+        self.inputs_label.setText("\n".join(parts) if parts else "No inputs recorded.")
+
+    def _render_outputs(self) -> None:
+        artifacts = self._artifacts
+        self.outputs_table.setRowCount(len(artifacts))
+        for row, artifact in enumerate(artifacts):
+            role = str(artifact.get("role") or "output")
+            name = str(artifact.get("relative_path") or artifact.get("name") or "—")
+            size = artifact.get("size")
+            size_text = str(size) if size is not None else "—"
+            sha = str(artifact.get("sha256") or "")[:12] or "—"
+            values = [role, name, size_text, sha]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                if column == 0 and str(artifact.get("artifact_uid") or ""):
+                    item.setData(Qt.UserRole, str(artifact.get("artifact_uid")))
+                self.outputs_table.setItem(row, column, item)
+
+    def _render_actions(self) -> None:
+        active_task_run_id = str(self._step.get("active_task_run_id") or "")
+        status = str(self._step.get("status") or "").casefold()
+        # The buttons stay visible but disabled when no active Task Run exists.
+        self.open_logs_button.setEnabled(bool(active_task_run_id))
+        self.open_answer_button.setEnabled(bool(active_task_run_id) and status in {"completed", "partial", "failed"})
+        self.reexec_button.setEnabled(bool(self._project_run_id and self._node_id))
+
+    def _emit_open_logs(self) -> None:
+        active_task_run_id = str(self._step.get("active_task_run_id") or "")
+        if active_task_run_id:
+            self.open_run_logs_requested.emit(active_task_run_id)
+
+    def _emit_open_answer(self) -> None:
+        active_task_run_id = str(self._step.get("active_task_run_id") or "")
+        if active_task_run_id:
+            self.open_run_answer_requested.emit(active_task_run_id)
+
+    def _emit_reexec(self) -> None:
+        if self._project_run_id and self._node_id:
+            self.reexecute_from_node_requested.emit(self._node_id)

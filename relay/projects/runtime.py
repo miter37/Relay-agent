@@ -206,19 +206,36 @@ class ProjectRuntime:
                 return False
         return True
 
+    def _fail_step(self, project_run_id: str, node_id: str, spec: ProjectSpec, code: str, message: str | None) -> None:
+        """Mark a step failed and block its descendants.
+
+        Without blocking, a step that fails before it ever produced a Task Run
+        leaves its descendants 'pending' forever, so the Project Run never reaches
+        a terminal state and cannot even be retried.
+        """
+        self.db.update_project_step(
+            project_run_id,
+            node_id,
+            status="failed",
+            error_code=code,
+            error_message=message,
+        )
+        self._block_descendants(project_run_id, spec, node_id)
+
     def _dispatch_step(self, project_run_id: str, node_id: str, project_snapshot: dict[str, Any]) -> None:
         step = self.db.get_project_step(project_run_id, node_id)
         if not step:
             return
+        spec = ProjectSpec.from_dict(project_snapshot["project_definition"])
         task_id = step["task_id"]
         task_snapshot = project_snapshot.get("task_snapshots", {}).get(task_id)
         if not task_snapshot:
-            self.db.update_project_step(
+            self._fail_step(
                 project_run_id,
                 node_id,
-                status="failed",
-                error_code="PROJECT_TASK_MISSING",
-                error_message=f"Task snapshot missing for {task_id}",
+                spec,
+                "PROJECT_TASK_MISSING",
+                f"Task snapshot missing for {task_id}",
             )
             return
 
@@ -226,13 +243,7 @@ class ProjectRuntime:
         try:
             resolved_inputs = self.service.resolve_step_inputs(project_run_id, node_id)
         except RelayError as exc:
-            self.db.update_project_step(
-                project_run_id,
-                node_id,
-                status="failed",
-                error_code=exc.code,
-                error_message=exc.message,
-            )
+            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message)
             return
 
         try:
@@ -259,24 +270,20 @@ class ProjectRuntime:
                 caller="service",
             )
         except RelayError as exc:
-            self.db.update_project_step(
-                project_run_id,
-                node_id,
-                status="failed",
-                error_code=exc.code,
-                error_message=exc.message,
-            )
+            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message)
             return
 
         self.db.append_project_step_run(project_run_id, node_id, job["job_id"], worker_override=None)
+        now = utc_now()
         self.db.update_project_step(
             project_run_id,
             node_id,
             status="running",
             active_task_run_id=job["job_id"],
-            started_at=utc_now(),
+            started_at=now,
             resolved_connections_json=json.dumps(resolved_inputs),
         )
+        self.db.ensure_project_run_started(project_run_id, now)
         self.wake()
 
     def _block_descendants(self, project_run_id: str, spec: ProjectSpec, node_id: str) -> None:
