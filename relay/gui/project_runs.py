@@ -1,13 +1,22 @@
 """Project Runs master/detail UI.
 
 Project Runs are persistent execution states for Project definitions. This view
-implements Phases 1 and 2 of the screen described in
-``docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md``: master/detail with a
-status-driven grouping, a one-line verdict header, a sortable steps table, a
-final-artifact strip with Approve/Reject actions for awaiting runs, and a
-node inspector that exposes attempt history, the active Task Run summary,
-resolved input bindings ("A1 <- pick(result)"), produced Artifacts, and
-node-level actions (open logs, open result, re-execute from node).
+implements Phases 1, 2, 3, and 4 of the screen described in
+``docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md``:
+
+- Phase 1: master/detail with a status-driven grouping, a one-line verdict
+  header, a sortable steps table, a final-artifact strip, and Approve/Reject
+  actions for awaiting runs.
+- Phase 2: a node inspector that exposes attempt history, the active Task Run
+  summary, resolved input bindings ("A1 <- pick(result)"), produced
+  Artifacts, and node-level actions (open logs, open result, re-execute
+  from node).
+- Phase 3: a level-based pipeline view that arranges node cards by their
+  topological depth, dims blocked descendants, and dashes edges leaving
+  failed steps.
+- Phase 4: a timeline view that draws one bar per attempt using step
+  started/completed and receipt task_runs, with separate bars for retries
+  and parallel fan-outs.
 """
 
 from __future__ import annotations
@@ -16,13 +25,14 @@ import json
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -30,6 +40,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -536,7 +547,18 @@ class ProjectRunDetailView(QWidget):
         header.setSectionResizeMode(5, QHeaderView.Stretch)
         header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.steps_table.itemSelectionChanged.connect(self._on_step_selection_changed)
-        layout.addWidget(self.steps_table, 1)
+
+        self.pipeline_view = ProjectRunPipelineView()
+        self.pipeline_view.node_selected.connect(self._on_pipeline_node_selected)
+
+        self.timeline_view = ProjectRunTimelineView()
+
+        self.run_tabs = QTabWidget()
+        self.run_tabs.addTab(self.pipeline_view, "Pipeline")
+        self.run_tabs.addTab(self.timeline_view, "Timeline")
+        self.run_tabs.addTab(self.steps_table, "Steps")
+        self.run_tabs.currentChanged.connect(self._on_run_tab_changed)
+        layout.addWidget(self.run_tabs, 1)
 
         self.inspector = ProjectRunInspectorView()
         self.inspector.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -576,7 +598,7 @@ class ProjectRunDetailView(QWidget):
             self.empty.setVisible(True)
             self.status_badge.setVisible(False)
             self.verdict_label.setText("Select a Project Run to view its overview.")
-            self.steps_table.setVisible(False)
+            self.run_tabs.setVisible(False)
             self.artifact_label.setVisible(False)
             self._clear_action_buttons()
             self._clear_artifact_buttons()
@@ -584,10 +606,12 @@ class ProjectRunDetailView(QWidget):
             self.reject_button.setVisible(False)
             self.approval_label.setVisible(False)
             self.inspector.clear()
+            self.pipeline_view.clear()
+            self.timeline_view.clear()
             return
         self.empty.setVisible(False)
         self.status_badge.setVisible(True)
-        self.steps_table.setVisible(True)
+        self.run_tabs.setVisible(True)
         self.artifact_label.setVisible(True)
 
         status = str(self._run.get("status") or "unavailable").casefold()
@@ -605,6 +629,8 @@ class ProjectRunDetailView(QWidget):
         self._render_artifacts()
         self._render_approvals()
         self._refresh_inspector_for_current_selection()
+        self._render_pipeline()
+        self._render_timeline()
 
     def _render_steps(self) -> None:
         steps = sorted(self._steps, key=lambda item: str(item.get("node_id") or ""))
@@ -630,6 +656,39 @@ class ProjectRunDetailView(QWidget):
                     item.setForeground(QColor(COLORS["accent.primary"]))
                 item.setToolTip(value)
                 self.steps_table.setItem(row, column, item)
+
+    def _render_pipeline(self) -> None:
+        snapshot = self._run.get("snapshot")
+        self.pipeline_view.set_run(
+            str(self._run.get("project_run_id") or ""),
+            snapshot if isinstance(snapshot, dict) else None,
+            self._steps,
+            self._run.get("receipt_steps") or [],
+        )
+
+    def _render_timeline(self) -> None:
+        self.timeline_view.set_run(
+            str(self._run.get("project_run_id") or ""),
+            self._steps,
+            self._run.get("receipt_steps") or [],
+        )
+
+    def _on_pipeline_node_selected(self, node_id: str) -> None:
+        for row in range(self.steps_table.rowCount()):
+            item = self.steps_table.item(row, 0)
+            if item and item.text() == node_id:
+                self.steps_table.selectRow(row)
+                return
+
+    def _on_run_tab_changed(self, index: int) -> None:
+        if index == self.run_tabs.indexOf(self.pipeline_view):
+            # Keep pipeline selection synced with the steps table / inspector.
+            items = self.steps_table.selectedItems()
+            if items:
+                row = items[0].row()
+                item = self.steps_table.item(row, 0)
+                if item:
+                    self.pipeline_view.select_node(item.text())
 
     def _render_artifacts(self) -> None:
         self._clear_artifact_buttons()
@@ -1121,3 +1180,622 @@ class ProjectRunInspectorView(QWidget):
     def _emit_reexec(self) -> None:
         if self._project_run_id and self._node_id:
             self.reexecute_from_node_requested.emit(self._node_id)
+
+
+# --- Phase 3 (pipeline view) and Phase 4 (timeline view) helpers --------------
+
+
+_PIPELINE_STATUS_COLORS: dict[str, str] = {
+    "completed": COLORS["state.success"],
+    "running": COLORS["state.info"],
+    "queued": COLORS["state.warning"],
+    "accepted": COLORS["state.warning"],
+    "awaiting_approval": COLORS["state.warning"],
+    "failed": COLORS["state.danger"],
+    "blocked": COLORS["text.muted"],
+    "cancelled": COLORS["text.muted"],
+}
+
+
+def _level_for_nodes(node_ids: list[str], predecessors: dict[str, list[str]]) -> dict[str, int]:
+    """Assign a topological level to every node id (longest-path from any root)."""
+    levels: dict[str, int] = {nid: 0 for nid in node_ids}
+    for nid in node_ids:
+        visited: set[str] = set()
+        stack: list[str] = [nid]
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            for pred_id in predecessors.get(current, []):
+                candidate = levels.get(pred_id, 0) + 1
+                if candidate > levels.get(current, 0):
+                    levels[current] = candidate
+                stack.append(pred_id)
+    return levels
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+class ProjectRunPipelineView(QWidget):
+    """Level-based DAG view described in design doc §5 (Pipeline view).
+
+    Arranges node cards in columns by their topological depth. Blocked
+    descendants of failed steps render dimmed with a dashed border, and
+    edges leaving failed steps render dashed so the cause/effect is visible
+    at a glance. Clicking a node card emits ``node_selected`` for the
+    parent detail widget to feed into the inspector.
+    """
+
+    node_selected = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_run_id: str | None = None
+        self._nodes: list[dict[str, Any]] = []
+        self._connections: list[dict[str, Any]] = []
+        self._steps_by_id: dict[str, dict[str, Any]] = {}
+        self._receipt_steps_by_id: dict[str, dict[str, Any]] = {}
+
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.addWidget(self._build_legend())
+        self.cards_container = QWidget()
+        self.cards_container_layout = QGridLayout(self.cards_container)
+        self.cards_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards_container_layout.setSpacing(24)
+        self.body_layout.addWidget(self.cards_container, 1)
+        self._root_layout.addWidget(self.body, 1)
+
+        self.empty = EmptyState(
+            "Pipeline unavailable",
+            "The selected Project Run has no nodes yet.",
+            action_text="",
+        )
+        self.empty.setVisible(False)
+        self._root_layout.addWidget(self.empty)
+
+    def _build_legend(self) -> QWidget:
+        row = QHBoxLayout()
+        legend = QFrame()
+        legend.setObjectName("mutedText")
+        legend_layout = QHBoxLayout(legend)
+        legend_layout.setContentsMargins(0, 0, 0, 0)
+        for label in ("Completed", "Running", "Failed", "Blocked", "Awaiting approval", "Cancelled"):
+            chip = QLabel(label)
+            apply_type(chip, "caption")
+            chip.setProperty("state", _PIPELINE_STATUS_COLORS.get(label.lower().replace(" ", "_"), "unavailable"))
+            legend_layout.addWidget(chip)
+        row.addWidget(legend)
+        row.addStretch(1)
+        container = QWidget()
+        container.setLayout(row)
+        return container
+
+    def clear(self) -> None:
+        self._project_run_id = None
+        self._nodes = []
+        self._connections = []
+        self._steps_by_id = {}
+        self._receipt_steps_by_id = {}
+        self._render()
+
+    def set_run(
+        self,
+        project_run_id: str | None,
+        snapshot: dict[str, Any] | None,
+        steps: list[dict[str, Any]],
+        receipt_steps: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._project_run_id = project_run_id
+        definition: dict[str, Any] = {}
+        if isinstance(snapshot, dict):
+            inner = snapshot.get("project_definition")
+            if isinstance(inner, dict):
+                definition = inner
+        nodes_raw = definition.get("nodes") or []
+        connections_raw = definition.get("connections") or []
+        if not isinstance(nodes_raw, list):
+            nodes_raw = []
+        if not isinstance(connections_raw, list):
+            connections_raw = []
+        self._nodes = [n for n in nodes_raw if isinstance(n, dict)]
+        self._connections = [c for c in connections_raw if isinstance(c, dict)]
+        self._steps_by_id = {str(s.get("node_id") or ""): s for s in steps if isinstance(s, dict)}
+        self._receipt_steps_by_id = {
+            str(r.get("node_id") or ""): r for r in (receipt_steps or []) if isinstance(r, dict)
+        }
+        self._render()
+
+    def select_node(self, node_id: str) -> None:
+        """Programmatically highlight a node card (does not emit a signal)."""
+        for child in self.cards_container.findChildren(ProjectRunNodeCard):
+            child.set_selected(child.node_id == node_id)
+
+    def _render(self) -> None:
+        # Clear previous cards and their edges.
+        while self.cards_container_layout.count():
+            item = self.cards_container_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        if not self._nodes:
+            self.empty.setVisible(True)
+            self.body.setVisible(False)
+            return
+        self.empty.setVisible(False)
+        self.body.setVisible(True)
+
+        node_ids = [str(n.get("node_id") or "") for n in self._nodes]
+        predecessors: dict[str, list[str]] = {nid: [] for nid in node_ids}
+        for conn in self._connections:
+            from_node = str(conn.get("from_node") or "")
+            to_node = str(conn.get("to_node") or "")
+            if to_node in predecessors:
+                predecessors[to_node].append(from_node)
+        levels = _level_for_nodes(node_ids, predecessors)
+        # Group nodes by level.
+        by_level: dict[int, list[str]] = {}
+        for nid in node_ids:
+            by_level.setdefault(levels.get(nid, 0), []).append(nid)
+        max_level = max(by_level.keys()) if by_level else 0
+
+        # Reserve a column for each level; rows = node position within the column.
+        positions: dict[str, tuple[int, int]] = {}
+        for level in range(max_level + 1):
+            members = sorted(by_level.get(level, []))
+            for row, nid in enumerate(members):
+                positions[nid] = (level, row)
+
+        # Determine failed nodes so blocked descendants can dim + edges can dash.
+        # (status is read directly from per-step dicts when computing edge styles
+        # below; no separate index is needed here.)
+
+        # Build cards first, then compute edge overlay positions.
+        for nid in node_ids:
+            level, row = positions[nid]
+            node_def = next((n for n in self._nodes if str(n.get("node_id") or "") == nid), {})
+            step = self._steps_by_id.get(nid, {})
+            card = ProjectRunNodeCard(nid, node_def, step, self._receipt_steps_by_id.get(nid))
+            card.clicked.connect(self._on_card_clicked)
+            self.cards_container_layout.addWidget(card, row, level)
+
+        # Edges: draw after layout so cards have a position. We use a simple overlay
+        # label per column pair to keep the implementation free of custom paint.
+        for conn in self._connections:
+            from_node = str(conn.get("from_node") or "")
+            to_node = str(conn.get("to_node") or "")
+            if from_node not in positions or to_node not in positions:
+                continue
+            from_pos = positions[from_node]
+            to_pos = positions[to_node]
+            from_step = self._steps_by_id.get(from_node, {})
+            to_step = self._steps_by_id.get(to_node, {})
+            dashed = (
+                str(from_step.get("status") or "").casefold() == "failed"
+                or str(to_step.get("status") or "").casefold() == "blocked"
+            )
+            edge = ProjectRunEdgeArrow(from_pos, to_pos, dashed=dashed)
+            self.cards_container_layout.addWidget(edge, 0, 0, max_level + 1, max_level + 1)
+
+    def _on_card_clicked(self, node_id: str) -> None:
+        self.select_node(node_id)
+        self.node_selected.emit(node_id)
+
+
+class ProjectRunNodeCard(QFrame):
+    """Compact node card: icon + node_id + task name + duration/worker + retry badge + error."""
+
+    clicked = Signal(str)
+
+    def __init__(
+        self,
+        node_id: str,
+        node_def: dict[str, Any],
+        step: dict[str, Any],
+        receipt_step: dict[str, Any] | None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.node_id = node_id
+        self.setObjectName("pipelineNodeCard")
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumWidth(150)
+        self.setMaximumWidth(220)
+
+        status = str(step.get("status") or "queued").casefold()
+        attempts: list[dict[str, Any]] = []
+        if isinstance(receipt_step, dict):
+            raw = receipt_step.get("task_runs") or []
+            if isinstance(raw, list):
+                attempts = [item for item in raw if isinstance(item, dict)]
+        attempts = sorted(attempts, key=lambda item: int(item.get("step_attempt") or 0))
+        attempt_count = int(step.get("attempt_count") or len(attempts) or 1)
+        error_code = str(step.get("error_code") or "").strip()
+
+        worker = str(step.get("worker_override") or "").strip()
+        if not worker and attempts:
+            worker = str(attempts[-1].get("worker_override") or "").strip()
+        worker = worker or "—"
+
+        duration = _format_duration(step.get("started_at"), step.get("completed_at"))
+        task_label = str(node_def.get("task_id") or step.get("task_id") or "")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(2)
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        status_icon = QLabel()
+        status_icon.setPixmap(icon(_pipeline_icon_name(status), "default").pixmap(14, 14))
+        header.addWidget(status_icon)
+        node_label = QLabel(node_id)
+        node_label.setObjectName("pipelineNodeId")
+        apply_type(node_label, "body.strong")
+        header.addWidget(node_label, 1)
+        if attempt_count > 1:
+            badge = QLabel(f"retry {attempt_count - 1}")
+            apply_type(badge, "caption")
+            badge.setObjectName("pipelineRetryBadge")
+            header.addWidget(badge)
+        layout.addLayout(header)
+
+        task_name = QLabel(task_label)
+        task_name.setObjectName("mutedText")
+        task_name.setWordWrap(True)
+        apply_type(task_name, "caption")
+        layout.addWidget(task_name)
+
+        meta = QLabel(f"{duration} · {worker}")
+        meta.setObjectName("mutedText")
+        apply_type(meta, "caption")
+        layout.addWidget(meta)
+
+        if status == "failed" and error_code:
+            err_label = QLabel(_humanize_error(error_code))
+            apply_type(err_label, "caption")
+            err_label.setWordWrap(True)
+            err_label.setObjectName("pipelineErrorCode")
+            layout.addWidget(err_label)
+
+        # Visual rules: status tint (color + dashed border) per design doc §5.
+        color = _PIPELINE_STATUS_COLORS.get(status, COLORS["text.muted"])
+        self.setProperty("pipelineState", status)
+        self.setProperty("pipelineColor", color)
+        if status == "blocked":
+            # "Blocked" reads as "did not run", distinct from "Failed": dimmed +
+            # dashed border.
+            self.setStyleSheet(
+                f'QFrame#pipelineNodeCard[pipelineState="blocked"]'
+                f"{{ border: 1px dashed {COLORS['text.muted']}; background: {COLORS['bg.surface']}; }}"
+            )
+        else:
+            self.setStyleSheet(
+                f'QFrame#pipelineNodeCard[pipelineState="{status}"]'
+                f"{{ border: 1px solid {color}; background: {COLORS['bg.surface']}; }}"
+            )
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt signature)
+        self.clicked.emit(self.node_id)
+        super().mousePressEvent(event)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("pipelineSelected", "true" if selected else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+def _pipeline_icon_name(status: str) -> str:
+    return {
+        "completed": "check-circle",
+        "failed": "alert-triangle",
+        "running": "activity",
+        "blocked": "x-circle",
+        "awaiting_approval": "info",
+        "cancelled": "x-circle",
+        "queued": "dot",
+        "accepted": "dot",
+    }.get(status, "dot")
+
+
+class ProjectRunEdgeArrow(QWidget):
+    """Lightweight edge between two grid cells. Draws a dashed line if requested.
+
+    Implemented as a transparent overlay widget that paints a polyline using the
+    relative coordinates of the two grid cells it is placed over. The pipeline
+    view positions the edge across all rows/columns so its geometry is anchored
+    to the cards beneath it.
+    """
+
+    def __init__(
+        self,
+        from_pos: tuple[int, int],
+        to_pos: tuple[int, int],
+        *,
+        dashed: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.from_pos = from_pos
+        self.to_pos = to_pos
+        self.dashed = dashed
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet("background: transparent;")
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt signature)
+        if self.from_pos[0] >= self.to_pos[0]:
+            # Only horizontal-from-left-to-right edges are supported; skip the rest.
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = QColor(COLORS["state.danger"] if self.dashed else COLORS["text.muted"])
+        pen = QPen(color)
+        pen.setWidth(1)
+        if self.dashed:
+            pen.setStyle(Qt.DashLine)
+        painter.setPen(pen)
+        from_level, _ = self.from_pos
+        to_level, _ = self.to_pos
+        if to_level - from_level >= 1:
+            x1 = (from_level + 1) * 200
+            x2 = (to_level) * 200
+            mid_y = self.height() / 2
+            painter.drawLine(x1, mid_y, x2, mid_y)
+            arrow = QPolygonF()
+            arrow.append(QPointF(x2, mid_y - 4))
+            arrow.append(QPointF(x2 + 6, mid_y))
+            arrow.append(QPointF(x2, mid_y + 4))
+            painter.drawPolygon(arrow)
+        painter.end()
+
+
+class ProjectRunTimelineView(QWidget):
+    """Horizontal time-bar view described in design doc §5 (Timeline view).
+
+    Each attempt becomes its own bar; retries stack as separate bars on the
+    same row. Fan-outs read as parallel rows.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._project_run_id: str | None = None
+        self._steps: list[dict[str, Any]] = []
+        self._receipt_steps: list[dict[str, Any]] = []
+        self._nodes_by_id: dict[str, dict[str, Any]] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.canvas = ProjectRunTimelineCanvas()
+        layout.addWidget(self.canvas, 1)
+        self.summary = QLabel("")
+        self.summary.setObjectName("mutedText")
+        self.summary.setWordWrap(True)
+        apply_type(self.summary, "caption")
+        layout.addWidget(self.summary)
+
+        self.empty = EmptyState(
+            "Timeline unavailable",
+            "Select a Project Run to see its per-step timing.",
+            action_text="",
+        )
+        self.empty.setVisible(False)
+        layout.addWidget(self.empty)
+
+    def clear(self) -> None:
+        self._project_run_id = None
+        self._steps = []
+        self._receipt_steps = []
+        self._nodes_by_id = {}
+        self._render()
+
+    def set_run(
+        self,
+        project_run_id: str | None,
+        steps: list[dict[str, Any]],
+        receipt_steps: list[dict[str, Any]] | None,
+    ) -> None:
+        self._project_run_id = project_run_id
+        self._steps = [s for s in steps if isinstance(s, dict)]
+        self._receipt_steps = [r for r in (receipt_steps or []) if isinstance(r, dict)]
+        self._render()
+
+    def _render(self) -> None:
+        if not self._steps:
+            self.empty.setVisible(True)
+            self.canvas.setVisible(False)
+            self.summary.setVisible(False)
+            return
+        self.empty.setVisible(False)
+        self.canvas.setVisible(True)
+        self.summary.setVisible(True)
+
+        rows: list[dict[str, Any]] = []
+        earliest: datetime | None = None
+        latest: datetime | None = None
+        receipt_by_node = {str(r.get("node_id") or ""): r for r in self._receipt_steps if isinstance(r, dict)}
+        for step in self._steps:
+            node_id = str(step.get("node_id") or "")
+            status = str(step.get("status") or "").casefold()
+            attempts: list[dict[str, Any]] = []
+            receipt = receipt_by_node.get(node_id)
+            if isinstance(receipt, dict):
+                raw = receipt.get("task_runs") or []
+                if isinstance(raw, list):
+                    attempts = [item for item in raw if isinstance(item, dict)]
+            attempts = sorted(attempts, key=lambda item: int(item.get("step_attempt") or 0))
+            for attempt in attempts:
+                start = _parse_iso(attempt.get("created_at"))
+                end = _parse_iso(attempt.get("completed_at"))
+                rows.append(
+                    {
+                        "node_id": node_id,
+                        "step_attempt": int(attempt.get("step_attempt") or 0),
+                        "status": str(attempt.get("status") or status).casefold(),
+                        "worker": str(attempt.get("worker_override") or "").strip(),
+                        "started_at": attempt.get("created_at"),
+                        "completed_at": attempt.get("completed_at"),
+                        "start": start,
+                        "end": end,
+                    }
+                )
+                if start and (earliest is None or start < earliest):
+                    earliest = start
+                if end and (latest is None or end > latest):
+                    latest = end
+            # Step rows with no receipt attempt still render one bar from step times.
+            if not attempts:
+                start = _parse_iso(step.get("started_at"))
+                end = _parse_iso(step.get("completed_at"))
+                rows.append(
+                    {
+                        "node_id": node_id,
+                        "step_attempt": 0,
+                        "status": status,
+                        "worker": str(step.get("worker_override") or "").strip(),
+                        "started_at": step.get("started_at"),
+                        "completed_at": step.get("completed_at"),
+                        "start": start,
+                        "end": end,
+                    }
+                )
+                if start and (earliest is None or start < earliest):
+                    earliest = start
+                if end and (latest is None or end > latest):
+                    latest = end
+
+        rows.sort(key=lambda row: (row["start"] or earliest or datetime.min, row["step_attempt"]))
+        self.canvas.set_rows(rows, earliest, latest)
+        if not earliest:
+            self.summary.setText("No timing information recorded yet.")
+            return
+        total_seconds = max(0, int((latest - earliest).total_seconds())) if latest else 0
+        minutes, seconds = divmod(total_seconds, 60)
+        self.summary.setText(
+            f"Window: {_format_duration(earliest.isoformat(), latest.isoformat()) if latest else '—'} "
+            f"({minutes}m {seconds}s) across {len({row['node_id'] for row in rows})} node(s)."
+        )
+
+
+class ProjectRunTimelineCanvas(QWidget):
+    """Draws one bar per attempt; stacked rows keep fan-outs readable."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.rows: list[dict[str, Any]] = []
+        self.earliest: datetime | None = None
+        self.latest: datetime | None = None
+        self.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setStyleSheet("background: transparent;")
+
+    def set_rows(
+        self,
+        rows: list[dict[str, Any]],
+        earliest: datetime | None,
+        latest: datetime | None,
+    ) -> None:
+        self.rows = rows
+        self.earliest = earliest
+        self.latest = latest
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt signature)
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if not self.rows or not self.earliest:
+            painter.setPen(QColor(COLORS["text.muted"]))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Waiting for timing data.")
+            return
+
+        # One row per (node, attempt) pair, deduped by index so retries stack.
+        ordered = self.rows
+        row_index: dict[tuple[str, int], int] = {}
+        for row in ordered:
+            key = (row["node_id"], row["step_attempt"])
+            row_index.setdefault(key, len(row_index))
+        total_rows = max(len(row_index), 1)
+        margin_left = 90
+        margin_right = 12
+        margin_top = 8
+        margin_bottom = 28
+        chart_width = max(60, self.width() - margin_left - margin_right)
+        chart_height = max(40, self.height() - margin_top - margin_bottom)
+        row_height = max(8, chart_height // max(total_rows, 1))
+        # X scale: seconds from earliest.
+        total_seconds = max(1.0, (self.latest - self.earliest).total_seconds()) if self.latest else 1.0
+
+        def x_for(moment: datetime) -> float:
+            offset = (moment - self.earliest).total_seconds()
+            return margin_left + (offset / total_seconds) * chart_width
+
+        # Axes.
+        axis_pen = QPen(QColor(COLORS["text.muted"]))
+        axis_pen.setWidth(1)
+        painter.setPen(axis_pen)
+        painter.drawLine(margin_left, margin_top + chart_height, self.width() - margin_right, margin_top + chart_height)
+        if self.latest:
+            for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+                moment = self.earliest + (self.latest - self.earliest) * fraction
+                painter.drawLine(
+                    margin_left + fraction * chart_width,
+                    margin_top + chart_height,
+                    margin_left + fraction * chart_width,
+                    margin_top + chart_height + 4,
+                )
+                painter.drawText(
+                    int(margin_left + fraction * chart_width - 30),
+                    int(margin_top + chart_height + 18),
+                    60,
+                    14,
+                    Qt.AlignCenter,
+                    moment.strftime("%H:%M:%S"),
+                )
+
+        # Bars.
+        for row in ordered:
+            row_y = margin_top + row_index[(row["node_id"], row["step_attempt"])] * row_height
+            status = row["status"] or "queued"
+            color = QColor(_PIPELINE_STATUS_COLORS.get(status, COLORS["text.muted"]))
+            label_color = QColor(COLORS["text.primary"])
+            muted_color = QColor(COLORS["text.muted"])
+            if row["start"]:
+                start_x = x_for(row["start"])
+            else:
+                start_x = margin_left
+            if row["end"]:
+                end_x = max(start_x + 4, x_for(row["end"]))
+            elif row["start"] and self.latest:
+                # In-progress: extend to "now".
+                end_x = max(start_x + 4, x_for(self.latest))
+            else:
+                end_x = start_x + 4
+            fill = QColor(color)
+            fill.setAlpha(160 if status == "blocked" else 220)
+            painter.setBrush(fill)
+            painter.setPen(Qt.NoPen)
+            painter.drawRect(int(start_x), int(row_y + 2), int(end_x - start_x), int(row_height - 4))
+            # Node label on the left.
+            painter.setPen(QColor(label_color))
+            painter.drawText(4, int(row_y + row_height / 2 + 5), f"{row['node_id']} #{row['step_attempt']}")
+            # Worker label on the right.
+            if row["worker"]:
+                painter.setPen(QColor(muted_color))
+                painter.drawText(int(end_x + 4), int(row_y + row_height / 2 + 5), row["worker"])
+        painter.end()

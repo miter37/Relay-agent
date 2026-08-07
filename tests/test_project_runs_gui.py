@@ -1,13 +1,16 @@
-"""GUI regressions for the Project Runs screen (Phases 1+2).
+"""GUI regressions for the Project Runs screen (Phases 1-4).
 
 Pins the screen behaviors called out in
-``docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md`` sections 4–9:
+``docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md`` sections 4-9:
 list grouping, verdict header, steps table with attempt counts, final
 artifact strip, approve/reject buttons for awaiting runs, MainWindow
 routing/polling rules (no polling of terminal runs, live Run selected => 2s
-detail refresh, list refresh every ~5s while the screen is open), and the
+detail refresh, list refresh every ~5s while the screen is open), the
 Phase 2 node inspector (attempt history, active Task Run summary, resolved
-inputs as "A1 <- pick(result)", produced Artifacts, and node-level actions).
+inputs as "A1 <- pick(result)", produced Artifacts, and node-level actions),
+Phase 3 pipeline (topological layout, dimmed blocked descendants, dashed
+failed edges, click-through to inspector) and Phase 4 timeline (one bar per
+attempt with separate retry bars and parallel fan-outs).
 """
 
 from __future__ import annotations
@@ -28,8 +31,13 @@ except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
 from relay.gui.project_runs import (
     ProjectRunDetailView,
     ProjectRunInspectorView,
+    ProjectRunNodeCard,
+    ProjectRunPipelineView,
     ProjectRunsView,
+    ProjectRunTimelineCanvas,
+    ProjectRunTimelineView,
     _humanize_error,
+    _level_for_nodes,
     _verdict,
 )
 
@@ -828,6 +836,183 @@ class ProjectRunInspectorMainWindowRoutingTests(unittest.TestCase):
         finally:
             window.close()
             tmp.cleanup()
+
+
+def _linear_snapshot(nodes: list[dict], connections: list[dict]) -> dict:
+    return {
+        "project_definition": {"name": "Pipeline", "nodes": nodes, "connections": connections, "output_selection": []},
+        "task_snapshots": {},
+        "external_inputs": [],
+    }
+
+
+def _node(node_id: str, task_id: str) -> dict:
+    return {"node_id": node_id, "task_id": task_id}
+
+
+def _connection(from_node: str, from_role: str, to_node: str, to_alias: str = "A1") -> dict:
+    return {"from_node": from_node, "from_role": from_role, "to_node": to_node, "to_alias": to_alias}
+
+
+class ProjectRunPipelineWidgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_level_for_nodes_longest_path(self):
+        nodes = [_node("a", "t-a"), _node("b", "t-b"), _node("c", "t-c"), _node("d", "t-d")]
+        connections = [
+            _connection("a", "out", "b"),
+            _connection("a", "out", "c"),
+            _connection("b", "out", "d"),
+        ]
+        predecessors: dict[str, list[str]] = {n["node_id"]: [] for n in nodes}
+        for c in connections:
+            predecessors[c["to_node"]].append(c["from_node"])
+        levels = _level_for_nodes([n["node_id"] for n in nodes], predecessors)
+        # a is a root (0); b and c are depth 1; d is depth 2.
+        self.assertEqual(levels["a"], 0)
+        self.assertEqual(levels["b"], 1)
+        self.assertEqual(levels["c"], 1)
+        self.assertEqual(levels["d"], 2)
+
+    def test_pipeline_view_renders_one_card_per_node(self):
+        view = ProjectRunPipelineView()
+        nodes = [
+            _node("pick", "t-pick"),
+            _node("image", "t-image"),
+            _node("page", "t-page"),
+        ]
+        connections = [
+            _connection("pick", "result", "image"),
+            _connection("pick", "result", "page"),
+        ]
+        snapshot = _linear_snapshot(nodes, connections)
+        steps = [
+            _step_row("pick", status="completed"),
+            _step_row("image", status="failed", error_code="ALL_WORKERS_FAILED"),
+            _step_row("page", status="blocked"),
+        ]
+        view.set_run("pr-1", snapshot, steps)
+
+        cards = view.cards_container.findChildren(ProjectRunNodeCard)
+        self.assertEqual(len(cards), 3)
+        ids = {card.node_id for card in cards}
+        self.assertEqual(ids, {"pick", "image", "page"})
+        # The blocked descendant sits in the same row range; verify the styling
+        # flag is set on its properties for QSS.
+        blocked = next(card for card in cards if card.node_id == "page")
+        self.assertEqual(blocked.property("pipelineState"), "blocked")
+        failed = next(card for card in cards if card.node_id == "image")
+        self.assertEqual(failed.property("pipelineState"), "failed")
+
+    def test_pipeline_node_click_emits_signal(self):
+        view = ProjectRunPipelineView()
+        snapshot = _linear_snapshot(
+            [_node("a", "t-a"), _node("b", "t-b")],
+            [_connection("a", "out", "b")],
+        )
+        view.set_run("pr-1", snapshot, [_step_row("a"), _step_row("b")])
+
+        selected: list[str] = []
+        view.node_selected.connect(selected.append)
+        cards = view.cards_container.findChildren(ProjectRunNodeCard)
+        # Pick the b card by node_id rather than assuming layout order.
+        b_card = next(card for card in cards if card.node_id == "b")
+        b_card.clicked.emit("b")
+        self.assertEqual(selected, ["b"])
+        # select_node marks the matching card without emitting.
+        view.select_node("a")
+        self.assertTrue(a_card := next(card for card in cards if card.node_id == "a"))
+        self.assertTrue(a_card.property("pipelineSelected") == "true" or a_card.property("pipelineSelected") is True)
+
+
+class ProjectRunTimelineWidgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_timeline_groups_attempts_per_node(self):
+        view = ProjectRunTimelineView()
+        steps = [
+            _step_row("pick", status="completed"),
+            _step_row("image", status="failed"),
+        ]
+        receipt_steps = [
+            {
+                "node_id": "image",
+                "task_runs": [
+                    {
+                        "step_attempt": 1,
+                        "status": "failed",
+                        "worker_override": "claude",
+                        "created_at": "2026-08-07T08:00:00+00:00",
+                        "completed_at": "2026-08-07T08:01:00+00:00",
+                    },
+                    {
+                        "step_attempt": 2,
+                        "status": "completed",
+                        "worker_override": "codex",
+                        "created_at": "2026-08-07T08:02:00+00:00",
+                        "completed_at": "2026-08-07T08:03:00+00:00",
+                    },
+                ],
+            }
+        ]
+        view.set_run("pr-1", steps, receipt_steps)
+        self.assertFalse(view.empty.isVisibleTo(view))
+        self.assertEqual(len(view.canvas.rows), 3)  # pick (1) + image attempts (2)
+        # Retries become distinct rows keyed by (node_id, step_attempt).
+        keys = {(row["node_id"], row["step_attempt"]) for row in view.canvas.rows}
+        self.assertIn(("image", 1), keys)
+        self.assertIn(("image", 2), keys)
+        self.assertIn(("pick", 0), keys)
+        # Summary mentions the window length and node count.
+        self.assertIn("node", view.summary.text())
+
+    def test_timeline_empty_state(self):
+        view = ProjectRunTimelineView()
+        view.set_run("pr-1", [], [])
+        self.assertTrue(view.empty.isVisibleTo(view))
+        self.assertFalse(view.canvas.isVisible())
+
+    def test_timeline_canvas_paints_with_no_timing_data(self):
+        canvas = ProjectRunTimelineCanvas()
+        canvas.set_rows([], None, None)
+        canvas.update()
+        # Smoke: the canvas must accept paint without raising; geometry stays sane.
+        self.assertEqual(canvas.rows, [])
+
+
+class ProjectRunDetailTabsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_detail_view_has_pipeline_timeline_and_steps_tabs(self):
+        view = ProjectRunDetailView()
+        self.assertEqual(view.run_tabs.count(), 3)
+        labels = [view.run_tabs.tabText(i) for i in range(view.run_tabs.count())]
+        self.assertEqual(labels, ["Pipeline", "Timeline", "Steps"])
+
+    def test_pipeline_node_selection_syncs_steps_table(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="running")
+        run["steps"] = [
+            _step_row("a", status="completed"),
+            _step_row("b", status="running"),
+        ]
+        view.set_run(run)
+        # Trigger pipeline node selection via the pipeline view signal.
+        view.pipeline_view.node_selected.emit("b")
+        selected = view.steps_table.selectedItems()
+        self.assertEqual(len(selected) >= 1, True)
+        self.assertEqual(view.steps_table.item(selected[0].row(), 0).text(), "b")
+
+    def test_run_tabs_hide_when_no_run_selected(self):
+        view = ProjectRunDetailView()
+        view.set_run({})
+        self.assertTrue(view.run_tabs.isHidden())
 
 
 if __name__ == "__main__":

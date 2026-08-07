@@ -1,6 +1,4 @@
-- [ ] Build the Project Runs screen per `docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md`; backend gaps and GUI Phases 1+2 (master-detail, list grouping, verdict, steps table, final artifact strip, retry/reexecute/cancel/open-output/approve/reject, node inspector) shipped; remaining phases 3–4 (pipeline view, timeline view) still to come.
-- [ ] GUI Project Runs screen design doc §9 phase 3 (pipeline view: level layout from snapshot topology, node cards with status + retry badge + error, dimmed/dashed blocked nodes, dashed failed→blocked edges).
-- [ ] GUI Project Runs screen design doc §9 phase 4 (timeline view: per-node attempt bars using step started/completed plus receipt task_runs).
+- [ ] Build the Project Runs screen per `docs/Relay_GUI_Project_Runs_Screen_Design_v1.0.md`; all four GUI phases (master-detail list + verdict + steps table + final artifact strip; node inspector; pipeline view; timeline view) and the backend §8 fixes are now shipped on `feat/phase0-domain-compat`.
 - [ ] Approve/reject UI for `awaiting_approval` Project Runs shipped; edit-with-files (`approve ... /edit`) deferred.
 - [ ] Backend `resolve_step_inputs` now tags each resolved entry with `from_node`/`from_role` so receipt `resolved_inputs` can render "A1 <- pick(result)" in the inspector; legacy resolved entries written before this change still need a backfill pass (or the GUI keeps reading `input_manifest_json` as a fallback — current inspector already does this).
 - [ ] Review and merge Draft PR #14 (`feat/g5-custom-agent-apps`) after confirming the final G5 scope.
