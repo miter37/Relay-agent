@@ -29,7 +29,7 @@ from .design_tokens import METRICS, SPACING
 from .design_typography import apply_type
 from .design_widgets import IconButton, NavButton
 from .profiles import ProfilesView
-from .project_runs import ProjectRunsView
+from .project_runs import ProjectRunsView, _artifact_kind
 from .projects import ProjectRunMonitorDialog, ProjectsView
 from .routines import RoutinesView
 from .rpc_client import GuiRpcClient
@@ -282,6 +282,7 @@ class MainWindow(QMainWindow):
         self.project_runs_view.filters_changed.connect(self._on_project_runs_filter_changed)
         self.project_runs_view.action_requested.connect(self._submit_project_run_action_v2)
         self.project_runs_view.open_output_requested.connect(self._open_project_run_artifact)
+        self.project_runs_view.artifact_preview_requested.connect(self._preview_project_run_artifact)
         self.project_runs_view.approve_requested.connect(self._approve_project_run_checkpoint)
         self.project_runs_view.reject_requested.connect(self._reject_project_run_checkpoint)
         self.project_runs_view.open_run_logs_requested.connect(self._open_project_run_logs)
@@ -576,6 +577,7 @@ class MainWindow(QMainWindow):
         if self.current_mode != "normal":
             return
         self.selected_project_run_id = project_run_id
+        self.project_runs_view.select_run(project_run_id)
         self._request(("project_run_v2_detail", project_run_id), f"/v1/project-runs/{project_run_id}")
         self._request(("project_run_v2_steps", project_run_id), f"/v1/project-runs/{project_run_id}/steps")
         self._request(("project_run_v2_approvals", project_run_id), f"/v1/project-runs/{project_run_id}/approvals")
@@ -681,6 +683,15 @@ class MainWindow(QMainWindow):
         if self.current_mode != "normal":
             return
         self._request(("project_run_artifact", artifact_uid), f"/v1/artifacts/{artifact_uid}")
+
+    def _preview_project_run_artifact(self, artifact_uid: str) -> None:
+        if self.current_mode != "normal" or not self.selected_project_run_id or not artifact_uid:
+            return
+        encoded_uid = quote(str(artifact_uid), safe="")
+        self._request(
+            ("project_run_artifact_detail", self.selected_project_run_id, str(artifact_uid)),
+            f"/v1/artifacts/{encoded_uid}",
+        )
 
     def _open_project_run_logs(self, task_run_id: str) -> None:
         if self.current_mode != "normal":
@@ -923,6 +934,17 @@ class MainWindow(QMainWindow):
 
     def _submit_create_project_run(self, project_id: str) -> None:
         if self.current_mode != "normal":
+            return
+        project = self.projects_index.get(project_id) or {}
+        project_name = str(project.get("name") or project_id)
+        choice = QMessageBox.question(
+            self,
+            "Run Project?",
+            f'Start a new Project Run for "{project_name}"?',
+            QMessageBox.Cancel | QMessageBox.Yes,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
             return
         self._request_post(("project_run_create", project_id), f"/v1/projects/{project_id}/run", {})
 
@@ -1356,6 +1378,48 @@ class MainWindow(QMainWindow):
                     )
             elif isinstance(kind, tuple) and kind[0] == "task_run_files":
                 self._record_task_run_files(kind, payload if isinstance(payload, dict) else None, error or True)
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_node_detail":
+                project_run_id = str(kind[1] or "")
+                task_run_id = str(kind[2] or "")
+                if project_run_id == self.selected_project_run_id and task_run_id:
+                    self.project_runs_view.detail.cache_task_run_error(
+                        task_run_id, str(error or "Task Run detail is unavailable.")
+                    )
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_node_artifacts":
+                project_run_id = str(kind[1] or "")
+                node_id = str(kind[2] or "")
+                if project_run_id == self.selected_project_run_id and node_id:
+                    self.project_runs_view.detail.cache_node_artifact_error(
+                        node_id, str(error or "Artifact list is unavailable.")
+                    )
+            elif isinstance(kind, tuple) and kind[0] in {
+                "project_run_artifact_detail",
+                "project_run_artifact_content",
+            }:
+                project_run_id = str(kind[1] or "")
+                artifact_uid = str(kind[2] or "")
+                if project_run_id == self.selected_project_run_id and artifact_uid:
+                    self.project_runs_view.detail.artifacts_view.cache_artifact_error(
+                        artifact_uid, str(error or "Artifact preview is unavailable.")
+                    )
+            elif kind == "project_create" or (isinstance(kind, tuple) and kind[0] == "project_update"):
+                # The daemon returns a structured {"error_code", "error_message"} body
+                # even on a 4xx (see RelayDaemon.do_POST's except RelayError), so
+                # the real reason (e.g. "Task not found: <id>") is sitting in
+                # payload, not in Qt's generic reply.errorString(). Report it back
+                # into the still-open dialog rather than a one-line banner that
+                # loses every row the user typed.
+                message = (
+                    (payload or {}).get("error_message")
+                    or (payload or {}).get("error")
+                    or str(error)
+                    or ("Relay could not save this Project.")
+                )
+                if self.projects_view.editor is not None:
+                    self.projects_view.editor.report_save_error(str(message))
+                else:
+                    self.banner.setText(str(message))
+                    self.banner.show()
             else:
                 self.banner.setText("Relay could not complete that action. Please try again.")
                 self.banner.show()
@@ -1701,6 +1765,8 @@ class MainWindow(QMainWindow):
                 self.selected_project_id = project_id
                 self.projects_index[project_id] = new_project
                 self._request("projects", "/v1/projects")
+            if self.projects_view.editor is not None:
+                self.projects_view.editor.close_after_save()
             return
         if isinstance(kind, tuple) and kind[0] == "project_update":
             project_id = str(kind[1] or "")
@@ -1709,6 +1775,8 @@ class MainWindow(QMainWindow):
                 self.projects_index[project_id] = updated
                 self.selected_project_id = project_id
             self._request("projects", "/v1/projects")
+            if self.projects_view.editor is not None:
+                self.projects_view.editor.close_after_save()
             return
         if isinstance(kind, tuple) and kind[0] == "project_delete":
             project_id = str(kind[1] or "")
@@ -1858,7 +1926,8 @@ class MainWindow(QMainWindow):
         if isinstance(kind, tuple) and kind[0] == "project_run_v2_node_detail":
             project_run_id = str(kind[1] or "")
             task_run_id = str(kind[2] or "")
-            detail = (payload or {}).get("job") or (payload or {}).get("task_run") or {}
+            response = payload if isinstance(payload, dict) else {}
+            detail = response.get("job") or response.get("task_run") or response
             if project_run_id and task_run_id and project_run_id == self.selected_project_run_id:
                 self.project_runs_view.detail.cache_task_run_detail(task_run_id, detail)
             return
@@ -1868,6 +1937,28 @@ class MainWindow(QMainWindow):
             artifacts = (payload or {}).get("artifacts") or []
             if project_run_id and node_id and project_run_id == self.selected_project_run_id:
                 self.project_runs_view.detail.cache_node_artifacts(node_id, artifacts)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_artifact_detail":
+            project_run_id = str(kind[1] or "")
+            artifact_uid = str(kind[2] or "")
+            artifact = (payload or {}).get("artifact") or payload or {}
+            if project_run_id == self.selected_project_run_id and artifact_uid and isinstance(artifact, dict):
+                view = self.project_runs_view.detail.artifacts_view
+                view.cache_artifact_detail(artifact_uid, artifact)
+                if _artifact_kind(artifact) not in {"image", "pdf", "unsupported"}:
+                    encoded_uid = quote(artifact_uid, safe="")
+                    self._request(
+                        ("project_run_artifact_content", project_run_id, artifact_uid),
+                        f"/v1/artifacts/{encoded_uid}/content?max_bytes=262144",
+                    )
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_artifact_content":
+            project_run_id = str(kind[1] or "")
+            artifact_uid = str(kind[2] or "")
+            if project_run_id == self.selected_project_run_id and artifact_uid:
+                self.project_runs_view.detail.artifacts_view.cache_artifact_content(
+                    artifact_uid, payload if isinstance(payload, dict) else {}
+                )
             return
         if isinstance(kind, tuple) and kind[0] == "project_run_artifact":
             artifact = (payload or {}).get("artifact") or {}

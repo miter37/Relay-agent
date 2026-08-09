@@ -37,7 +37,20 @@ STANDARD_JSON_SCHEMA = {
                     "description": {"type": "string"},
                     "encoding": {"type": "string", "enum": ["utf-8", "base64"]},
                     "content": {"type": "string"},
-                    "role": {"type": "string", "pattern": ARTIFACT_ROLE_PATTERN.pattern},
+                    # Optional by contract: an Artifact with no declared role gets the
+                    # default one. Spelled out here because a Worker that invents a
+                    # role breaks Project connections, which resolve an input by an
+                    # exact (source node, role) match.
+                    "role": {
+                        "type": "string",
+                        "pattern": ARTIFACT_ROLE_PATTERN.pattern,
+                        "description": (
+                            "Optional label for what this file is for. Omit it (or set it to null) "
+                            "unless the request explicitly assigns a role; do not invent one. "
+                            f"These roles are reserved by Relay and must never be declared: "
+                            f"{', '.join(sorted(RESERVED_ARTIFACT_ROLES))}."
+                        ),
+                    },
                 },
             },
         },

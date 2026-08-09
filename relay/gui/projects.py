@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -237,14 +239,6 @@ class ProjectDetailView(QWidget):
         if self.project_id:
             self.delete_requested.emit(self.project_id)
 
-    def _on_delete(self):
-        if self.project_id:
-            self.delete_requested.emit(self.project_id)
-
-    def _on_delete(self):
-        if self.project_id:
-            self.delete_requested.emit(self.project_id)
-
 
 class ProjectEditorDialog(QDialog):
     accepted_payload = Signal(dict)
@@ -259,29 +253,56 @@ class ProjectEditorDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Edit Project" if project else "New Project")
-        self.resize(820, 640)
-        self._task_choices = [
-            f"{task.get('name')} ({task.get('task_id')})" for task in (available_tasks or []) if task.get("task_id")
-        ]
-        self._task_id_by_label = {
-            f"{task.get('name')} ({task.get('task_id')})": str(task.get("task_id"))
-            for task in (available_tasks or [])
-            if task.get("task_id")
-        }
+        self.resize(1040, 780)
+        # (task_id, name) pairs, not a free-text label the user has to retype: the
+        # Task column below is a picker built from this, never hand-typed.
+        self._task_options = sorted(
+            (
+                (str(task.get("task_id")), str(task.get("name") or task.get("task_id")))
+                for task in (available_tasks or [])
+                if task.get("task_id")
+            ),
+            key=lambda pair: pair[1].casefold(),
+        )
         self._delivery_roots = delivery_roots or []
-        root = QVBoxLayout(self)
+        self._saving = False
+
+        dialog_layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        body = QWidget()
+        root = QVBoxLayout(body)
+
         form = QFormLayout()
         self.name_edit = QLineEdit()
         form.addRow("Project name", self.name_edit)
         self.description_edit = QLineEdit()
         form.addRow("Description", self.description_edit)
         root.addLayout(form)
+
+        if not self._task_options:
+            no_tasks_hint = QLabel(
+                "No Tasks are registered yet. Register a Task first (sidebar &rarr; Tasks) - "
+                "a Project node can only run an existing Task."
+            )
+            no_tasks_hint.setWordWrap(True)
+            no_tasks_hint.setObjectName("errorText")
+            root.addWidget(no_tasks_hint)
+
         root.addWidget(QLabel("<b>Nodes</b>"))
         self.nodes_table = QTableWidget(0, 3)
         self.nodes_table.setHorizontalHeaderLabels(["Node ID", "Task", "Checkpoint (JSON)"])
-        self.nodes_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        nodes_header = self.nodes_table.horizontalHeader()
+        nodes_header.setSectionResizeMode(0, QHeaderView.Interactive)
+        nodes_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        nodes_header.setSectionResizeMode(2, QHeaderView.Interactive)
+        self.nodes_table.setColumnWidth(0, 180)
+        self.nodes_table.setColumnWidth(2, 220)
         self.nodes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        root.addWidget(self.nodes_table, 2)
+        self.nodes_table.setMinimumHeight(140)
+        self.nodes_table.itemChanged.connect(lambda item: item.setToolTip(item.text()))
+        root.addWidget(self.nodes_table)
         node_buttons = QHBoxLayout()
         self.add_node_button = IconButton("plus", "Add a node")
         self.add_node_button.clicked.connect(self._on_add_node)
@@ -291,12 +312,30 @@ class ProjectEditorDialog(QDialog):
         node_buttons.addWidget(self.remove_node_button)
         node_buttons.addStretch(1)
         root.addLayout(node_buttons)
+
         root.addWidget(QLabel("<b>Connections</b> (from node, role -> to node, alias A1/A2/...)"))
+        conn_hint = QLabel(
+            "Role is the Artifact role the source node's Task declares (its own output, "
+            "or the reserved name <code>result</code>). Alias must look like A1, A2, ..."
+        )
+        conn_hint.setWordWrap(True)
+        conn_hint.setObjectName("mutedText")
+        apply_type(conn_hint, "caption")
+        root.addWidget(conn_hint)
         self.connections_table = QTableWidget(0, 4)
         self.connections_table.setHorizontalHeaderLabels(["From node", "Role", "To node", "Alias"])
-        self.connections_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        conn_header = self.connections_table.horizontalHeader()
+        conn_header.setSectionResizeMode(0, QHeaderView.Interactive)
+        conn_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        conn_header.setSectionResizeMode(2, QHeaderView.Interactive)
+        conn_header.setSectionResizeMode(3, QHeaderView.Interactive)
+        self.connections_table.setColumnWidth(0, 180)
+        self.connections_table.setColumnWidth(2, 180)
+        self.connections_table.setColumnWidth(3, 100)
         self.connections_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        root.addWidget(self.connections_table, 2)
+        self.connections_table.setMinimumHeight(140)
+        self.connections_table.itemChanged.connect(lambda item: item.setToolTip(item.text()))
+        root.addWidget(self.connections_table)
         conn_buttons = QHBoxLayout()
         self.add_conn_button = IconButton("plus", "Add a connection")
         self.add_conn_button.clicked.connect(self._on_add_connection)
@@ -306,12 +345,18 @@ class ProjectEditorDialog(QDialog):
         conn_buttons.addWidget(self.remove_conn_button)
         conn_buttons.addStretch(1)
         root.addLayout(conn_buttons)
+
         root.addWidget(QLabel("<b>Final outputs</b> (node_id, role)"))
         self.outputs_table = QTableWidget(0, 2)
         self.outputs_table.setHorizontalHeaderLabels(["Node", "Role"])
-        self.outputs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        outputs_header = self.outputs_table.horizontalHeader()
+        outputs_header.setSectionResizeMode(0, QHeaderView.Interactive)
+        outputs_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        self.outputs_table.setColumnWidth(0, 220)
         self.outputs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        root.addWidget(self.outputs_table, 1)
+        self.outputs_table.setMinimumHeight(110)
+        self.outputs_table.itemChanged.connect(lambda item: item.setToolTip(item.text()))
+        root.addWidget(self.outputs_table)
         output_buttons = QHBoxLayout()
         self.add_output_button = IconButton("plus", "Add a final output")
         self.add_output_button.clicked.connect(self._on_add_output)
@@ -321,19 +366,46 @@ class ProjectEditorDialog(QDialog):
         output_buttons.addWidget(self.remove_output_button)
         output_buttons.addStretch(1)
         root.addLayout(output_buttons)
+        root.addStretch(1)
+
+        scroll.setWidget(body)
+        dialog_layout.addWidget(scroll, 1)
+
+        # Kept outside the scroll area on purpose: the error message and the Save/
+        # Cancel buttons must stay reachable no matter how many rows the tables
+        # above grow to, instead of being pushed off the bottom of a fixed-size
+        # dialog with nothing to scroll it into view.
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("errorText")
-        root.addWidget(self.error_label)
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        dialog_layout.addWidget(self.error_label)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+        self.save_button = self.buttons.button(QDialogButtonBox.Save)
+        self.cancel_button = self.buttons.button(QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self._on_save)
+        self.buttons.rejected.connect(self.reject)
+        dialog_layout.addWidget(self.buttons)
         if project:
             self._populate(project)
 
     def show_error(self, message):
         self.error_label.setText(message)
+
+    def set_saving(self, saving: bool) -> None:
+        """Toggle the in-flight-save state. Called by MainWindow around the POST."""
+        self._saving = saving
+        self.save_button.setEnabled(not saving)
+        self.save_button.setText("Saving..." if saving else "Save")
+        self.cancel_button.setEnabled(not saving)
+
+    def report_save_error(self, message: str) -> None:
+        """Backend rejected the save: re-open for editing, keep every typed row."""
+        self.set_saving(False)
+        self.show_error(message)
+
+    def close_after_save(self) -> None:
+        """Backend confirmed the save: only now is it safe to close the dialog."""
+        self.accept()
 
     def _populate(self, project):
         self.name_edit.setText(str(project.get("name") or ""))
@@ -349,8 +421,7 @@ class ProjectEditorDialog(QDialog):
             row = self.nodes_table.rowCount()
             self.nodes_table.insertRow(row)
             self._set_cell(self.nodes_table, row, 0, str(node.get("node_id") or ""))
-            label = self._label_for_task_id(str(node.get("task_id") or ""))
-            self._set_cell(self.nodes_table, row, 1, label)
+            self.nodes_table.setCellWidget(row, 1, self._build_task_combo(str(node.get("task_id") or "")))
             checkpoint = node.get("checkpoint") or {}
             if isinstance(checkpoint, dict) and checkpoint:
                 self._set_cell(self.nodes_table, row, 2, json.dumps(checkpoint))
@@ -362,35 +433,91 @@ class ProjectEditorDialog(QDialog):
         for connection in connections:
             row = self.connections_table.rowCount()
             self.connections_table.insertRow(row)
-            self._set_cell(self.connections_table, row, 0, str(connection.get("from_node") or ""))
-            self._set_cell(self.connections_table, row, 1, str(connection.get("from_role") or ""))
-            self._set_cell(self.connections_table, row, 2, str(connection.get("to_node") or ""))
-            self._set_cell(self.connections_table, row, 3, str(connection.get("to_alias") or ""))
+            self.connections_table.setCellWidget(row, 0, self._build_node_combo(str(connection.get("from_node") or "")))
+            self._set_cell(
+                self.connections_table,
+                row,
+                1,
+                str(connection.get("from_role") or ""),
+                tooltip="Artifact role produced by the from-node's Task.",
+            )
+            self.connections_table.setCellWidget(row, 2, self._build_node_combo(str(connection.get("to_node") or "")))
+            self._set_cell(
+                self.connections_table,
+                row,
+                3,
+                str(connection.get("to_alias") or ""),
+                tooltip="Matches ^A[1-9][0-9]*$, e.g. A1, A2.",
+            )
 
     def _populate_outputs(self, outputs):
         self.outputs_table.setRowCount(0)
         for output in outputs:
             row = self.outputs_table.rowCount()
             self.outputs_table.insertRow(row)
-            self._set_cell(self.outputs_table, row, 0, str(output.get("node_id") or ""))
-            self._set_cell(self.outputs_table, row, 1, str(output.get("role") or ""))
+            self.outputs_table.setCellWidget(row, 0, self._build_node_combo(str(output.get("node_id") or "")))
+            self._set_cell(
+                self.outputs_table,
+                row,
+                1,
+                str(output.get("role") or ""),
+                tooltip="Artifact role this final output must match.",
+            )
 
-    def _label_for_task_id(self, task_id):
-        for label, value in self._task_id_by_label.items():
-            if value == task_id:
-                return label
-        return task_id
+    def _current_node_ids(self) -> list[str]:
+        seen: list[str] = []
+        for row in range(self.nodes_table.rowCount()):
+            node_id = self._row_text(self.nodes_table, row, 0)
+            if node_id and node_id not in seen:
+                seen.append(node_id)
+        return seen
+
+    def _build_task_combo(self, selected_task_id: str = "") -> QComboBox:
+        """A picker, not a field the user has to hand-type a Task ID into."""
+        combo = QComboBox()
+        combo.setEditable(False)
+        found = False
+        for task_id, name in self._task_options:
+            combo.addItem(name, task_id)
+            combo.setItemData(combo.count() - 1, f"{name} ({task_id})", Qt.ToolTipRole)
+            if task_id == selected_task_id:
+                found = True
+        if selected_task_id and not found:
+            # The stored task_id no longer matches a registered Task (e.g. it was
+            # deleted after this Project was defined). Keep it visible and selected
+            # instead of silently swapping in an unrelated Task the next time this
+            # dialog is saved.
+            combo.insertItem(0, f"(missing Task) {selected_task_id}", selected_task_id)
+            combo.setItemData(0, f"Task {selected_task_id} is no longer registered.", Qt.ToolTipRole)
+        if selected_task_id:
+            index = combo.findData(selected_task_id)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        combo.currentIndexChanged.connect(lambda _i, c=combo: c.setToolTip(c.currentData(Qt.ToolTipRole) or ""))
+        combo.setToolTip(combo.currentData(Qt.ToolTipRole) or "")
+        return combo
+
+    def _build_node_combo(self, selected_node_id: str = "") -> QComboBox:
+        """Editable picker over the node_ids already typed in the Nodes table above,
+        so a connection/output can't silently reference a node that doesn't exist."""
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.addItems(self._current_node_ids())
+        combo.setCurrentText(selected_node_id)
+        combo.setPlaceholderText("node_id")
+        return combo
 
     @staticmethod
-    def _set_cell(table, row, column, text):
+    def _set_cell(table, row, column, text, *, tooltip: str | None = None):
         item = QTableWidgetItem(text)
+        item.setToolTip(tooltip if tooltip is not None else text)
         table.setItem(row, column, item)
 
     def _on_add_node(self):
         row = self.nodes_table.rowCount()
         self.nodes_table.insertRow(row)
-        self._set_cell(self.nodes_table, row, 0, "")
-        self._set_cell(self.nodes_table, row, 1, self._task_choices[0] if self._task_choices else "")
+        self._set_cell(self.nodes_table, row, 0, "", tooltip="Unique within this Project, e.g. research.")
+        self.nodes_table.setCellWidget(row, 1, self._build_task_combo())
         self._set_cell(self.nodes_table, row, 2, "")
 
     def _on_remove_node(self):
@@ -401,8 +528,10 @@ class ProjectEditorDialog(QDialog):
     def _on_add_connection(self):
         row = self.connections_table.rowCount()
         self.connections_table.insertRow(row)
-        for column in range(4):
-            self._set_cell(self.connections_table, row, column, "")
+        self.connections_table.setCellWidget(row, 0, self._build_node_combo())
+        self._set_cell(self.connections_table, row, 1, "", tooltip="Artifact role produced by the from-node's Task.")
+        self.connections_table.setCellWidget(row, 2, self._build_node_combo())
+        self._set_cell(self.connections_table, row, 3, "", tooltip="Matches ^A[1-9][0-9]*$, e.g. A1, A2.")
 
     def _on_remove_connection(self):
         rows = sorted({item.row() for item in self.connections_table.selectedIndexes()}, reverse=True)
@@ -412,8 +541,8 @@ class ProjectEditorDialog(QDialog):
     def _on_add_output(self):
         row = self.outputs_table.rowCount()
         self.outputs_table.insertRow(row)
-        self._set_cell(self.outputs_table, row, 0, "")
-        self._set_cell(self.outputs_table, row, 1, "")
+        self.outputs_table.setCellWidget(row, 0, self._build_node_combo())
+        self._set_cell(self.outputs_table, row, 1, "", tooltip="Artifact role this final output must match.")
 
     def _on_remove_output(self):
         rows = sorted({item.row() for item in self.outputs_table.selectedIndexes()}, reverse=True)
@@ -421,13 +550,19 @@ class ProjectEditorDialog(QDialog):
             self.outputs_table.removeRow(index)
 
     def _on_save(self):
+        if self._saving:
+            return
         try:
             payload = self.payload()
         except ValueError as exc:
             self.show_error(str(exc))
             return
+        self.show_error("")
+        self.set_saving(True)
         self.accepted_payload.emit(payload)
-        self.accept()
+        # Deliberately does not close the dialog: MainWindow calls close_after_save()
+        # only once the daemon confirms the write, and report_save_error() otherwise
+        # so the user never loses what they typed to a rejected save.
 
     def payload(self):
         name = self.name_edit.text().strip()
@@ -436,13 +571,13 @@ class ProjectEditorDialog(QDialog):
         nodes = []
         for row in range(self.nodes_table.rowCount()):
             node_id = self._row_text(self.nodes_table, row, 0)
-            task_label = self._row_text(self.nodes_table, row, 1)
+            task_combo = self.nodes_table.cellWidget(row, 1)
             checkpoint_text = self._row_text(self.nodes_table, row, 2)
             if not node_id:
                 raise ValueError(f"Node {row + 1} has an empty node_id.")
-            if not task_label:
+            task_id = task_combo.currentData() if isinstance(task_combo, QComboBox) else None
+            if not task_id:
                 raise ValueError(f"Node {row + 1} must select a Task.")
-            task_id = self._task_id_by_label.get(task_label, task_label)
             node = {"node_id": node_id, "task_id": task_id}
             checkpoint = self._parse_checkpoint(checkpoint_text)
             if checkpoint:
@@ -452,9 +587,9 @@ class ProjectEditorDialog(QDialog):
             raise ValueError("A Project must declare at least one node.")
         connections = []
         for row in range(self.connections_table.rowCount()):
-            from_node = self._row_text(self.connections_table, row, 0)
+            from_node = self._combo_text(self.connections_table, row, 0)
             from_role = self._row_text(self.connections_table, row, 1)
-            to_node = self._row_text(self.connections_table, row, 2)
+            to_node = self._combo_text(self.connections_table, row, 2)
             to_alias = self._row_text(self.connections_table, row, 3)
             if not (from_node and from_role and to_node and to_alias):
                 continue
@@ -468,7 +603,7 @@ class ProjectEditorDialog(QDialog):
             )
         output_selection = []
         for row in range(self.outputs_table.rowCount()):
-            node_id = self._row_text(self.outputs_table, row, 0)
+            node_id = self._combo_text(self.outputs_table, row, 0)
             role = self._row_text(self.outputs_table, row, 1)
             if not (node_id and role):
                 continue
@@ -486,6 +621,11 @@ class ProjectEditorDialog(QDialog):
     def _row_text(table, row, column):
         item = table.item(row, column)
         return item.text().strip() if item else ""
+
+    @staticmethod
+    def _combo_text(table, row, column):
+        combo = table.cellWidget(row, column)
+        return combo.currentText().strip() if isinstance(combo, QComboBox) else ""
 
     def _parse_checkpoint(self, text):
         text = text.strip()
@@ -505,32 +645,6 @@ class ProjectEditorDialog(QDialog):
                 if not self._delivery_root_contains(str(item.get("path") or "").strip()):
                     raise ValueError(f"Delivery path is not in allow-list: {item.get('path')}")
         return parsed
-
-    def _delivery_root_contains(self, path):
-        if not path:
-            return False
-        normalized = os.path.normcase(os.path.abspath(path))
-        for root in self._delivery_roots:
-            try:
-                normalized_root = os.path.normcase(os.path.abspath(root))
-            except (OSError, ValueError):
-                continue
-            if normalized == normalized_root or normalized.startswith(normalized_root + os.sep):
-                return True
-        return False
-
-    def _delivery_root_contains(self, path):
-        if not path:
-            return False
-        normalized = os.path.normcase(os.path.abspath(path))
-        for root in self._delivery_roots:
-            try:
-                normalized_root = os.path.normcase(os.path.abspath(root))
-            except (OSError, ValueError):
-                continue
-            if normalized == normalized_root or normalized.startswith(normalized_root + os.sep):
-                return True
-        return False
 
     def _delivery_root_contains(self, path):
         if not path:
@@ -720,6 +834,11 @@ class ProjectsView(QWidget):
             parent=self,
         )
         self.editor.accepted_payload.connect(self.project_create_submitted.emit)
+        # accepted only fires from close_after_save(); rejected fires on Cancel.
+        # Either way the dialog is done, so drop the reference MainWindow checks
+        # before delivering a save result back into it.
+        self.editor.accepted.connect(self._clear_editor)
+        self.editor.rejected.connect(self._clear_editor)
         self.editor.open()
 
     def show_edit_editor(self, project_id):
@@ -735,7 +854,12 @@ class ProjectsView(QWidget):
         self.editor.accepted_payload.connect(
             lambda payload, pid=project_id: self.project_edit_submitted.emit(pid, payload)
         )
+        self.editor.accepted.connect(self._clear_editor)
+        self.editor.rejected.connect(self._clear_editor)
         self.editor.open()
+
+    def _clear_editor(self):
+        self.editor = None
 
     def show_run_dialog(self, project_id):
         project = self.projects_index.get(project_id) or {}

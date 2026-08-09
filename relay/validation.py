@@ -91,7 +91,11 @@ def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
                 raise RelayError("SCHEMA_MISMATCH", "artifact encoding must be utf-8 or base64", True)
             if not isinstance(item.get("description", ""), str):
                 raise RelayError("SCHEMA_MISMATCH", "artifact description must be a string", True)
-        if isinstance(item, dict) and "role" in item:
+        if isinstance(item, dict) and item.get("role") is not None:
+            # An explicit null means "no role declared" and is treated exactly like
+            # an absent key: strict structured-output modes cannot omit a property,
+            # so they spell an optional field as null. normalize_declared_roles()
+            # already skips None, so the artifact falls back to the default role.
             role = item.get("role")
             if not isinstance(role, str) or not _ARTIFACT_ROLE_RE.fullmatch(role):
                 raise RelayError("SCHEMA_MISMATCH", "artifact role must be a safe non-empty identifier", True)

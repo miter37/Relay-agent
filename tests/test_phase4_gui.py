@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QMessageBox
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
@@ -19,6 +20,15 @@ from relay.gui.projects import (
     ProjectsListView,
     ProjectsView,
 )
+
+
+def _select_task(dialog, row, task_id):
+    combo = dialog.nodes_table.cellWidget(row, 1)
+    combo.setCurrentIndex(combo.findData(task_id))
+
+
+def _select_node(table, row, column, node_id):
+    table.cellWidget(row, column).setCurrentText(node_id)
 
 
 class ProjectsWidgetTests(unittest.TestCase):
@@ -88,23 +98,76 @@ class ProjectsWidgetTests(unittest.TestCase):
         dialog.name_edit.setText("HBM report")
         dialog._on_add_node()
         dialog._set_cell(dialog.nodes_table, 0, 0, "collect")
-        dialog._set_cell(dialog.nodes_table, 0, 1, "TA (ta)")
+        _select_task(dialog, 0, "ta")
         dialog._on_add_node()
         dialog._set_cell(dialog.nodes_table, 1, 0, "analyze")
-        dialog._set_cell(dialog.nodes_table, 1, 1, "TA (ta)")
+        _select_task(dialog, 1, "ta")
         dialog._on_add_connection()
-        dialog._set_cell(dialog.connections_table, 0, 0, "collect")
+        _select_node(dialog.connections_table, 0, 0, "collect")
         dialog._set_cell(dialog.connections_table, 0, 1, "raw")
-        dialog._set_cell(dialog.connections_table, 0, 2, "analyze")
+        _select_node(dialog.connections_table, 0, 2, "analyze")
         dialog._set_cell(dialog.connections_table, 0, 3, "A1")
         dialog._on_add_output()
-        dialog._set_cell(dialog.outputs_table, 0, 0, "analyze")
+        _select_node(dialog.outputs_table, 0, 0, "analyze")
         dialog._set_cell(dialog.outputs_table, 0, 1, "final")
         payload = dialog.payload()
         self.assertEqual(payload["name"], "HBM report")
         self.assertEqual([n["node_id"] for n in payload["nodes"]], ["collect", "analyze"])
+        self.assertEqual([n["task_id"] for n in payload["nodes"]], ["ta", "ta"])
         self.assertEqual(payload["connections"][0]["from_node"], "collect")
         self.assertEqual(payload["output_selection"][0]["role"], "final")
+
+    def test_project_editor_task_column_is_a_picker_not_free_text(self):
+        # The defect this fixes: a user had to hand-type "Name (task_id)" into a
+        # plain text cell to pick a Task. It is now a combo box keyed by task_id.
+        dialog = ProjectEditorDialog(
+            available_tasks=[{"name": "Research", "task_id": "t-research"}],
+            delivery_roots=[],
+        )
+        dialog._on_add_node()
+        combo = dialog.nodes_table.cellWidget(0, 1)
+        self.assertIsInstance(combo, QComboBox)
+        self.assertFalse(combo.isEditable())
+        # A single registered Task is pre-selected; nothing to type or match.
+        self.assertEqual(combo.currentData(), "t-research")
+
+    def test_project_editor_preserves_task_id_missing_from_the_registry_on_edit(self):
+        # Editing an existing Project whose Task was since deleted must not
+        # silently swap in some other Task the next time the row is saved.
+        dialog = ProjectEditorDialog(
+            project={
+                "project_id": "p-1",
+                "name": "Old",
+                "definition_json": (
+                    '{"nodes": [{"node_id": "collect", "task_id": "t-gone"}],"connections": [], "output_selection": []}'
+                ),
+            },
+            available_tasks=[{"name": "Other", "task_id": "t-other"}],
+            delivery_roots=[],
+        )
+        combo = dialog.nodes_table.cellWidget(0, 1)
+        self.assertEqual(combo.currentData(), "t-gone")
+        payload = dialog.payload()
+        self.assertEqual(payload["nodes"][0]["task_id"], "t-gone")
+
+    def test_project_editor_connection_pickers_offer_typed_node_ids(self):
+        # Connections/outputs reference node_ids already typed into the Nodes
+        # table, via a picker, instead of a second freehand field that could
+        # typo a reference to a node that does not exist.
+        dialog = ProjectEditorDialog(
+            available_tasks=[{"name": "TA", "task_id": "ta"}],
+            delivery_roots=[],
+        )
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 0, 0, "collect")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 1, 0, "analyze")
+        dialog._on_add_connection()
+        from_combo = dialog.connections_table.cellWidget(0, 0)
+        self.assertIsInstance(from_combo, QComboBox)
+        self.assertTrue(from_combo.isEditable())  # still escapable, not a hard lock-in
+        offered = {from_combo.itemText(i) for i in range(from_combo.count())}
+        self.assertEqual(offered, {"collect", "analyze"})
 
     def test_project_editor_rejects_empty_name_and_nodes(self):
         dialog = ProjectEditorDialog(available_tasks=[])
@@ -122,7 +185,7 @@ class ProjectsWidgetTests(unittest.TestCase):
         dialog.name_edit.setText("X")
         dialog._on_add_node()
         dialog._set_cell(dialog.nodes_table, 0, 0, "collect")
-        dialog._set_cell(dialog.nodes_table, 0, 1, "TA (ta)")
+        _select_task(dialog, 0, "ta")
         # checkpoint JSON with delivery target outside any allow-listed root
         dialog._set_cell(
             dialog.nodes_table,
@@ -132,6 +195,50 @@ class ProjectsWidgetTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "not in allow-list"):
             dialog.payload()
+
+    def test_project_editor_save_stays_open_until_close_after_save(self):
+        # The defect this fixes: Save used to close the dialog before the POST
+        # even went out, so any backend rejection lost every typed row.
+        dialog = ProjectEditorDialog(
+            available_tasks=[{"name": "TA", "task_id": "ta"}],
+            delivery_roots=[],
+        )
+        dialog.name_edit.setText("X")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 0, 0, "collect")
+        emitted = []
+        dialog.accepted_payload.connect(emitted.append)
+
+        dialog._on_save()
+
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)  # not closed at all yet
+        self.assertFalse(dialog.save_button.isEnabled())
+        self.assertEqual(dialog.nodes_table.rowCount(), 1)  # nothing was thrown away
+
+        dialog.close_after_save()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+
+    def test_project_editor_report_save_error_keeps_every_typed_row(self):
+        dialog = ProjectEditorDialog(
+            available_tasks=[{"name": "TA", "task_id": "ta"}],
+            delivery_roots=[],
+        )
+        dialog.name_edit.setText("X")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 0, 0, "collect")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 1, 0, "analyze")
+        dialog._on_save()
+
+        dialog.report_save_error("Task not found: t-missing")
+
+        self.assertEqual(dialog.error_label.text(), "Task not found: t-missing")
+        self.assertTrue(dialog.save_button.isEnabled())
+        self.assertEqual(dialog.nodes_table.rowCount(), 2)
+        self.assertEqual(dialog._row_text(dialog.nodes_table, 0, 0), "collect")
+        self.assertEqual(dialog._row_text(dialog.nodes_table, 1, 0), "analyze")
+        self.assertNotEqual(dialog.result(), QDialog.DialogCode.Accepted)
 
     def test_project_run_monitor_dispatches_actions(self):
         dialog = ProjectRunMonitorDialog(
@@ -171,21 +278,26 @@ class ProjectsWidgetTests(unittest.TestCase):
         view.editor.name_edit.setText("Weekly HBM")
         view.editor._on_add_node()
         view.editor._set_cell(view.editor.nodes_table, 0, 0, "collect")
-        view.editor._set_cell(view.editor.nodes_table, 0, 1, "TA (ta)")
         view.editor._on_save()
         self.assertEqual(len(created), 1)
         self.assertEqual(created[0]["name"], "Weekly HBM")
+        # Save no longer closes the dialog itself: the caller (MainWindow) does,
+        # once the daemon confirms the write.
+        self.assertIsNotNone(view.editor)
+        view.editor.close_after_save()
+        self.assertIsNone(view.editor)
+
         edited = []
         view.project_edit_submitted.connect(lambda pid, p: edited.append((pid, p)))
         view.show_edit_editor("p-1")
         view.editor.name_edit.setText("Weekly HBM")
         view.editor._on_add_node()
         view.editor._set_cell(view.editor.nodes_table, 0, 0, "collect")
-        view.editor._set_cell(view.editor.nodes_table, 0, 1, "TA (ta)")
         view.editor.description_edit.setText("updated description")
         view.editor._on_save()
         self.assertEqual(edited[0][0], "p-1")
         self.assertEqual(edited[0][1]["description"], "updated description")
+        view.editor.close_after_save()
         run = []
         view.project_run_submitted.connect(lambda run_id, payload: run.append((run_id, payload)))
         view._on_run_action("partial-reexecute", {"project_run_id": "pr-1", "from_node": "collect", "cascade": False})
@@ -248,6 +360,24 @@ class ProjectsMainWindowRoutingTests(unittest.TestCase):
             window.close()
             tmp.cleanup()
 
+    def test_project_run_requires_confirmation_before_post(self):
+        window, tmp = self._build()
+        try:
+            window.projects_index["p-1"] = {"project_id": "p-1", "name": "Weekly HBM"}
+            requests = []
+            window._request_post = lambda kind, path, payload: requests.append((kind, path, payload))
+
+            with patch("relay.gui.main_window.QMessageBox.question", return_value=QMessageBox.Cancel):
+                window._submit_create_project_run("p-1")
+            self.assertEqual(requests, [])
+
+            with patch("relay.gui.main_window.QMessageBox.question", return_value=QMessageBox.Yes):
+                window._submit_create_project_run("p-1")
+            self.assertEqual(requests, [(("project_run_create", "p-1"), "/v1/projects/p-1/run", {})])
+        finally:
+            window.close()
+            tmp.cleanup()
+
     def test_projects_response_populates_widget(self):
         window, tmp = self._build()
         try:
@@ -268,6 +398,61 @@ class ProjectsMainWindowRoutingTests(unittest.TestCase):
                 None,
             )
             self.assertEqual(window.projects_index["p-1"]["version"], 3)
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_project_create_error_reports_into_the_still_open_editor(self):
+        # The defect this fixes: a rejected create used to fall through to a
+        # generic "try again" banner and the dialog (with the daemon's actual
+        # error_code/error_message sitting unused in the response payload) was
+        # already gone by the time the response arrived.
+        window, tmp = self._build()
+        try:
+            window.projects_view.set_tasks([{"name": "TA", "task_id": "ta"}])
+            window.projects_view.show_create_editor()
+            editor = window.projects_view.editor
+            editor.name_edit.setText("X")
+            editor._on_add_node()
+            editor._set_cell(editor.nodes_table, 0, 0, "collect")
+            editor._on_save()
+            self.assertFalse(editor.save_button.isEnabled())
+
+            window.pending[201] = "project_create"
+            window._handle_response(
+                201,
+                {"ok": False, "error_code": "PROJECT_TASK_MISSING", "error_message": "Task not found: ta"},
+                "Bad Request",
+            )
+
+            self.assertIs(window.projects_view.editor, editor)  # dialog was not destroyed
+            self.assertEqual(editor.error_label.text(), "Task not found: ta")
+            self.assertTrue(editor.save_button.isEnabled())  # user can fix and retry
+            self.assertEqual(editor._row_text(editor.nodes_table, 0, 0), "collect")  # nothing lost
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_project_create_success_closes_the_editor(self):
+        window, tmp = self._build()
+        try:
+            window.projects_view.set_tasks([{"name": "TA", "task_id": "ta"}])
+            window.projects_view.show_create_editor()
+            editor = window.projects_view.editor
+            editor.name_edit.setText("X")
+            editor._on_add_node()
+            editor._set_cell(editor.nodes_table, 0, 0, "collect")
+            editor._on_save()
+
+            window.pending[202] = "project_create"
+            window._handle_response(
+                202,
+                {"ok": True, "project": {"project_id": "p-new", "name": "X"}},
+                None,
+            )
+
+            self.assertIsNone(window.projects_view.editor)
+            self.assertIn("p-new", window.projects_index)
         finally:
             window.close()
             tmp.cleanup()

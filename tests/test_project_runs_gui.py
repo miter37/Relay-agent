@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -24,11 +25,13 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
 from relay.gui.project_runs import (
+    ProjectRunArtifactChip,
+    ProjectRunArtifactsView,
     ProjectRunDetailView,
     ProjectRunInspectorView,
     ProjectRunNodeCard,
@@ -36,8 +39,10 @@ from relay.gui.project_runs import (
     ProjectRunsView,
     ProjectRunTimelineCanvas,
     ProjectRunTimelineView,
+    _artifact_kind,
     _humanize_error,
     _level_for_nodes,
+    _merge_project_run_artifacts,
     _verdict,
 )
 
@@ -177,7 +182,7 @@ class ProjectRunsWidgetTests(unittest.TestCase):
 
         # Detail must report the failed node, blocked count, and humanized error.
         detail = view.detail
-        self.assertEqual(detail.steps_table.columnCount(), 7)
+        self.assertEqual(detail.steps_table.columnCount(), 10)
         self.assertFalse(detail.retry_button.isHidden())
         self.assertTrue(detail.cancel_button.isHidden())
         self.assertIn("Failed at step image", detail.verdict_label.text())
@@ -269,12 +274,17 @@ class ProjectRunsWidgetTests(unittest.TestCase):
         )
         detail = view.detail
         self.assertEqual(detail.steps_table.rowCount(), 2)
-        # Row 0 sorts by node_id → "image" first.
-        self.assertEqual(detail.steps_table.item(0, 0).text(), "image")
-        self.assertEqual(detail.steps_table.item(0, 2).text(), "2")
-        self.assertEqual(detail.steps_table.item(1, 2).text(), "1")
-        self.assertEqual(detail.steps_table.item(0, 4).text(), "claude")
-        self.assertEqual(detail.steps_table.item(0, 6).text(), "tr-2")
+        # With no Project snapshot, the fallback order follows started_at.
+        rows = {
+            detail.steps_table.item(row, 1).text(): row for row in range(detail.steps_table.rowCount())
+        }
+        image_row = rows["image"]
+        pick_row = rows["pick"]
+        self.assertEqual(detail.steps_table.item(image_row, 3).text(), "2")
+        self.assertEqual(detail.steps_table.item(pick_row, 3).text(), "1")
+        self.assertEqual(detail.steps_table.item(image_row, 6).text(), "claude")
+        self.assertEqual(detail.steps_table.item(image_row, 7).text(), "—")
+        self.assertEqual(detail.steps_table.item(image_row, 9).text(), "tr-2")
 
     def test_live_run_predicate_for_polling(self):
         view = ProjectRunsView()
@@ -292,6 +302,33 @@ class ProjectRunsWidgetTests(unittest.TestCase):
         self.assertFalse(view.has_live_run_selected())
         view.select_run("pr-failed")
         self.assertFalse(view.has_live_run_selected())
+
+    def test_catalog_refresh_preserves_selected_run_detail(self):
+        """A catalog poll must not erase the already-loaded detail payload."""
+        view = ProjectRunsView()
+        run = _catalog_item("pr-done", status="completed", completed=3)
+        view.set_runs([run])
+        view.select_run("pr-done")
+        steps = [
+            {
+                "node_id": "image",
+                "status": "completed",
+                "active_task_run_id": "task-run-image",
+                "started_at": "2026-08-07T08:00:00+00:00",
+                "completed_at": "2026-08-07T08:00:10+00:00",
+                "attempt_count": 1,
+            }
+        ]
+        view.set_run_steps("pr-done", steps)
+        view.detail.cache_receipt({"steps": [{"node_id": "image", "task_runs": steps}]})
+
+        # This is the sparse payload produced when the 5-second catalog refresh
+        # re-selects the current run; it must not replace detail/receipt data.
+        view.set_run_detail("pr-done", {"snapshot": None, "steps": None})
+
+        self.assertEqual(view.detail.steps_table.rowCount(), 1)
+        self.assertEqual(view.detail._run.get("steps"), steps)
+        self.assertEqual(len(view.detail._run.get("receipt_steps") or []), 1)
 
     def test_humanize_error_returns_copy_for_known_codes(self):
         self.assertEqual(_humanize_error("ALL_WORKERS_FAILED"), "All configured workers failed for this step.")
@@ -361,10 +398,39 @@ class ProjectRunsMainWindowRoutingTests(unittest.TestCase):
         try:
             window._select_project_run("pr-1")
             self.assertEqual(window.selected_project_run_id, "pr-1")
+            self.assertEqual(window.project_runs_view.selected_run_id, "pr-1")
             paths = {tuple(request[0]) for request in self.requests}
             self.assertIn(("project_run_v2_detail", "pr-1"), paths)
             self.assertIn(("project_run_v2_steps", "pr-1"), paths)
             self.assertIn(("project_run_v2_approvals", "pr-1"), paths)
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_project_run_detail_snapshot_populates_pipeline_after_selection(self):
+        window, tmp = self._build()
+        try:
+            window._show_project_runs()
+            window._select_project_run("pr-1")
+            snapshot = _linear_snapshot(
+                [_node("first", "t-first"), _node("second", "t-second")],
+                [_connection("first", "result", "second")],
+            )
+            window.pending[301] = ("project_run_v2_detail", "pr-1")
+            window._handle_response(
+                301,
+                {"project_run": {"project_run_id": "pr-1", "status": "completed", "snapshot": snapshot}},
+                None,
+            )
+            window.pending[302] = ("project_run_v2_steps", "pr-1")
+            window._handle_response(
+                302,
+                {"steps": [_step_row("second", status="completed"), _step_row("first", status="completed")]},
+                None,
+            )
+
+            cards = window.project_runs_view.detail.pipeline_view.cards_container.findChildren(ProjectRunNodeCard)
+            self.assertEqual({card.node_id for card in cards}, {"first", "second"})
         finally:
             window.close()
             tmp.cleanup()
@@ -415,7 +481,10 @@ class ProjectRunsMainWindowRoutingTests(unittest.TestCase):
             window.project_runs_index = {"pr-done": done}
             window.project_runs_view.set_runs([done])
             window.project_runs_view.select_run("pr-done")
-            window.project_run_last_tick_at = 0.0  # force list-refresh branch
+            # The anchor is compared against time.monotonic(), so it must be set
+            # relative to the current clock -- a fixed literal makes the branch
+            # depend on machine uptime. Older than 5s => list-refresh branch.
+            window.project_run_last_tick_at = time.monotonic() - 10.0
             window._project_run_timer_tick()
             # Terminal runs fall through to list refresh, never to detail refresh.
             detail_requests = [
@@ -436,9 +505,11 @@ class ProjectRunsMainWindowRoutingTests(unittest.TestCase):
             window.project_runs_index = {"pr-live": live}
             window.project_runs_view.set_runs([live])
             window.project_runs_view.select_run("pr-live")
-            # Anchor the list-refresh branch in the past so the tick falls through to
-            # the detail-refresh branch.
-            window.project_run_last_tick_at = 1_000_000.0
+            # The anchor is compared against time.monotonic(), so it must be set
+            # relative to the current clock -- a fixed literal makes the branch
+            # depend on machine uptime. Newer than 5s => the list refresh is
+            # skipped and the tick falls through to the detail-refresh branch.
+            window.project_run_last_tick_at = time.monotonic()
             window._project_run_timer_tick()
             paths = [r[1] for r in self.requests]
             self.assertIn("/v1/project-runs/pr-live", paths)
@@ -658,7 +729,7 @@ class ProjectRunDetailInspectorRoutingTests(unittest.TestCase):
 
         # Programmatically select the image row.
         target_row = next(
-            i for i in range(view.detail.steps_table.rowCount()) if view.detail.steps_table.item(i, 0).text() == "image"
+            i for i in range(view.detail.steps_table.rowCount()) if view.detail.steps_table.item(i, 1).text() == "image"
         )
         view.detail.steps_table.selectRow(target_row)
 
@@ -692,7 +763,7 @@ class ProjectRunDetailInspectorRoutingTests(unittest.TestCase):
 
         # Select the row so the inspector renders.
         for row in range(view.detail.steps_table.rowCount()):
-            if view.detail.steps_table.item(row, 0).text() == "image":
+            if view.detail.steps_table.item(row, 1).text() == "image":
                 view.detail.steps_table.selectRow(row)
                 break
         inspector = view.detail.inspector
@@ -787,12 +858,98 @@ class ProjectRunInspectorMainWindowRoutingTests(unittest.TestCase):
             # Now the cached receipt feeds the inspector once the row is selected.
             detail = window.project_runs_view.detail
             for row in range(detail.steps_table.rowCount()):
-                if detail.steps_table.item(row, 0).text() == "image":
+                if detail.steps_table.item(row, 1).text() == "image":
                     detail.steps_table.selectRow(row)
                     break
             inspector = detail.inspector
             self.assertEqual(inspector.attempts_table.rowCount(), 2)
             self.assertIn("A1 ← pick(result)", inspector.inputs_label.text())
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_direct_job_detail_response_populates_inspector(self):
+        window, tmp = self._build()
+        try:
+            window._show_project_runs()
+            window.selected_project_run_id = "pr-1"
+            window.project_runs_view.select_run("pr-1")
+            window.pending[203] = ("project_run_v2_node_detail", "pr-1", "tr-1")
+            window._handle_response(
+                203,
+                {"job_id": "tr-1", "actual_worker": "antigravity", "requested_worker": "auto"},
+                None,
+            )
+            self.assertEqual(
+                window.project_runs_view.detail._task_run_details["tr-1"]["actual_worker"],
+                "antigravity",
+            )
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_artifact_preview_routes_detail_then_content_into_artifacts_view(self):
+        window, tmp = self._build()
+        try:
+            window._show_project_runs()
+            window.selected_project_run_id = "pr-1"
+            window.project_runs_view.select_run("pr-1")
+            window._preview_project_run_artifact("a-json")
+            self.assertIn(
+                [("project_run_artifact_detail", "pr-1", "a-json"), "/v1/artifacts/a-json"],
+                self.requests,
+            )
+
+            window.pending[204] = ("project_run_artifact_detail", "pr-1", "a-json")
+            window._handle_response(
+                204,
+                {"artifact": {"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"}},
+                None,
+            )
+            self.assertIn(
+                [
+                    ("project_run_artifact_content", "pr-1", "a-json"),
+                    "/v1/artifacts/a-json/content?max_bytes=262144",
+                ],
+                self.requests,
+            )
+
+            window.pending[205] = ("project_run_artifact_content", "pr-1", "a-json")
+            window._handle_response(205, {"available": True, "text": '{"ok": true}'}, None)
+            artifacts_view = window.project_runs_view.detail.artifacts_view
+            self.assertEqual(artifacts_view._content_by_uid["a-json"]["text"], '{"ok": true}')
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_stale_artifact_preview_response_is_ignored_and_content_error_is_bounded(self):
+        window, tmp = self._build()
+        try:
+            window._show_project_runs()
+            window.selected_project_run_id = "pr-current"
+            window.pending[206] = ("project_run_artifact_detail", "pr-old", "a-old")
+            window._handle_response(
+                206,
+                {"artifact": {"artifact_uid": "a-old", "relative_path": "old.json"}},
+                None,
+            )
+            self.assertNotIn("/v1/artifacts/a-old/content?max_bytes=262144", [item[1] for item in self.requests])
+
+            window.project_runs_view.select_run("pr-current")
+            window.project_runs_view.detail.set_run(
+                {
+                    "project_run_id": "pr-current",
+                    "status": "completed",
+                    "final_artifact_ids": [
+                        {"artifact_uid": "a-current", "relative_path": "current.json", "role": "output"}
+                    ],
+                }
+            )
+            window.project_runs_view.detail.artifacts_view.select_artifact("a-current", request_missing=False)
+            window.pending[207] = ("project_run_artifact_content", "pr-current", "a-current")
+            window._handle_response(207, None, "content request failed")
+            preview = window.project_runs_view.detail.artifacts_view.metadata_preview.text()
+            self.assertIn("content request failed", preview)
         finally:
             window.close()
             tmp.cleanup()
@@ -906,6 +1063,105 @@ class ProjectRunPipelineWidgetTests(unittest.TestCase):
         failed = next(card for card in cards if card.node_id == "image")
         self.assertEqual(failed.property("pipelineState"), "failed")
 
+    def test_pipeline_cards_are_inside_a_scroll_area(self):
+        view = ProjectRunPipelineView()
+        self.assertIsInstance(view.pipeline_scroll, QScrollArea)
+        self.assertIs(view.pipeline_scroll.widget(), view.cards_container)
+
+    def test_pipeline_edges_connect_card_boundaries_and_keep_parallel_rows(self):
+        view = ProjectRunPipelineView()
+        snapshot = _linear_snapshot(
+            [_node("root", "t-root"), _node("left", "t-left"), _node("right", "t-right"), _node("sink", "t-sink")],
+            [
+                _connection("root", "out", "left"),
+                _connection("root", "out", "right"),
+                _connection("left", "out", "sink"),
+                _connection("right", "out", "sink"),
+            ],
+        )
+        view.set_run(
+            "pr-1",
+            snapshot,
+            [
+                _step_row("root"),
+                _step_row("left"),
+                _step_row("right"),
+                _step_row("sink"),
+            ],
+        )
+        view.cards_container_layout.activate()
+        segments = view.cards_container.edge_segments()
+
+        self.assertEqual(len(segments), 4)
+        for segment in segments:
+            self.assertLess(segment["from"].x(), segment["to"].x())
+            self.assertGreater(segment["to"].x() - segment["from"].x(), 1)
+        root_rows = {
+            segment["to_node"]: segment["to"].y()
+            for segment in segments
+            if segment["from_node"] == "root"
+        }
+        self.assertNotEqual(root_rows["left"], root_rows["right"])
+
+    def test_failed_to_blocked_pipeline_edge_is_dashed(self):
+        view = ProjectRunPipelineView()
+        snapshot = _linear_snapshot(
+            [_node("failed", "t-failed"), _node("blocked", "t-blocked")],
+            [_connection("failed", "out", "blocked")],
+        )
+        view.set_run(
+            "pr-1",
+            snapshot,
+            [_step_row("failed", status="failed"), _step_row("blocked", status="blocked")],
+        )
+        self.assertTrue(view.cards_container.edge_segments()[0]["dashed"])
+
+    def test_pipeline_card_avoids_steps_execution_metadata(self):
+        view = ProjectRunPipelineView()
+        snapshot = _linear_snapshot([_node("image", "t-image")], [])
+        view.set_run(
+            "pr-1",
+            snapshot,
+            [
+                _step_row(
+                    "image",
+                    status="completed",
+                    worker_override="antigravity",
+                    started_at="2026-08-07T08:00:00+00:00",
+                    completed_at="2026-08-07T08:00:10+00:00",
+                )
+            ],
+        )
+        card = view.cards_container.findChildren(ProjectRunNodeCard)[0]
+        labels = [label.text() for label in card.findChildren(QLabel)]
+        self.assertNotIn("antigravity", labels)
+        self.assertNotIn("10s · antigravity", labels)
+
+    def test_pipeline_card_renders_artifact_chip_and_emits_double_click(self):
+        view = ProjectRunPipelineView()
+        snapshot = _linear_snapshot([_node("render", "t-render")], [])
+        view.set_run(
+            "pr-1",
+            snapshot,
+            [_step_row("render")],
+            node_artifacts={
+                "render": [
+                    {
+                        "artifact_uid": "a-final",
+                        "role": "final_report",
+                        "relative_path": "report.html",
+                    }
+                ]
+            },
+        )
+
+        chips = view.cards_container.findChildren(ProjectRunArtifactChip)
+        self.assertEqual(len(chips), 1)
+        selected: list[str] = []
+        view.artifact_selected.connect(selected.append)
+        chips[0].double_clicked.emit("a-final")
+        self.assertEqual(selected, ["a-final"])
+
     def test_pipeline_node_click_emits_signal(self):
         view = ProjectRunPipelineView()
         snapshot = _linear_snapshot(
@@ -925,6 +1181,122 @@ class ProjectRunPipelineWidgetTests(unittest.TestCase):
         view.select_node("a")
         self.assertTrue(a_card := next(card for card in cards if card.node_id == "a"))
         self.assertTrue(a_card.property("pipelineSelected") == "true" or a_card.property("pipelineSelected") is True)
+
+
+class ProjectRunArtifactModelTests(unittest.TestCase):
+    def test_merge_artifacts_pins_final_and_deduplicates_by_uid(self):
+        merged = _merge_project_run_artifacts(
+            [
+                {
+                    "artifact_uid": "a-final",
+                    "node_id": "render",
+                    "role": "final_report",
+                    "relative_path": "report.html",
+                }
+            ],
+            {
+                "research": [
+                    {
+                        "artifact_uid": "a-source",
+                        "relative_path": "notes.md",
+                        "mime_type": "text/markdown",
+                    }
+                ],
+                "render": [
+                    {
+                        "artifact_uid": "a-final",
+                        "relative_path": "report.html",
+                        "mime_type": "text/html",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual([item["artifact_uid"] for item in merged], ["a-final", "a-source"])
+        self.assertTrue(merged[0]["is_final"])
+        self.assertEqual(merged[0]["mime_type"], "text/html")
+        self.assertEqual(merged[1]["node_id"], "research")
+
+    def test_artifact_kind_uses_mime_then_extension(self):
+        self.assertEqual(_artifact_kind({"mime_type": "application/json", "relative_path": "data.bin"}), "json")
+        self.assertEqual(_artifact_kind({"relative_path": "README.md"}), "markdown")
+        self.assertEqual(_artifact_kind({"relative_path": "page.HTML"}), "html")
+        self.assertEqual(_artifact_kind({"relative_path": "cover.webp"}), "image")
+        self.assertEqual(_artifact_kind({"relative_path": "manual.pdf"}), "pdf")
+        self.assertEqual(_artifact_kind({"relative_path": "bundle.zip"}), "unsupported")
+
+
+class ProjectRunArtifactsWidgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_artifacts_tab_lists_final_group_then_task_groups_without_selection(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [
+                {"artifact_uid": "a-final", "role": "final_report", "relative_path": "report.html"},
+            ],
+            {
+                "research": [{"artifact_uid": "a-source", "role": "notes", "relative_path": "notes.md"}],
+                "render": [{"artifact_uid": "a-final", "relative_path": "report.html"}],
+            },
+        )
+
+        groups = [view.artifact_tree.topLevelItem(i).text(0) for i in range(view.artifact_tree.topLevelItemCount())]
+        self.assertEqual(groups, ["Final Artifacts", "research", "render"])
+        self.assertIsNone(view._selected_artifact_uid)
+        self.assertTrue(view.empty_preview.isVisibleTo(view))
+
+    def test_json_artifact_renders_as_expandable_structure(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [],
+            {"research": [{"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"}]},
+        )
+        view.cache_artifact_detail("a-json", {"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"})
+        view.cache_artifact_content("a-json", {"available": True, "text": '{"headline": "Relay", "items": [1, 2]}'})
+        view.select_artifact("a-json")
+
+        self.assertEqual(view.preview_stack.currentWidget(), view.json_preview)
+        names = [view.json_preview.topLevelItem(i).text(0) for i in range(view.json_preview.topLevelItemCount())]
+        self.assertEqual(names, ["headline", "items"])
+        self.assertGreater(view.json_preview.topLevelItem(1).childCount(), 0)
+
+    def test_html_renders_and_unsupported_artifact_shows_metadata(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [],
+            {
+                "render": [
+                    {"artifact_uid": "a-html", "relative_path": "report.html", "mime_type": "text/html"},
+                    {"artifact_uid": "a-zip", "relative_path": "bundle.zip", "mime_type": "application/zip"},
+                ]
+            },
+        )
+        view.cache_artifact_content("a-html", {"available": True, "text": "<h1>Report</h1>"})
+        view.select_artifact("a-html")
+        self.assertEqual(view.preview_stack.currentWidget(), view.text_preview)
+        self.assertIn("Report", view.text_preview.toHtml())
+
+        view.select_artifact("a-zip")
+        self.assertEqual(view.preview_stack.currentWidget(), view.metadata_preview)
+        self.assertIn("bundle.zip", view.metadata_preview.text())
+
+    def test_text_preview_shows_loading_until_content_arrives(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [],
+            {"research": [{"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"}]},
+        )
+        view.select_artifact("a-json", request_missing=False)
+
+        self.assertEqual(view.preview_stack.currentWidget(), view.metadata_preview)
+        self.assertIn("Loading", view.metadata_preview.text())
 
 
 class ProjectRunTimelineWidgetTests(unittest.TestCase):
@@ -970,6 +1342,23 @@ class ProjectRunTimelineWidgetTests(unittest.TestCase):
         # Summary mentions the window length and node count.
         self.assertIn("node", view.summary.text())
 
+    def test_timeline_marks_blocked_steps_as_not_started(self):
+        view = ProjectRunTimelineView()
+        view.set_run(
+            "pr-1",
+            [
+                _step_row("image", status="failed"),
+                _step_row("page", status="blocked", active_task_run_id=None, started_at=None, completed_at=None),
+            ],
+            [],
+            run_started_at="2026-08-07T08:00:00+00:00",
+        )
+
+        blocked = next(row for row in view.canvas.rows if row["node_id"] == "page")
+        self.assertTrue(blocked["not_started"])
+        self.assertEqual(blocked["display_label"], "Not started")
+        self.assertIn("blocked", view.summary.text().casefold())
+
     def test_timeline_empty_state(self):
         view = ProjectRunTimelineView()
         view.set_run("pr-1", [], [])
@@ -989,11 +1378,25 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_detail_view_has_pipeline_timeline_and_steps_tabs(self):
+    def test_detail_view_has_pipeline_artifacts_and_timeline_tabs(self):
         view = ProjectRunDetailView()
         self.assertEqual(view.run_tabs.count(), 3)
         labels = [view.run_tabs.tabText(i) for i in range(view.run_tabs.count())]
-        self.assertEqual(labels, ["Pipeline", "Timeline", "Steps"])
+        self.assertEqual(labels, ["Pipeline", "Artifacts", "Timeline"])
+        self.assertNotIn("Steps", labels)
+
+    def test_pipeline_artifact_selection_enters_artifacts_tab(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=1)
+        run["final_artifact_ids"] = [
+            {"artifact_uid": "a-final", "role": "final_report", "relative_path": "report.html"}
+        ]
+        run["steps"] = [_step_row("render")]
+        view.set_run(run)
+        view.pipeline_view.artifact_selected.emit("a-final")
+
+        self.assertIs(view.run_tabs.currentWidget(), view.artifacts_view)
+        self.assertEqual(view.artifacts_view._selected_artifact_uid, "a-final")
 
     def test_pipeline_node_selection_syncs_steps_table(self):
         view = ProjectRunDetailView()
@@ -1007,7 +1410,131 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
         view.pipeline_view.node_selected.emit("b")
         selected = view.steps_table.selectedItems()
         self.assertEqual(len(selected) >= 1, True)
-        self.assertEqual(view.steps_table.item(selected[0].row(), 0).text(), "b")
+        self.assertEqual(view.steps_table.item(selected[0].row(), 1).text(), "b")
+
+    def test_inspector_visibility_follows_detail_tab(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=2)
+        run["steps"] = [_step_row("a", status="completed"), _step_row("b", status="completed")]
+        view.set_run(run)
+
+        view.run_tabs.setCurrentWidget(view.pipeline_view)
+        view.pipeline_view.node_selected.emit("a")
+        self.assertTrue(view.inspector.isVisibleTo(view))
+
+        view.run_tabs.setCurrentWidget(view.timeline_view)
+        self.assertFalse(view.inspector.isVisibleTo(view))
+        view.run_tabs.setCurrentWidget(view.artifacts_view)
+        self.assertFalse(view.inspector.isVisibleTo(view))
+
+        # A Pipeline node click is an explicit request to inspect that node.
+        view.run_tabs.setCurrentWidget(view.pipeline_view)
+        view.pipeline_view.node_selected.emit("b")
+        self.assertTrue(view.inspector.isVisibleTo(view))
+
+    def test_pipeline_inspector_toggles_and_survives_refresh(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=2)
+        run["snapshot"] = {
+            "project_definition": {
+                "nodes": [_node("a", "t-a"), _node("b", "t-b")],
+                "connections": [_connection("a", "result", "b")],
+            }
+        }
+        run["steps"] = [_step_row("a", status="completed"), _step_row("b", status="completed")]
+        view.set_run(run)
+
+        view.pipeline_view.node_selected.emit("b")
+        self.assertTrue(view.inspector.isVisibleTo(view))
+        self.assertEqual(view.inspector._node_id, "b")
+
+        # A list/detail refresh must not close an explicitly opened inspector.
+        view.set_run(run)
+        self.assertTrue(view.inspector.isVisibleTo(view))
+        self.assertEqual(view.inspector._node_id, "b")
+
+        # Clicking the same Pipeline card toggles the inspector closed.
+        view.pipeline_view.node_selected.emit("b")
+        self.assertFalse(view.inspector.isVisibleTo(view))
+
+    def test_steps_selection_opens_and_preserves_inspector_by_node_id(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=2)
+        run["steps"] = [_step_row("first"), _step_row("second")]
+        view.set_run(run)
+        view.run_tabs.setCurrentWidget(view.steps_table)
+        view.steps_table.selectRow(1)
+        self.assertEqual(view._pipeline_inspector_node_id, "second")
+        view.set_run(run)
+
+        selected = view.steps_table.selectedItems()
+        self.assertEqual(view.steps_table.item(selected[0].row(), 1).text(), "second")
+
+    def test_steps_follow_project_node_order_not_alphabetical_order(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=3)
+        run["snapshot"] = {
+            "project_definition": {
+                "nodes": [
+                    {"node_id": "zeta", "task_id": "t-zeta"},
+                    {"node_id": "alpha", "task_id": "t-alpha"},
+                    {"node_id": "middle", "task_id": "t-middle"},
+                ]
+            }
+        }
+        run["steps"] = [
+            _step_row("middle", status="completed"),
+            _step_row("zeta", status="completed"),
+            _step_row("alpha", status="completed"),
+        ]
+        view.set_run(run)
+
+        ids = [view.steps_table.item(row, 1).text() for row in range(view.steps_table.rowCount())]
+        self.assertEqual(ids, ["zeta", "alpha", "middle"])
+
+    def test_worker_column_updates_when_task_run_detail_arrives(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=1)
+        run["steps"] = [_step_row("first", status="completed", active_task_run_id="tr-first")]
+        view.set_run(run)
+        self.assertEqual(view.steps_table.item(0, 6).text(), "—")
+        self.assertEqual(view.steps_table.item(0, 7).text(), "—")
+
+        view.cache_task_run_detail(
+            "tr-first",
+            {"actual_worker": "antigravity", "requested_worker": "auto", "status": "COMPLETED"},
+        )
+
+        self.assertEqual(view.steps_table.item(0, 6).text(), "auto")
+        self.assertEqual(view.steps_table.item(0, 7).text(), "antigravity")
+
+    def test_steps_distinguish_requested_and_actual_worker(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=1)
+        run["steps"] = [
+            _step_row("first", status="completed", active_task_run_id="tr-first", worker_override="claude")
+        ]
+        view.set_run(run)
+        view.cache_task_run_detail(
+            "tr-first",
+            {"actual_worker": "codex", "requested_worker": "claude", "status": "COMPLETED"},
+        )
+
+        self.assertEqual(view.steps_table.item(0, 6).text(), "claude")
+        self.assertEqual(view.steps_table.item(0, 7).text(), "codex")
+
+    def test_inspector_shows_unavailable_state_when_task_run_detail_fails(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="completed", completed=1)
+        run["steps"] = [_step_row("first", status="completed", active_task_run_id="tr-first")]
+        view.set_run(run)
+        view.run_tabs.setCurrentWidget(view.steps_table)
+        view.steps_table.selectRow(0)
+
+        view.cache_task_run_error("tr-first", "Task Run detail request failed")
+
+        self.assertIn("Unavailable", view.inspector.task_run_status_label.text())
+        self.assertIn("Task Run detail request failed", view.inspector.task_run_error_label.text())
 
     def test_run_tabs_hide_when_no_run_selected(self):
         view = ProjectRunDetailView()

@@ -46,3 +46,5 @@ All four overlap policies are honoured when a Run is still in flight: `skip` aba
 Checkpoint nodes pause in `awaiting_approval`. Approval resumes descendants, rejection fails the run, and approved human edits take precedence for downstream role resolution. Folder delivery is restricted to configured `allowed_delivery_roots` at both definition and delivery time.
 
 FTS5 indexes are derived and rebuildable. Semantic search currently uses the pluggable embedding interface and explicitly falls back to FTS5 when no backend is configured. Quality attention covers Task and Project Runs. Export archives are deterministic, hash-manifested, redact notification secrets and local Artifact paths, and optionally round-trip Task Runs, Artifacts, and lineage.
+
+The Project Runs GUI exposes `Pipeline`, `Artifacts`, and `Timeline`. `Artifacts` lists final outputs first and then all node-produced Artifacts by Task; selection opens a read-only format-aware preview, while a Pipeline Artifact chip double-click navigates directly to that Artifact.
