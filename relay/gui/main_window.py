@@ -582,6 +582,9 @@ class MainWindow(QMainWindow):
         self._request(("project_run_v2_steps", project_run_id), f"/v1/project-runs/{project_run_id}/steps")
         self._request(("project_run_v2_approvals", project_run_id), f"/v1/project-runs/{project_run_id}/approvals")
         self._request(("project_run_v2_receipt", project_run_id), f"/v1/project-runs/{project_run_id}/receipt")
+        self._request(
+            ("project_run_v2_orchestrator", project_run_id), f"/v1/project-runs/{project_run_id}/orchestrator"
+        )
 
     def _request_node_artifacts(self, project_run_id: str, steps: list[dict]) -> None:
         for step in steps or []:
@@ -1392,6 +1395,12 @@ class MainWindow(QMainWindow):
                     self.project_runs_view.detail.cache_node_artifact_error(
                         node_id, str(error or "Artifact list is unavailable.")
                     )
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_orchestrator":
+                project_run_id = str(kind[1] or "")
+                if project_run_id == self.selected_project_run_id:
+                    self.project_runs_view.detail.cache_orchestrator_error(
+                        str(error or "Orchestrator data is unavailable.")
+                    )
             elif isinstance(kind, tuple) and kind[0] in {
                 "project_run_artifact_detail",
                 "project_run_artifact_content",
@@ -1922,6 +1931,11 @@ class MainWindow(QMainWindow):
             receipt = (payload or {}).get("receipt") or {}
             if project_run_id and project_run_id == self.selected_project_run_id and receipt:
                 self.project_runs_view.detail.cache_receipt(receipt)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_orchestrator":
+            project_run_id = str(kind[1] or "")
+            if project_run_id and project_run_id == self.selected_project_run_id and isinstance(payload, dict):
+                self.project_runs_view.detail.cache_orchestrator(payload)
             return
         if isinstance(kind, tuple) and kind[0] == "project_run_v2_node_detail":
             project_run_id = str(kind[1] or "")

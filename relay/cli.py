@@ -248,6 +248,7 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     create.add_argument("--instructions", default="")
     create.add_argument("--task-file")
     create.add_argument("--worker", default="auto")
+    create.add_argument("--model", help="Model pinned for this Task's dispatches; omit to use the worker's own default")
     fallback = create.add_mutually_exclusive_group()
     fallback.add_argument("--fallback", action="store_true", default=None)
     fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
@@ -275,6 +276,7 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--instructions")
     update.add_argument("--task-file")
     update.add_argument("--worker")
+    update.add_argument("--model")
     up_fallback = update.add_mutually_exclusive_group()
     up_fallback.add_argument("--fallback", action="store_true", default=None)
     up_fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
@@ -320,6 +322,7 @@ def _task_cli_request(args, config: Config) -> Any:
             "description": args.description,
             "task_summary": args.task_summary,
             "worker": args.worker,
+            "model": args.model,
             "fallback_enabled": args.fallback if args.fallback is not None else True,
             "timeout_seconds": args.timeout,
             "profile": args.profile,
@@ -351,6 +354,8 @@ def _task_cli_request(args, config: Config) -> Any:
             payload["task_summary"] = args.task_summary
         if args.worker:
             payload["default_worker"] = args.worker
+        if args.model:
+            payload["default_model"] = args.model
         if args.fallback is not None:
             payload["fallback_enabled"] = args.fallback
         if args.timeout is not None:
@@ -436,6 +441,31 @@ def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
     runs_p.add_argument("--limit", type=int, default=50)
     runs_p.add_argument("--machine", action="store_true")
 
+    orch_show = proj_sub.add_parser("orchestrator-show", help="Show a Project's Orchestrator configuration")
+    orch_show.add_argument("project_id")
+    orch_show.add_argument("--machine", action="store_true")
+
+    orch_set = proj_sub.add_parser(
+        "orchestrator-set",
+        help="Enable/configure or disable a Project's Orchestrator",
+        description=(
+            "Attaches an optional Orchestrator to the Project: on failure it narrates progress, repairs "
+            "within a bounded budget (retry, worker swap, connection/output role rebind, an append-only "
+            "instruction addendum), and reports the cause when it cannot. Its authority is a strict subset "
+            "of what a human already does through this CLI/GUI and never leaves the Run; the registered "
+            "Project/Task definitions are never mutated."
+        ),
+    )
+    orch_set.add_argument("project_id")
+    orch_set.add_argument("--enabled", choices=["true", "false"], required=True)
+    orch_set.add_argument("--worker", help="Worker used for the Orchestrator's own reasoning Task Runs")
+    orch_set.add_argument("--model", help="Model for the Orchestrator's own reasoning Task Runs")
+    orch_set.add_argument("--profile")
+    orch_set.add_argument("--max-repair-attempts-per-node", type=int)
+    orch_set.add_argument("--max-repair-attempts-per-run", type=int)
+    orch_set.add_argument("--max-llm-calls-per-run", type=int)
+    orch_set.add_argument("--machine", action="store_true")
+
 
 def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
     reexec = run_sub.add_parser("reexecute", help="Partially re-execute from a node")
@@ -465,6 +495,12 @@ def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
     cancel = run_sub.add_parser("cancel", help="Cancel a running Project Run")
     cancel.add_argument("project_run_id")
     cancel.add_argument("--machine", action="store_true")
+
+    orchestrator = run_sub.add_parser(
+        "orchestrator", help="Show this Project Run's Orchestrator event stream and budget"
+    )
+    orchestrator.add_argument("project_run_id")
+    orchestrator.add_argument("--machine", action="store_true")
 
 
 def _project_cli_request(args, config: Config) -> Any:
@@ -509,6 +545,27 @@ def _project_cli_request(args, config: Config) -> Any:
     if cmd == "runs":
         path = f"/v1/projects/{args.project_id}/runs?limit={args.limit}"
         return client.request("GET", path)
+    if cmd == "orchestrator-show":
+        project = client.request("GET", f"/v1/projects/{args.project_id}")
+        definition = json.loads((project.get("project") or {}).get("definition_json") or "{}")
+        return {"ok": True, "project_id": args.project_id, "orchestrator": definition.get("orchestrator")}
+    if cmd == "orchestrator-set":
+        project = client.request("GET", f"/v1/projects/{args.project_id}")
+        definition = json.loads((project.get("project") or {}).get("definition_json") or "{}")
+        orchestrator: dict[str, Any] = dict(definition.get("orchestrator") or {})
+        orchestrator["enabled"] = args.enabled == "true"
+        for key, value in (
+            ("worker", args.worker),
+            ("model", args.model),
+            ("profile", args.profile),
+            ("max_repair_attempts_per_node", args.max_repair_attempts_per_node),
+            ("max_repair_attempts_per_run", args.max_repair_attempts_per_run),
+            ("max_llm_calls_per_run", args.max_llm_calls_per_run),
+        ):
+            if value is not None:
+                orchestrator[key] = value
+        definition["orchestrator"] = orchestrator
+        return client.request("POST", f"/v1/projects/{args.project_id}", definition)
     raise RelayError("INVALID_REQUEST", f"Unknown project command: {cmd}")
 
 
@@ -536,6 +593,8 @@ def _project_run_cli_request(args, config: Config) -> Any:
         return client.request("POST", f"/v1/project-runs/{prid}/retry", payload)
     if cmd == "cancel":
         return client.request("POST", f"/v1/project-runs/{prid}/cancel")
+    if cmd == "orchestrator":
+        return client.request("GET", f"/v1/project-runs/{prid}/orchestrator")
     raise RelayError("INVALID_REQUEST", f"Unknown project-run command: {cmd}")
 
 

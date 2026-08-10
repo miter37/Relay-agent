@@ -20,6 +20,8 @@
 | Project Run | Persistent state machine with immutable Project/Task snapshots and child Task Runs. |
 | Routine | Timezone-aware recurring Task/Project target with overlap, missed-run, version, input, and notification policies. |
 | Approval | Persistent checkpoint decision; human edits are new `producer=human` Artifacts linked to the original. |
+| Orchestrator | Optional per-Project config (`ProjectSpec.orchestrator`, absent by default) attached to a Project Run's snapshot; narrates and repairs that one Run within a budget. Never mutates the Project/Task definition. |
+| Orchestrator event | `project_run_events` row (`note`/`decision`/`report`/`fallback`), seq-ordered per Run; the narration/decision timeline the GUI Orchestrator tab reads. |
 
 ## Execution flow
 
@@ -47,4 +49,6 @@ Checkpoint nodes pause in `awaiting_approval`. Approval resumes descendants, rej
 
 FTS5 indexes are derived and rebuildable. Semantic search currently uses the pluggable embedding interface and explicitly falls back to FTS5 when no backend is configured. Quality attention covers Task and Project Runs. Export archives are deterministic, hash-manifested, redact notification secrets and local Artifact paths, and optionally round-trip Task Runs, Artifacts, and lineage.
 
-The Project Runs GUI exposes `Pipeline`, `Artifacts`, and `Timeline`. `Artifacts` lists final outputs first and then all node-produced Artifacts by Task; selection opens a read-only format-aware preview, while a Pipeline Artifact chip double-click navigates directly to that Artifact.
+The Project Runs GUI exposes `Pipeline`, `Artifacts`, `Timeline`, and `Orchestrator`. `Artifacts` lists final outputs first and then all node-produced Artifacts by Task; selection opens a read-only format-aware preview, while a Pipeline Artifact chip double-click navigates directly to that Artifact.
+
+When a Project attaches an Orchestrator (`docs/superpowers/plans/2026-08-10-project-orchestrator.md`), `ProjectRuntime` consults it automatically the moment a step fails or a final-output selection cannot match: a deterministic Tier 0 (`relay/orchestrator/planner.py`) resolves what it can — a plain retry, or a role/worker rebind where exactly one candidate exists — with no LLM call; only what Tier 0 leaves unresolved reaches a Tier 1 LLM call, dispatched as an ordinary Task Run (`submitted_via="orchestrator"`), and only while a per-node/per-run/LLM-call budget remains. Every decision, fallback, and narration note is appended to `project_run_events`; the `Orchestrator` tab renders that stream and the budget, and shows a disabled-state explanation when no Orchestrator is attached. A Project that never attaches one is unaffected byte-for-byte — no snapshot field, no event rows, no extra dispatch.

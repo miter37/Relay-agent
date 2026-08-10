@@ -82,7 +82,7 @@ TECHNICAL_FALLBACK_CODES = {
 }
 
 VALID_CALLERS = {"human", "hermes", "service", "schedule"}
-VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy", "project", "routine"}
+VALID_SUBMITTED_VIA = {"cli", "gui", "hermes", "schedule", "legacy", "project", "routine", "orchestrator"}
 VALID_TRIGGER_TYPES = {"manual", "api", "schedule", "rerun", "project", "routine"}
 
 
@@ -370,7 +370,16 @@ class RelayEngine:
         self._validate_task_inputs(request, task_definition)
         self.config.reload()
         resolved_inputs = self._resolve_artifact_inputs(request)
-        requested_target = request.target_path or infer_target_path(request.task)
+        # Service-type callers (Project/Routine/Orchestrator dispatch, Schedules) can
+        # never use working-folder mode - see the TARGET_PATH_NOT_ALLOWED check below -
+        # so skip inference for them entirely rather than raising a spurious
+        # TARGET_PATH_AMBIGUOUS/NOT_ALLOWED from a filesystem path that happens to
+        # appear in task text Relay generated itself (e.g. the Orchestrator's own
+        # prompt, which embeds raw worker log/error text that can contain paths).
+        is_service_caller = request.caller.lower() in {"hermes", "service", "daemon", "schedule"}
+        requested_target = request.target_path or (
+            None if is_service_caller else infer_target_path(request.task)
+        )
         target = resolve_target_path(requested_target) if requested_target else None
         request.target_path = str(target) if target else None
         if schedule_id and request.caller.lower() != "schedule":
@@ -706,7 +715,13 @@ class RelayEngine:
                 schema_file=paths["schema"],
                 result_format=request.result_format,
                 profile=request.profile,
-                model=request.model,
+                # A model ID is provider-specific: it was chosen for the first
+                # (intended) worker in the chain, so passing it unchanged to a
+                # fallback worker on a different provider fails outright (e.g. a
+                # Gemini model ID rejected by Codex) instead of actually falling
+                # back. Only the primary attempt gets the requested model; a
+                # fallback worker uses its own default.
+                model=request.model if index == 0 else None,
                 config=worker_cfg,
             )
             try:
@@ -1248,6 +1263,7 @@ class RelayEngine:
         base = JobRequest(
             task=instructions,
             worker=task.get("default_worker") or "auto",
+            model=task.get("default_model"),
             fallback=bool(task.get("fallback_enabled", 1)) if task.get("fallback_enabled") is not None else None,
             timeout_seconds=task.get("timeout_seconds"),
             profile=task.get("profile") or "web-research",
@@ -1257,6 +1273,7 @@ class RelayEngine:
         if request:
             base.task = request.task or instructions
             base.worker = request.worker or base.worker
+            base.model = request.model or base.model
             base.result_format = request.result_format or base.result_format
             base.profile = request.profile or base.profile
             base.timeout_seconds = request.timeout_seconds or base.timeout_seconds
@@ -1268,13 +1285,13 @@ class RelayEngine:
             base.output_path = request.output_path
             base.artifact_path = request.artifact_path
             base.caller = request.caller
-            base.model = request.model
         definition = {
             "task_id": task["task_id"],
             "name": task["name"],
             "version": task["version"],
             "instructions": instructions,
             "default_worker": task.get("default_worker"),
+            "default_model": task.get("default_model"),
             "fallback_enabled": task.get("fallback_enabled"),
             "timeout_seconds": task.get("timeout_seconds"),
             "profile": task.get("profile"),
@@ -1308,6 +1325,7 @@ class RelayEngine:
             "instructions": task.get("instructions") or "",
             "description": task.get("description"),
             "default_worker": task.get("default_worker"),
+            "default_model": task.get("default_model"),
             "fallback_enabled": task.get("fallback_enabled"),
             "timeout_seconds": task.get("timeout_seconds"),
             "profile": task.get("profile"),
@@ -1331,6 +1349,7 @@ class RelayEngine:
         base = JobRequest(
             task=instructions,
             worker=task_snapshot.get("default_worker") or "auto",
+            model=task_snapshot.get("default_model"),
             fallback=bool(task_snapshot.get("fallback_enabled", 1))
             if task_snapshot.get("fallback_enabled") is not None
             else None,
@@ -1342,6 +1361,7 @@ class RelayEngine:
         if request:
             base.task = request.task or instructions
             base.worker = request.worker or base.worker
+            base.model = request.model or base.model
             base.result_format = request.result_format or base.result_format
             base.profile = request.profile or base.profile
             base.timeout_seconds = request.timeout_seconds or base.timeout_seconds
@@ -1353,13 +1373,13 @@ class RelayEngine:
             base.output_path = request.output_path
             base.artifact_path = request.artifact_path
             base.caller = request.caller
-            base.model = request.model
         definition = {
             "task_id": task_snapshot["task_id"],
             "name": task_snapshot.get("name"),
             "version": task_snapshot.get("version"),
             "instructions": instructions,
             "default_worker": task_snapshot.get("default_worker"),
+            "default_model": task_snapshot.get("default_model"),
             "fallback_enabled": task_snapshot.get("fallback_enabled"),
             "timeout_seconds": task_snapshot.get("timeout_seconds"),
             "profile": task_snapshot.get("profile"),

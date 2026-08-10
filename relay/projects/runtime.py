@@ -9,6 +9,14 @@ from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
 from ..models import JobRequest
+from ..orchestrator.narration import (
+    narrate_run_completed,
+    narrate_run_started,
+    narrate_step_completed,
+    narrate_step_dispatched,
+)
+from ..orchestrator.overrides import apply_instruction_addendum, effective_output_role, parse_step_overrides
+from ..orchestrator.supervisor import Supervisor
 from ..util import utc_now
 from .models import ProjectSpec
 from .service import ProjectService
@@ -21,14 +29,34 @@ _TASK_SUCCESS_STATUSES = {"COMPLETED", "PARTIAL"}
 
 
 class ProjectRuntime:
-    def __init__(self, db: Database, engine: RelayEngine, service: ProjectService, *, tick_seconds: float = 0.5):
+    def __init__(
+        self,
+        db: Database,
+        engine: RelayEngine,
+        service: ProjectService,
+        *,
+        tick_seconds: float = 0.5,
+        supervisor: Supervisor | None = None,
+    ):
         self.db = db
         self.engine = engine
         self.service = service
         self.tick_seconds = tick_seconds
+        self.supervisor = supervisor or Supervisor(db, engine)
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def _safe_hook(self, description: str, fn, *args, **kwargs) -> Any:
+        """Run a narration/Orchestrator hook without ever letting it abort reconciliation."""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # pragma: no cover - defensive, hooks are best-effort
+            logger.exception("project runtime hook failed (%s): %s", description, exc)
+            return None
+
+    def _note(self, project_run_id: str, node_id: str | None, summary: str) -> None:
+        self.db.append_project_run_event(project_run_id, node_id=node_id, kind="note", actor="runtime", summary=summary)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -75,6 +103,7 @@ class ProjectRuntime:
         project_run_id = run["project_run_id"]
         snapshot = json.loads(run["project_snapshot_json"])
         spec = ProjectSpec.from_dict(snapshot["project_definition"])
+        orchestrator_config = Supervisor.config_from_snapshot(snapshot)
         steps = self.db.list_project_steps(project_run_id)
         step_by_id = {s["node_id"]: s for s in steps}
 
@@ -156,6 +185,12 @@ class ProjectRuntime:
                             ]
                         ),
                     )
+                    if orchestrator_config:
+                        completed_step = self.db.get_project_step(project_run_id, step["node_id"])
+                        self._safe_hook(
+                            "narrate_step_completed", self._note, project_run_id, step["node_id"],
+                            narrate_step_completed(completed_step or step),
+                        )
             elif job_status in {"FAILED", "CANCELLED"}:
                 self.db.update_project_step(
                     project_run_id,
@@ -168,6 +203,10 @@ class ProjectRuntime:
                 )
                 # Mark descendants as blocked so the run can finalize.
                 self._block_descendants(project_run_id, spec, step["node_id"])
+                if orchestrator_config:
+                    self._safe_hook(
+                        "supervisor.on_step_failed", self.supervisor.on_step_failed, project_run_id, step["node_id"]
+                    )
 
         # 2. Try to resolve inputs for pending/ready steps and mark ready when applicable.
         steps = self.db.list_project_steps(project_run_id)
@@ -206,7 +245,16 @@ class ProjectRuntime:
                 return False
         return True
 
-    def _fail_step(self, project_run_id: str, node_id: str, spec: ProjectSpec, code: str, message: str | None) -> None:
+    def _fail_step(
+        self,
+        project_run_id: str,
+        node_id: str,
+        spec: ProjectSpec,
+        code: str,
+        message: str | None,
+        *,
+        orchestrator_config: dict[str, Any] | None = None,
+    ) -> None:
         """Mark a step failed and block its descendants.
 
         Without blocking, a step that fails before it ever produced a Task Run
@@ -221,12 +269,15 @@ class ProjectRuntime:
             error_message=message,
         )
         self._block_descendants(project_run_id, spec, node_id)
+        if orchestrator_config:
+            self._safe_hook("supervisor.on_step_failed", self.supervisor.on_step_failed, project_run_id, node_id)
 
     def _dispatch_step(self, project_run_id: str, node_id: str, project_snapshot: dict[str, Any]) -> None:
         step = self.db.get_project_step(project_run_id, node_id)
         if not step:
             return
         spec = ProjectSpec.from_dict(project_snapshot["project_definition"])
+        orchestrator_config = Supervisor.config_from_snapshot(project_snapshot)
         task_id = step["task_id"]
         task_snapshot = project_snapshot.get("task_snapshots", {}).get(task_id)
         if not task_snapshot:
@@ -236,6 +287,7 @@ class ProjectRuntime:
                 spec,
                 "PROJECT_TASK_MISSING",
                 f"Task snapshot missing for {task_id}",
+                orchestrator_config=orchestrator_config,
             )
             return
 
@@ -243,19 +295,27 @@ class ProjectRuntime:
         try:
             resolved_inputs = self.service.resolve_step_inputs(project_run_id, node_id)
         except RelayError as exc:
-            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message)
+            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message, orchestrator_config=orchestrator_config)
             return
 
         try:
-            worker_override = None
-            try:
-                prior_resolution = json.loads(step.get("resolved_connections_json") or "{}")
-                if isinstance(prior_resolution, dict):
-                    worker_override = prior_resolution.get("worker_override")
-            except (TypeError, json.JSONDecodeError):
-                pass
+            step_overrides = parse_step_overrides(step.get("step_overrides_json"))
+            worker_override = step_overrides.get("worker_override")
+            if worker_override is None:
+                # Legacy rows written before schema v15 stashed the override directly in
+                # resolved_connections_json; the migration backfill moves these on the next
+                # Database() open, but this keeps an in-session row dispatchable too.
+                try:
+                    prior_resolution = json.loads(step.get("resolved_connections_json") or "{}")
+                    if isinstance(prior_resolution, dict):
+                        worker_override = prior_resolution.get("worker_override")
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            instructions = apply_instruction_addendum(
+                task_snapshot.get("instructions") or "", step_overrides.get("instruction_addendum")
+            )
             request = JobRequest(
-                task=task_snapshot.get("instructions") or "",
+                task=instructions,
                 caller="service",
                 worker=worker_override or task_snapshot.get("default_worker") or "auto",
                 artifact_inputs=[
@@ -270,7 +330,7 @@ class ProjectRuntime:
                 caller="service",
             )
         except RelayError as exc:
-            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message)
+            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message, orchestrator_config=orchestrator_config)
             return
 
         self.db.append_project_step_run(project_run_id, node_id, job["job_id"], worker_override=None)
@@ -282,8 +342,17 @@ class ProjectRuntime:
             active_task_run_id=job["job_id"],
             started_at=now,
             resolved_connections_json=json.dumps(resolved_inputs),
+            step_overrides_json=None,
         )
-        self.db.ensure_project_run_started(project_run_id, now)
+        run_started = self.db.ensure_project_run_started(project_run_id, now)
+        if orchestrator_config:
+            if run_started:
+                self._safe_hook("narrate_run_started", self._note, project_run_id, None, narrate_run_started(spec))
+            is_retry = bool(step_overrides.get("worker_override") or step_overrides.get("instruction_addendum"))
+            self._safe_hook(
+                "narrate_step_dispatched", self._note, project_run_id, node_id,
+                narrate_step_dispatched(node_id, retry=is_retry),
+            )
         self.wake()
 
     def _block_descendants(self, project_run_id: str, spec: ProjectSpec, node_id: str) -> None:
@@ -323,6 +392,7 @@ class ProjectRuntime:
 
     def _finalize_completed(self, project_run_id: str, steps: list[dict[str, Any]], spec: ProjectSpec) -> None:
         snapshot = json.loads(self.db.get_project_run(project_run_id)["project_snapshot_json"])
+        orchestrator_config = Supervisor.config_from_snapshot(snapshot)
         selection = snapshot.get("output_selection", []) or []
         final_ids: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
@@ -338,12 +408,15 @@ class ProjectRuntime:
                     }
                 )
         if not selection:
-            self._mark_run_completed(project_run_id, steps, [], warnings)
+            self._mark_run_completed(project_run_id, steps, [], warnings, orchestrator_config=orchestrator_config)
             return
         for entry in selection:
             node_id = entry["node_id"]
             role = entry["role"]
             step = next((s for s in steps if s["node_id"] == node_id), None)
+            if step:
+                step_overrides = parse_step_overrides(step.get("step_overrides_json"))
+                role = effective_output_role(role, step_overrides.get("output_role_override"))
             if not step or not step.get("active_task_run_id"):
                 self._mark_run_completed(
                     project_run_id,
@@ -356,6 +429,17 @@ class ProjectRuntime:
             artifacts = self.engine.db.artifacts_for_job(step["active_task_run_id"])
             matches = [a for a in artifacts if a.get("role") == role]
             if len(matches) != 1:
+                if orchestrator_config and not matches:
+                    # Only a clean "nothing matched" case is repairable; an ambiguous
+                    # multi-match needs judgment the deterministic tier won't guess at,
+                    # and plan_repair already declines it (see PROJECT_ARTIFACT_AMBIGUOUS).
+                    decision = self._safe_hook(
+                        "supervisor.on_output_selection_failed",
+                        self.supervisor.on_output_selection_failed,
+                        project_run_id, node_id, role,
+                    )
+                    if decision:
+                        return  # Step reset to pending; the run stays 'running' and re-finalizes next tick.
                 self._mark_run_completed(
                     project_run_id,
                     steps,
@@ -373,7 +457,7 @@ class ProjectRuntime:
                 return
             uid = matches[0].get("artifact_uid") or matches[0].get("relative_path")
             final_ids.append({"node_id": node_id, "role": role, "artifact_uid": uid})
-        self._mark_run_completed(project_run_id, steps, final_ids, warnings)
+        self._mark_run_completed(project_run_id, steps, final_ids, warnings, orchestrator_config=orchestrator_config)
 
     def _mark_run_completed(
         self,
@@ -383,6 +467,7 @@ class ProjectRuntime:
         warnings: list[dict[str, Any]],
         *,
         failed: bool = False,
+        orchestrator_config: dict[str, Any] | None = None,
     ) -> None:
         failed_step = next((s for s in steps if s["status"] == "failed"), None)
         status = "failed" if failed or failed_step else "completed"
@@ -393,6 +478,13 @@ class ProjectRuntime:
             warnings_json=json.dumps(warnings),
             completed_at=utc_now(),
         )
+        if status == "completed" and orchestrator_config:
+            run = self.db.get_project_run(project_run_id)
+            if run:
+                self._safe_hook(
+                    "narrate_run_completed", self._note, project_run_id, None,
+                    narrate_run_completed(run, steps, final_ids),
+                )
 
     def _finalize_failed(self, project_run_id: str, steps: list[dict[str, Any]]) -> None:
         failed = next((s for s in steps if s["status"] == "failed"), None)
@@ -411,6 +503,7 @@ class ProjectRuntime:
             warnings_json=json.dumps(warnings),
             completed_at=utc_now(),
         )
+        self._safe_hook("orchestrator_closing_report", self._maybe_write_closing_report, project_run_id, warnings)
         try:
             from ..notifications.service import NotificationService
 
@@ -429,6 +522,28 @@ class ProjectRuntime:
             )
         except Exception:  # notification delivery is best-effort
             logger.exception("project failure notification failed for %s", project_run_id)
+
+    def _maybe_write_closing_report(self, project_run_id: str, warnings: list[dict[str, Any]]) -> None:
+        """Ask the Orchestrator agent for a short closing explanation of a failed Run.
+
+        Only called when the Orchestrator is attached and the Run actually failed - that
+        failure is itself the incident being explained. A successful Run never reaches
+        here; its story is already fully told by ``narrate_run_completed``.
+        """
+        run = self.db.get_project_run(project_run_id)
+        if not run:
+            return
+        snapshot = json.loads(run["project_snapshot_json"])
+        config = Supervisor.config_from_snapshot(snapshot)
+        if not config:
+            return
+        agent = self.supervisor.build_agent(config)
+        state_digest = self.supervisor.state_digest(project_run_id)
+        run_summary = f"status=failed warnings={json.dumps(warnings)}"
+        report = agent.final_report(state_digest, run_summary)
+        self.db.append_project_run_event(
+            project_run_id, node_id=None, kind="report", actor="orchestrator", summary=report
+        )
 
     # --- daemon helpers ---------------------------------------------------------
 

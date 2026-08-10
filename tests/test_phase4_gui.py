@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -116,6 +117,102 @@ class ProjectsWidgetTests(unittest.TestCase):
         self.assertEqual([n["task_id"] for n in payload["nodes"]], ["ta", "ta"])
         self.assertEqual(payload["connections"][0]["from_node"], "collect")
         self.assertEqual(payload["output_selection"][0]["role"], "final")
+
+    def test_project_editor_omits_orchestrator_when_never_enabled(self):
+        dialog = ProjectEditorDialog(available_tasks=[{"name": "TA", "task_id": "ta"}], delivery_roots=[])
+        dialog.name_edit.setText("Solo")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 0, 0, "a")
+        _select_task(dialog, 0, "ta")
+
+        payload = dialog.payload()
+
+        self.assertNotIn("orchestrator", payload)
+
+    def test_project_editor_orchestrator_round_trip(self):
+        dialog = ProjectEditorDialog(available_tasks=[{"name": "TA", "task_id": "ta"}], delivery_roots=[])
+        dialog.name_edit.setText("Solo")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 0, 0, "a")
+        _select_task(dialog, 0, "ta")
+        dialog.orchestrator_enabled_checkbox.setChecked(True)
+        dialog.orchestrator_worker_edit.setText("claude")
+        dialog.orchestrator_model_edit.setText("claude-opus-4-6")
+        dialog.orchestrator_profile_edit.setText("default")
+        dialog.orchestrator_max_repairs_node_spin.setValue(3)
+        dialog.orchestrator_max_repairs_run_spin.setValue(9)
+        dialog.orchestrator_max_llm_calls_spin.setValue(12)
+
+        payload = dialog.payload()
+
+        self.assertEqual(
+            payload["orchestrator"],
+            {
+                "enabled": True,
+                "worker": "claude",
+                "model": "claude-opus-4-6",
+                "profile": "default",
+                "max_repair_attempts_per_node": 3,
+                "max_repair_attempts_per_run": 9,
+                "max_llm_calls_per_run": 12,
+            },
+        )
+
+    def test_project_editor_populates_orchestrator_from_existing_project(self):
+        dialog = ProjectEditorDialog(
+            project={
+                "name": "Existing",
+                "description": "",
+                "definition_json": json.dumps(
+                    {
+                        "name": "Existing",
+                        "nodes": [{"node_id": "a", "task_id": "ta"}],
+                        "connections": [],
+                        "output_selection": [],
+                        "orchestrator": {
+                            "enabled": True,
+                            "worker": "codex",
+                            "model": "gpt-5.6-luna",
+                            "max_llm_calls_per_run": 5,
+                        },
+                    }
+                ),
+            },
+            available_tasks=[{"name": "TA", "task_id": "ta"}],
+            delivery_roots=[],
+        )
+
+        self.assertTrue(dialog.orchestrator_enabled_checkbox.isChecked())
+        self.assertEqual(dialog.orchestrator_worker_edit.text(), "codex")
+        self.assertEqual(dialog.orchestrator_model_edit.text(), "gpt-5.6-luna")
+        self.assertEqual(dialog.orchestrator_max_llm_calls_spin.value(), 5)
+
+    def test_project_editor_unchecking_orchestrator_preserves_settings_for_reenable(self):
+        """Disabling must not throw away worker/budget settings a re-enable would want back."""
+        dialog = ProjectEditorDialog(
+            project={
+                "name": "Existing",
+                "description": "",
+                "definition_json": json.dumps(
+                    {
+                        "name": "Existing",
+                        "nodes": [{"node_id": "a", "task_id": "ta"}],
+                        "connections": [],
+                        "output_selection": [],
+                        "orchestrator": {"enabled": True, "worker": "codex", "max_llm_calls_per_run": 5},
+                    }
+                ),
+            },
+            available_tasks=[{"name": "TA", "task_id": "ta"}],
+            delivery_roots=[],
+        )
+
+        dialog.orchestrator_enabled_checkbox.setChecked(False)
+        payload = dialog.payload()
+
+        self.assertEqual(payload["orchestrator"]["enabled"], False)
+        self.assertEqual(payload["orchestrator"]["worker"], "codex")
+        self.assertEqual(payload["orchestrator"]["max_llm_calls_per_run"], 5)
 
     def test_project_editor_task_column_is_a_picker_not_free_text(self):
         # The defect this fixes: a user had to hand-type "Name (task_id)" into a

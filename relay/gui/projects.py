@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -366,6 +367,45 @@ class ProjectEditorDialog(QDialog):
         output_buttons.addWidget(self.remove_output_button)
         output_buttons.addStretch(1)
         root.addLayout(output_buttons)
+
+        root.addWidget(QLabel("<b>Orchestrator</b> (optional)"))
+        orch_hint = QLabel(
+            "On failure, narrates progress and repairs within a bounded budget (retry, worker "
+            "swap, connection/output role rebind, an append-only instruction addendum) before "
+            "reporting the cause. Its authority is a strict subset of what you can already do "
+            "through this editor and the Project Runs screen, and it never leaves the Run - the "
+            "Project and Task definitions here are never changed by it."
+        )
+        orch_hint.setWordWrap(True)
+        orch_hint.setObjectName("mutedText")
+        apply_type(orch_hint, "caption")
+        root.addWidget(orch_hint)
+        self._original_orchestrator: dict = {}
+        self.orchestrator_enabled_checkbox = QCheckBox("Attach an Orchestrator to this Project's Runs")
+        root.addWidget(self.orchestrator_enabled_checkbox)
+        orch_form = QFormLayout()
+        self.orchestrator_worker_edit = QLineEdit()
+        self.orchestrator_worker_edit.setPlaceholderText("auto")
+        orch_form.addRow("Worker (Orchestrator's own reasoning)", self.orchestrator_worker_edit)
+        self.orchestrator_model_edit = QLineEdit()
+        self.orchestrator_model_edit.setPlaceholderText("worker default, e.g. gpt-5.6-luna")
+        orch_form.addRow("Model", self.orchestrator_model_edit)
+        self.orchestrator_profile_edit = QLineEdit()
+        orch_form.addRow("Profile", self.orchestrator_profile_edit)
+        self.orchestrator_max_repairs_node_spin = QSpinBox()
+        self.orchestrator_max_repairs_node_spin.setRange(1, 20)
+        self.orchestrator_max_repairs_node_spin.setValue(2)
+        orch_form.addRow("Max repairs per node", self.orchestrator_max_repairs_node_spin)
+        self.orchestrator_max_repairs_run_spin = QSpinBox()
+        self.orchestrator_max_repairs_run_spin.setRange(1, 50)
+        self.orchestrator_max_repairs_run_spin.setValue(6)
+        orch_form.addRow("Max repairs per Run", self.orchestrator_max_repairs_run_spin)
+        self.orchestrator_max_llm_calls_spin = QSpinBox()
+        self.orchestrator_max_llm_calls_spin.setRange(1, 50)
+        self.orchestrator_max_llm_calls_spin.setValue(8)
+        orch_form.addRow("Max agent calls per Run", self.orchestrator_max_llm_calls_spin)
+        root.addLayout(orch_form)
+
         root.addStretch(1)
 
         scroll.setWidget(body)
@@ -414,6 +454,17 @@ class ProjectEditorDialog(QDialog):
         self._populate_nodes(definition.get("nodes") or [])
         self._populate_connections(definition.get("connections") or [])
         self._populate_outputs(definition.get("output_selection") or [])
+        self._populate_orchestrator(definition.get("orchestrator") or {})
+
+    def _populate_orchestrator(self, orchestrator: dict) -> None:
+        self._original_orchestrator = dict(orchestrator)
+        self.orchestrator_enabled_checkbox.setChecked(bool(orchestrator.get("enabled")))
+        self.orchestrator_worker_edit.setText(str(orchestrator.get("worker") or ""))
+        self.orchestrator_model_edit.setText(str(orchestrator.get("model") or ""))
+        self.orchestrator_profile_edit.setText(str(orchestrator.get("profile") or ""))
+        self.orchestrator_max_repairs_node_spin.setValue(int(orchestrator.get("max_repair_attempts_per_node") or 2))
+        self.orchestrator_max_repairs_run_spin.setValue(int(orchestrator.get("max_repair_attempts_per_run") or 6))
+        self.orchestrator_max_llm_calls_spin.setValue(int(orchestrator.get("max_llm_calls_per_run") or 8))
 
     def _populate_nodes(self, nodes):
         self.nodes_table.setRowCount(0)
@@ -608,7 +659,7 @@ class ProjectEditorDialog(QDialog):
             if not (node_id and role):
                 continue
             output_selection.append({"node_id": node_id, "role": role})
-        return {
+        result = {
             "name": name,
             "description": self.description_edit.text().strip() or None,
             "failure_policy": "stop",
@@ -616,6 +667,41 @@ class ProjectEditorDialog(QDialog):
             "connections": connections,
             "output_selection": output_selection,
         }
+        orchestrator = self._orchestrator_payload()
+        if orchestrator is not None:
+            result["orchestrator"] = orchestrator
+        return result
+
+    def _orchestrator_payload(self) -> dict | None:
+        """None means "omit the key" - a brand-new Project that never enabled the
+        Orchestrator gets a snapshot with no orchestrator key at all, matching the
+        byte-for-byte-unchanged invariant. A Project that had one attached keeps its
+        settings on the payload even while unchecked, so re-enabling doesn't lose them.
+        """
+        enabled = self.orchestrator_enabled_checkbox.isChecked()
+        if not enabled and not self._original_orchestrator:
+            return None
+        orchestrator = dict(self._original_orchestrator)
+        orchestrator["enabled"] = enabled
+        worker = self.orchestrator_worker_edit.text().strip()
+        if worker:
+            orchestrator["worker"] = worker
+        else:
+            orchestrator.pop("worker", None)
+        model = self.orchestrator_model_edit.text().strip()
+        if model:
+            orchestrator["model"] = model
+        else:
+            orchestrator.pop("model", None)
+        profile = self.orchestrator_profile_edit.text().strip()
+        if profile:
+            orchestrator["profile"] = profile
+        else:
+            orchestrator.pop("profile", None)
+        orchestrator["max_repair_attempts_per_node"] = self.orchestrator_max_repairs_node_spin.value()
+        orchestrator["max_repair_attempts_per_run"] = self.orchestrator_max_repairs_run_spin.value()
+        orchestrator["max_llm_calls_per_run"] = self.orchestrator_max_llm_calls_spin.value()
+        return orchestrator
 
     @staticmethod
     def _row_text(table, row, column):

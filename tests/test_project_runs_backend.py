@@ -333,5 +333,84 @@ class ProjectStepAttemptCountApiTests(_ProjectRunHarness):
         self.assertEqual(steps_response[0]["attempt_count"], 1)
 
 
+class StepOverridesWorkerTests(_ProjectRunHarness):
+    """Pins the Task 2 fix: worker_override moves from resolved_connections_json to
+    step_overrides_json so it no longer collides with the field's real purpose of
+    holding resolved input bindings (docs/superpowers/plans/2026-08-10-project-orchestrator.md).
+    """
+
+    def _solo_project_run(self) -> tuple[dict, str]:
+        a = self._task("A")
+        project = self.service.create_project(
+            {
+                "name": "Solo",
+                "nodes": [{"node_id": "a", "task_id": a["task_id"]}],
+                "connections": [],
+                "output_selection": [],
+            }
+        )
+        run = self.service.create_project_run(project["project_id"])
+        return project, run["project_run_id"]
+
+    def test_retry_project_run_writes_worker_override_to_step_overrides_json(self):
+        _, project_run_id = self._solo_project_run()
+        self.runtime.tick_once()
+        job_id = self.db.get_project_step(project_run_id, "a")["active_task_run_id"]
+        self.db.update_job(job_id, status="FAILED", error_code="ALL_WORKERS_FAILED", error_message="boom")
+        self.runtime.tick_once()
+        self.assertEqual(self.db.get_project_run(project_run_id)["status"], "failed")
+
+        self.service.retry_project_run(project_run_id, worker="codex")
+
+        step = self.db.get_project_step(project_run_id, "a")
+        self.assertEqual(json.loads(step["step_overrides_json"]), {"worker_override": "codex"})
+        resolved = step.get("resolved_connections_json")
+        self.assertTrue(resolved is None or json.loads(resolved) != {"worker_override": "codex"})
+
+    def test_retried_worker_override_reaches_dispatch_and_clears_after(self):
+        _, project_run_id = self._solo_project_run()
+        self.runtime.tick_once()
+        job_id = self.db.get_project_step(project_run_id, "a")["active_task_run_id"]
+        self.db.update_job(job_id, status="FAILED", error_code="ALL_WORKERS_FAILED", error_message="boom")
+        self.runtime.tick_once()
+
+        self.service.retry_project_run(project_run_id, worker="codex")
+        self.runtime.tick_once()
+
+        step = self.db.get_project_step(project_run_id, "a")
+        retried_job = self.db.get_job(step["active_task_run_id"])
+        self.assertEqual(retried_job["requested_worker"], "codex")
+        # The override is single-use: it must not leak into a later plain retry.
+        self.assertIsNone(step.get("step_overrides_json"))
+
+    def test_legacy_resolved_connections_json_worker_override_still_dispatches(self):
+        """A row written before Task 2's fix (worker_override still in resolved_connections_json)
+        must still reach dispatch, even without a fresh Database() reopen to run the migration
+        backfill."""
+        _, project_run_id = self._solo_project_run()
+        self.runtime.tick_once()
+        job_id = self.db.get_project_step(project_run_id, "a")["active_task_run_id"]
+        self.db.update_job(job_id, status="FAILED", error_code="ALL_WORKERS_FAILED", error_message="boom")
+        self.runtime.tick_once()
+
+        # Simulate the pre-fix write path directly, bypassing retry_project_run.
+        self.db.update_project_step(
+            project_run_id,
+            "a",
+            status="pending",
+            active_task_run_id=None,
+            error_code=None,
+            error_message=None,
+            resolved_connections_json=json.dumps({"worker_override": "codex"}),
+        )
+        self.db.update_project_run(project_run_id, status="running", completed_at=None, started_at=None)
+
+        self.runtime.tick_once()
+
+        step = self.db.get_project_step(project_run_id, "a")
+        retried_job = self.db.get_job(step["active_task_run_id"])
+        self.assertEqual(retried_job["requested_worker"], "codex")
+
+
 if __name__ == "__main__":
     unittest.main()

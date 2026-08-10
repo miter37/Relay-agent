@@ -35,6 +35,7 @@ from relay.gui.project_runs import (
     ProjectRunDetailView,
     ProjectRunInspectorView,
     ProjectRunNodeCard,
+    ProjectRunOrchestratorView,
     ProjectRunPipelineView,
     ProjectRunsView,
     ProjectRunTimelineCanvas,
@@ -1378,11 +1379,11 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_detail_view_has_pipeline_artifacts_and_timeline_tabs(self):
+    def test_detail_view_has_pipeline_artifacts_timeline_and_orchestrator_tabs(self):
         view = ProjectRunDetailView()
-        self.assertEqual(view.run_tabs.count(), 3)
+        self.assertEqual(view.run_tabs.count(), 4)
         labels = [view.run_tabs.tabText(i) for i in range(view.run_tabs.count())]
-        self.assertEqual(labels, ["Pipeline", "Artifacts", "Timeline"])
+        self.assertEqual(labels, ["Pipeline", "Artifacts", "Timeline", "Orchestrator"])
         self.assertNotIn("Steps", labels)
 
     def test_pipeline_artifact_selection_enters_artifacts_tab(self):
@@ -1540,6 +1541,244 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
         view = ProjectRunDetailView()
         view.set_run({})
         self.assertTrue(view.run_tabs.isHidden())
+
+
+class ProjectRunOrchestratorWidgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_no_data_shows_disabled_state(self):
+        view = ProjectRunOrchestratorView()
+        self.assertFalse(view.disabled_state.isHidden())
+        self.assertTrue(view.event_tree.isHidden())
+        self.assertTrue(view.budget_label.isHidden())
+
+    def test_disabled_orchestrator_shows_disabled_state(self):
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator({"ok": True, "enabled": False, "events": [], "budget": None})
+        self.assertFalse(view.disabled_state.isHidden())
+        self.assertTrue(view.event_tree.isHidden())
+
+    def test_enabled_orchestrator_hides_disabled_state_and_shows_events(self):
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator(
+            {
+                "ok": True,
+                "enabled": True,
+                "events": [
+                    {"node_id": None, "kind": "note", "actor": "runtime", "summary": "Started.", "created_at": "2026-08-10T00:00:00"},
+                    {"node_id": "a", "kind": "decision", "actor": "orchestrator", "summary": "Fixed a.", "created_at": "2026-08-10T00:00:05"},
+                ],
+                "budget": {
+                    "llm_calls_used": 1, "max_llm_calls_per_run": 8,
+                    "repair_attempts_used": 1, "max_repair_attempts_per_run": 6,
+                },
+            }
+        )
+        self.assertTrue(view.disabled_state.isHidden())
+        self.assertFalse(view.event_tree.isHidden())
+        self.assertEqual(view.event_tree.topLevelItemCount(), 2)
+
+    def test_events_render_in_chronological_order(self):
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator(
+            {
+                "ok": True,
+                "enabled": True,
+                "events": [
+                    {"node_id": None, "kind": "note", "actor": "runtime", "summary": "First.", "created_at": "t1"},
+                    {"node_id": "a", "kind": "decision", "actor": "orchestrator", "summary": "Second.", "created_at": "t2"},
+                    {"node_id": None, "kind": "note", "actor": "runtime", "summary": "Third.", "created_at": "t3"},
+                ],
+                "budget": None,
+            }
+        )
+        summaries = [view.event_tree.topLevelItem(i).text(2) for i in range(view.event_tree.topLevelItemCount())]
+        self.assertEqual(summaries, ["First.", "[a] Second.", "Third."])
+
+    def test_decision_card_shows_actor_and_summary(self):
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator(
+            {
+                "ok": True,
+                "enabled": True,
+                "events": [
+                    {
+                        "node_id": "page",
+                        "kind": "decision",
+                        "actor": "orchestrator",
+                        "summary": "Rebound A1 to role output.",
+                        "created_at": "2026-08-10T00:00:00",
+                    }
+                ],
+                "budget": None,
+            }
+        )
+        item = view.event_tree.topLevelItem(0)
+        self.assertEqual(item.text(1), "orchestrator")
+        self.assertIn("Rebound A1 to role output.", item.text(2))
+
+    def test_budget_display_shows_repairs_and_agent_calls(self):
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator(
+            {
+                "ok": True,
+                "enabled": True,
+                "events": [],
+                "budget": {
+                    "llm_calls_used": 2, "max_llm_calls_per_run": 8,
+                    "repair_attempts_used": 3, "max_repair_attempts_per_run": 6,
+                },
+            }
+        )
+        self.assertIn("3/6", view.budget_label.text())
+        self.assertIn("2/8", view.budget_label.text())
+
+    def test_promotion_proposal_apply_action_does_not_mutate_anything_by_itself(self):
+        """promotion_proposals is always empty today (Task 7), so the view must simply
+        render nothing extra for it rather than assume a shape no Task yet produces."""
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator({"ok": True, "enabled": True, "events": [], "budget": None, "promotion_proposals": []})
+        self.assertTrue(view.disabled_state.isHidden())
+
+    def test_set_unavailable_shows_error_and_hides_other_states(self):
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator({"ok": True, "enabled": True, "events": [], "budget": None})
+        view.set_unavailable("Orchestrator data request failed")
+        self.assertTrue(view.disabled_state.isHidden())
+        self.assertTrue(view.event_tree.isHidden())
+        self.assertTrue(view.budget_label.isHidden())
+        self.assertIn("Orchestrator data request failed", view.unavailable_label.text())
+        self.assertFalse(view.unavailable_label.isHidden())
+
+    def test_selection_state_survives_a_sparse_refresh(self):
+        """A later cache_orchestrator call must not need to be preceded by clearing -
+        set_orchestrator always rebuilds the tree from the given payload."""
+        view = ProjectRunOrchestratorView()
+        view.set_orchestrator(
+            {"ok": True, "enabled": True, "events": [{"node_id": "a", "kind": "note", "actor": "runtime", "summary": "One.", "created_at": "t1"}], "budget": None}
+        )
+        view.set_orchestrator(
+            {
+                "ok": True, "enabled": True,
+                "events": [
+                    {"node_id": "a", "kind": "note", "actor": "runtime", "summary": "One.", "created_at": "t1"},
+                    {"node_id": "a", "kind": "decision", "actor": "orchestrator", "summary": "Two.", "created_at": "t2"},
+                ],
+                "budget": None,
+            }
+        )
+        self.assertEqual(view.event_tree.topLevelItemCount(), 2)
+
+
+class ProjectRunDetailOrchestratorWiringTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_cache_orchestrator_forwards_to_the_orchestrator_tab(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="running")
+        run["steps"] = [_step_row("a")]
+        view.set_run(run)
+
+        view.cache_orchestrator({"ok": True, "enabled": True, "events": [], "budget": None})
+
+        self.assertTrue(view.orchestrator_view.disabled_state.isHidden())
+
+    def test_cache_orchestrator_error_shows_unavailable_state(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="running")
+        run["steps"] = [_step_row("a")]
+        view.set_run(run)
+
+        view.cache_orchestrator_error("boom")
+
+        self.assertIn("boom", view.orchestrator_view.unavailable_label.text())
+
+    def test_no_run_selected_resets_orchestrator_tab_to_disabled_state(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="running")
+        run["steps"] = [_step_row("a")]
+        view.set_run(run)
+        view.cache_orchestrator({"ok": True, "enabled": True, "events": [], "budget": None})
+
+        view.set_run({})
+
+        self.assertFalse(view.orchestrator_view.disabled_state.isHidden())
+
+
+class ProjectRunOrchestratorMainWindowRoutingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _build(self):
+        from relay.compatibility import relay_home_id
+        from relay.config import Config
+        from relay.gui.main_window import MainWindow
+
+        tmp = tempfile.TemporaryDirectory()
+        home = Path(tmp.name) / "home"
+        config = Config(home)
+        config.init()
+        window = MainWindow(config, gui_version="1.1.0", expected_home_id=relay_home_id(config.home))
+        window.current_mode = "normal"
+        self.requests: list[list] = []
+        window._request = lambda kind, path: self.requests.append([kind, str(path)])
+        return window, tmp
+
+    def test_select_project_run_requests_orchestrator_endpoint(self):
+        window, tmp = self._build()
+        try:
+            window._select_project_run("pr-1")
+            paths = {tuple(request[0]) for request in self.requests}
+            self.assertIn(("project_run_v2_orchestrator", "pr-1"), paths)
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_orchestrator_response_routes_to_detail_view(self):
+        window, tmp = self._build()
+        try:
+            window._select_project_run("pr-1")
+            window.pending[401] = ("project_run_v2_orchestrator", "pr-1")
+            window._handle_response(
+                401, {"ok": True, "enabled": True, "events": [], "budget": None}, None
+            )
+            self.assertTrue(window.project_runs_view.detail.orchestrator_view.disabled_state.isHidden())
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_orchestrator_error_routes_to_unavailable_state(self):
+        window, tmp = self._build()
+        try:
+            window._select_project_run("pr-1")
+            window.pending[402] = ("project_run_v2_orchestrator", "pr-1")
+            window._handle_response(402, None, "network error")
+            self.assertIn(
+                "network error", window.project_runs_view.detail.orchestrator_view.unavailable_label.text()
+            )
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_stale_orchestrator_response_is_ignored(self):
+        window, tmp = self._build()
+        try:
+            window._select_project_run("pr-1")
+            window._select_project_run("pr-2")
+            window.pending[403] = ("project_run_v2_orchestrator", "pr-1")
+            window._handle_response(
+                403, {"ok": True, "enabled": True, "events": [], "budget": None}, None
+            )
+            # pr-1's response must not populate the view now showing pr-2.
+            self.assertFalse(window.project_runs_view.detail.orchestrator_view.disabled_state.isHidden())
+        finally:
+            window.close()
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

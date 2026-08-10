@@ -62,6 +62,7 @@ from .api import (
     preview_routine,
     project_run,
     project_run_cancel,
+    project_run_orchestrator,
     project_run_receipt,
     project_run_retry,
     project_run_steps,
@@ -293,6 +294,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         "task-run",
                         "project-runtime",
                         "routine-runtime",
+                        "project-orchestrator",
                     ],
                     "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
@@ -459,6 +461,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 elif suffix.endswith("/receipt"):
                     prid = suffix[: -len("/receipt")]
                     self._json(HTTPStatus.OK, project_run_receipt(self.daemon.engine, prid))
+                elif suffix.endswith("/orchestrator"):
+                    prid = suffix[: -len("/orchestrator")]
+                    self._json(HTTPStatus.OK, project_run_orchestrator(self.daemon.engine, prid))
                 else:
                     self._json(HTTPStatus.OK, project_run(self.daemon.engine, suffix))
             except RelayError as err:

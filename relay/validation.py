@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -11,6 +12,8 @@ from typing import Any
 
 from .errors import RelayError
 from .util import is_within, sha256_file
+
+logger = logging.getLogger(__name__)
 
 # Relay labels its own result file with this role, and connection/output selection
 # must resolve to exactly one Artifact per (node, role).
@@ -49,6 +52,46 @@ def normalize_summary(
     return text[: max(1, max_chars - 1)].rstrip() + "…"
 
 
+# Deterministic recovery for the small set of well-understood LLM JSON-generation
+# mistakes (discovered live: 2026-08-10, a real antigravity Task Run failed on exactly
+# the missing-key-escape pattern below). No LLM, no third-party dependency, and no
+# guessing at semantic content - each pattern is narrow enough that a match is
+# essentially never a legitimate document shape, so there is nothing ambiguous to
+# resolve. Anything outside these two patterns still fails exactly as before.
+#
+# 1. A trailing comma before a closing bracket/brace.
+# 2. A key inside a JSON document that was itself escaped for embedding in an outer
+#    string (e.g. an artifact's `content` field carrying a nested JSON document as
+#    text) whose quote(s) are missing their escaping backslash - the model dropped one
+#    or both. Scoped to keys preceded by a literal backslash-n (an *escaped* newline,
+#    i.e. still inside the outer string) rather than a real newline, so a legitimate
+#    top-level key - always preceded by a real newline/comma/brace, never the two
+#    literal characters "\" + "n" - is never touched.
+_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+_MISSING_KEY_ESCAPE = re.compile(r'(?<=\\n)(\s*)"([A-Za-z_][A-Za-z0-9_ \-]*?)\\?":\s*\\?"')
+
+
+def _escape_key_match(match: re.Match[str]) -> str:
+    return f'{match.group(1)}\\"{match.group(2)}\\": \\"'
+
+
+def _repair_json_text(text: str) -> str | None:
+    repaired = _MISSING_KEY_ESCAPE.sub(_escape_key_match, text)
+    repaired = _TRAILING_COMMA.sub(r"\1", repaired)
+    return repaired if repaired != text else None
+
+
+def _load_json_with_repair(text: str) -> tuple[Any, str | None]:
+    """Returns (value, repaired_text). repaired_text is None when no repair was needed."""
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError:
+        repaired = _repair_json_text(text)
+        if repaired is None:
+            raise
+        return json.loads(repaired), repaired
+
+
 def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
     if not path.is_file():
         raise RelayError("OUTPUT_NOT_CREATED", f"Result file not found: {path}", True)
@@ -58,11 +101,19 @@ def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
     if size > max_bytes:
         raise RelayError("SCHEMA_MISMATCH", f"Result JSON exceeds maximum size: {size}")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise RelayError("INVALID_TEXT_ENCODING", "Result JSON is not UTF-8") from exc
+    try:
+        value, repaired_text = _load_json_with_repair(raw_text)
     except json.JSONDecodeError as exc:
         raise RelayError("INVALID_JSON", f"Result JSON parsing failed: {exc}", True) from exc
+    if repaired_text is not None:
+        # Persist the fix: result_path is what a human/agent reads directly per
+        # SKILL.md, so the on-disk file must match what actually validated, not just
+        # the in-memory value.
+        logger.warning("Auto-repaired malformed result JSON at %s", path)
+        path.write_text(repaired_text, encoding="utf-8")
     if not isinstance(value, dict):
         raise RelayError("SCHEMA_MISMATCH", "Result JSON must be an object", True)
     for field, expected in REQUIRED_JSON_FIELDS.items():

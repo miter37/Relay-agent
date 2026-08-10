@@ -10,10 +10,10 @@ from typing import Any
 
 from .errors import RelayError
 from .search import artifact_mime, artifact_search_content, fts_query, result_summary
-from .util import new_artifact_uid, utc_now
+from .util import new_artifact_uid, new_job_id, utc_now
 from .validation import normalize_summary
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 16
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_summary TEXT,
     instructions TEXT,
     default_worker TEXT,
+    default_model TEXT,
     fallback_enabled INTEGER NOT NULL DEFAULT 1,
     timeout_seconds INTEGER,
     profile TEXT,
@@ -254,6 +255,7 @@ CREATE TABLE IF NOT EXISTS project_run_steps (
     active_task_run_id TEXT,
     input_manifest_json TEXT,
     resolved_connections_json TEXT,
+    step_overrides_json TEXT,
     error_code TEXT,
     error_message TEXT,
     started_at TEXT,
@@ -275,6 +277,27 @@ CREATE TABLE IF NOT EXISTS project_step_runs (
     PRIMARY KEY (project_run_id, node_id, step_attempt),
     UNIQUE (task_run_id),
     FOREIGN KEY (project_run_id, node_id) REFERENCES project_run_steps(project_run_id, node_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS project_run_events (
+    event_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_events_run ON project_run_events(project_run_id, seq);
+
+CREATE TABLE IF NOT EXISTS project_run_orchestrator_state (
+    project_run_id TEXT PRIMARY KEY REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    llm_calls_used INTEGER NOT NULL DEFAULT 0,
+    repair_attempts_used INTEGER NOT NULL DEFAULT 0,
+    state_digest TEXT,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS routines (
@@ -492,6 +515,33 @@ MIGRATION_13_TO_14 = """
 ALTER TABLE projects ADD COLUMN project_summary TEXT;
 CREATE INDEX IF NOT EXISTS idx_projects_catalog ON projects(updated_at DESC, project_id DESC);
 CREATE INDEX IF NOT EXISTS idx_project_runs_catalog ON project_runs(created_at DESC, project_run_id DESC);
+"""
+
+MIGRATION_14_TO_15 = """
+ALTER TABLE project_run_steps ADD COLUMN step_overrides_json TEXT;
+CREATE TABLE IF NOT EXISTS project_run_events (
+    event_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_events_run ON project_run_events(project_run_id, seq);
+CREATE TABLE IF NOT EXISTS project_run_orchestrator_state (
+    project_run_id TEXT PRIMARY KEY REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    llm_calls_used INTEGER NOT NULL DEFAULT 0,
+    repair_attempts_used INTEGER NOT NULL DEFAULT 0,
+    state_digest TEXT,
+    updated_at TEXT NOT NULL
+);
+"""
+
+MIGRATION_15_TO_16 = """
+ALTER TABLE tasks ADD COLUMN default_model TEXT;
 """
 
 MIGRATION_9_TO_10 = """
@@ -779,6 +829,8 @@ class Database:
                         MIGRATION_11_TO_12,
                         MIGRATION_12_TO_13,
                         MIGRATION_13_TO_14,
+                        MIGRATION_14_TO_15,
+                        MIGRATION_15_TO_16,
                     ):
                         for statement in migration.split(";"):
                             if statement.strip():
@@ -793,6 +845,7 @@ class Database:
                     conn.execute("COMMIT")
                     self._backfill_catalog_summaries(conn)
                     self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
                 except Exception as exc:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
@@ -879,11 +932,26 @@ class Database:
                             except sqlite3.OperationalError as exc:
                                 if "duplicate column" not in str(exc):
                                     raise
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
                     self._backfill_catalog_summaries(conn)
                     self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
                 except Exception as exc:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
@@ -942,10 +1010,25 @@ class Database:
                             except sqlite3.OperationalError as exc:
                                 if "duplicate column" not in str(exc):
                                     raise
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     conn.execute("COMMIT")
                     self._backfill_catalog_summaries(conn)
                     self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
                 except Exception as exc:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
@@ -964,10 +1047,25 @@ class Database:
                             except sqlite3.OperationalError as exc:
                                 if "duplicate column" not in str(exc):
                                     raise
-                    conn.execute("PRAGMA user_version=14")
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
                     conn.execute("COMMIT")
                     self._backfill_catalog_summaries(conn)
                     self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
                 except Exception as exc:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
@@ -979,9 +1077,66 @@ class Database:
                     for statement in MIGRATION_13_TO_14.split(";"):
                         if statement.strip():
                             conn.execute(statement)
-                    conn.execute("PRAGMA user_version=14")
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
                     conn.execute("COMMIT")
                     self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+            elif version == 14:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
+                    conn.execute("COMMIT")
+                    self._backfill_step_overrides(conn)
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+            elif version == 15:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
+                    conn.execute("COMMIT")
                 except Exception as exc:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
@@ -991,6 +1146,7 @@ class Database:
                 self._ensure_search_tables(conn)
                 self._backfill_catalog_summaries(conn, read_results=False)
                 self._backfill_project_summaries(conn)
+                self._backfill_step_overrides(conn)
         self._refresh_search_index_if_stale()
 
     @staticmethod
@@ -1331,6 +1487,42 @@ class Database:
             if changes:
                 values.append(row[0])
                 conn.execute(f"UPDATE jobs SET {','.join(changes)} WHERE job_id=?", values)
+
+    def _backfill_step_overrides(self, conn: sqlite3.Connection) -> None:
+        """Move the legacy worker-override overlay out of ``resolved_connections_json``.
+
+        Before schema v15, ``retry_project_run(worker=...)`` stashed ``{"worker_override": ...}``
+        directly into ``resolved_connections_json``, the same field that otherwise holds the
+        step's resolved input bindings, and callers told the two shapes apart with an
+        ``isinstance(dict)`` check. Any row still carrying that shape gets its override moved
+        into ``step_overrides_json`` and the field cleared; rows already migrated (JSON array or
+        NULL) are left untouched, so this is safe to run on every startup.
+        """
+        rows = conn.execute(
+            "SELECT project_run_id, node_id, resolved_connections_json, step_overrides_json "
+            "FROM project_run_steps WHERE resolved_connections_json IS NOT NULL"
+        ).fetchall()
+        for project_run_id, node_id, resolved_json, overrides_json in rows:
+            try:
+                decoded = json.loads(resolved_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(decoded, dict) or "worker_override" not in decoded:
+                continue
+            overrides = {}
+            if overrides_json:
+                try:
+                    parsed = json.loads(overrides_json)
+                    if isinstance(parsed, dict):
+                        overrides = parsed
+                except (TypeError, json.JSONDecodeError):
+                    overrides = {}
+            overrides.setdefault("worker_override", decoded.get("worker_override"))
+            conn.execute(
+                "UPDATE project_run_steps SET step_overrides_json=?, resolved_connections_json=NULL "
+                "WHERE project_run_id=? AND node_id=?",
+                (json.dumps(overrides), project_run_id, node_id),
+            )
 
     def _backfill_project_summaries(self, conn: sqlite3.Connection) -> None:
         for row in conn.execute(
@@ -2231,6 +2423,99 @@ class Database:
                 conn.rollback()
                 raise
         return claimed_list
+
+    # --- orchestrator ------------------------------------------------------------
+
+    def append_project_run_event(
+        self,
+        project_run_id: str,
+        *,
+        node_id: str | None,
+        kind: str,
+        actor: str,
+        summary: str,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one narration/decision event; ``seq`` orders the run's event stream."""
+        event_id = new_job_id()
+        now = utc_now()
+        with self.connect() as conn:
+            seq_row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM project_run_events WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            seq = int(seq_row[0])
+            conn.execute(
+                "INSERT INTO project_run_events "
+                "(event_id, project_run_id, node_id, seq, kind, actor, summary, detail_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    project_run_id,
+                    node_id,
+                    seq,
+                    kind,
+                    actor,
+                    summary,
+                    json.dumps(detail) if detail is not None else None,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM project_run_events WHERE event_id=?", (event_id,)).fetchone()
+            return dict(row)
+
+    def list_project_run_events(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM project_run_events WHERE project_run_id=? ORDER BY seq",
+                (project_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_orchestrator_state(self, project_run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM project_run_orchestrator_state WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def upsert_orchestrator_state(self, project_run_id: str, **changes: Any) -> dict[str, Any]:
+        """Insert or merge orchestrator budget/state fields for a Project Run."""
+        now = utc_now()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM project_run_orchestrator_state WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            if existing:
+                if changes:
+                    keys = list(changes)
+                    conn.execute(
+                        f"UPDATE project_run_orchestrator_state SET {','.join(f'{k}=?' for k in keys)}, updated_at=? "
+                        "WHERE project_run_id=?",
+                        [changes[k] for k in keys] + [now, project_run_id],
+                    )
+            else:
+                values = {
+                    "project_run_id": project_run_id,
+                    "llm_calls_used": 0,
+                    "repair_attempts_used": 0,
+                    "state_digest": None,
+                    **changes,
+                    "updated_at": now,
+                }
+                keys = list(values)
+                conn.execute(
+                    f"INSERT INTO project_run_orchestrator_state ({','.join(keys)}) "
+                    f"VALUES ({','.join('?' for _ in keys)})",
+                    [values[k] for k in keys],
+                )
+            row = conn.execute(
+                "SELECT * FROM project_run_orchestrator_state WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            return dict(row)
 
     def create_routine(self, row):
         from .util import utc_now

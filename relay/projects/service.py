@@ -9,6 +9,7 @@ from typing import Any
 from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
+from ..orchestrator.overrides import effective_manifest_entries, parse_step_overrides
 from ..util import canonical_json, new_job_id, sha256_file, utc_now
 from .models import (
     ProjectSpec,
@@ -267,9 +268,10 @@ class ProjectService:
         if not project_run:
             raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
         snapshot = json.loads(project_run["project_snapshot_json"])
-        manifest = json.loads(
-            (self.db.get_project_step(project_run_id, node_id) or {}).get("input_manifest_json") or "[]"
-        )
+        step = self.db.get_project_step(project_run_id, node_id) or {}
+        manifest = json.loads(step.get("input_manifest_json") or "[]")
+        overrides = parse_step_overrides(step.get("step_overrides_json"))
+        manifest = effective_manifest_entries(manifest, overrides.get("connection_overrides"))
         resolved: list[dict[str, Any]] = []
         for entry in manifest:
             if entry.get("artifact_uid") and entry.get("snapshot"):
@@ -364,7 +366,7 @@ class ProjectService:
             if s["node_id"] == target_node or s["node_id"] in descendants:
                 payload = {"status": "pending", "active_task_run_id": None, "error_code": None, "error_message": None}
                 if s["node_id"] == target_node and worker is not None:
-                    payload["resolved_connections_json"] = canonical_json({"worker_override": worker})
+                    payload["step_overrides_json"] = canonical_json({"worker_override": worker})
                 self.db.update_project_step(project_run_id, s["node_id"], **payload)
             elif s["status"] == "blocked":
                 self.db.update_project_step(
@@ -414,12 +416,17 @@ class ProjectService:
         if not run:
             raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
         steps = self.db.list_project_steps(project_run_id)
+        events_by_node: dict[str, dict[str, Any]] = {}
+        for event in self.db.list_project_run_events(project_run_id):
+            if event.get("node_id") and event.get("kind") in {"decision", "report", "fallback"}:
+                events_by_node[event["node_id"]] = event  # last one wins; events are seq-ordered
         step_receipts = []
         for s in steps:
             step_runs = self.db.list_project_step_runs(project_run_id, s["node_id"])
             resolved = json.loads(s.get("resolved_connections_json") or "[]")
             if isinstance(resolved, dict):
                 resolved = []
+            last_event = events_by_node.get(s["node_id"])
             step_receipts.append(
                 {
                     "node_id": s["node_id"],
@@ -431,6 +438,8 @@ class ProjectService:
                     "resolved_inputs": resolved,
                     "error_code": s.get("error_code"),
                     "error_message": s.get("error_message"),
+                    "step_overrides": parse_step_overrides(s.get("step_overrides_json")),
+                    "orchestrator_summary": last_event["summary"] if last_event else None,
                 }
             )
         snapshot = json.loads(run["project_snapshot_json"])
@@ -473,7 +482,7 @@ class ProjectService:
             if s["node_id"] in targets:
                 payload = {"status": "pending", "active_task_run_id": None, "error_code": None, "error_message": None}
                 if s["node_id"] == from_node and worker is not None:
-                    payload["resolved_connections_json"] = canonical_json({"worker_override": worker})
+                    payload["step_overrides_json"] = canonical_json({"worker_override": worker})
                 self.db.update_project_step(project_run_id, s["node_id"], **payload)
 
         self.db.update_project_run(project_run_id, status="running", completed_at=None, started_at=None)

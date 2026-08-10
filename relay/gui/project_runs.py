@@ -663,10 +663,13 @@ class ProjectRunDetailView(QWidget):
 
         self.timeline_view = ProjectRunTimelineView()
 
+        self.orchestrator_view = ProjectRunOrchestratorView()
+
         self.run_tabs = QTabWidget()
         self.run_tabs.addTab(self.pipeline_view, "Pipeline")
         self.run_tabs.addTab(self.artifacts_view, "Artifacts")
         self.run_tabs.addTab(self.timeline_view, "Timeline")
+        self.run_tabs.addTab(self.orchestrator_view, "Orchestrator")
         self.run_tabs.currentChanged.connect(self._on_run_tab_changed)
         layout.addWidget(self.run_tabs, 1)
 
@@ -728,6 +731,7 @@ class ProjectRunDetailView(QWidget):
             self.pipeline_view.clear()
             self.artifacts_view.set_run(None, [], {})
             self.timeline_view.clear()
+            self.orchestrator_view.set_orchestrator(None)
             return
         self.empty.setVisible(False)
         self.status_badge.setVisible(True)
@@ -1046,6 +1050,13 @@ class ProjectRunDetailView(QWidget):
         if isinstance(steps, list):
             self._run["receipt_steps"] = [s for s in steps if isinstance(s, dict)]
         self._refresh_inspector_for_current_selection()
+
+    def cache_orchestrator(self, data: dict[str, Any]) -> None:
+        if isinstance(data, dict):
+            self.orchestrator_view.set_orchestrator(data)
+
+    def cache_orchestrator_error(self, message: str) -> None:
+        self.orchestrator_view.set_unavailable(str(message or "Orchestrator data is unavailable."))
 
     def cache_task_run_detail(self, task_run_id: str, detail: dict[str, Any]) -> None:
         self._task_run_details[str(task_run_id)] = dict(detail) if isinstance(detail, dict) else {}
@@ -2529,3 +2540,103 @@ class ProjectRunTimelineCanvas(QWidget):
                 painter.setPen(QColor(muted_color))
                 painter.drawText(int(end_x + 4), int(row_y + row_height / 2 + 5), row["worker"])
         painter.end()
+
+
+_ORCHESTRATOR_EVENT_ICON: dict[str, str] = {
+    "decision": "check-circle",
+    "repair": "check-circle",
+    "report": "alert-circle",
+    "fallback": "alert-triangle",
+    "note": "info",
+}
+
+
+def _format_orchestrator_budget(budget: dict[str, Any] | None) -> str:
+    if not budget:
+        return ""
+    repairs_used = budget.get("repair_attempts_used", 0)
+    repairs_max = budget.get("max_repair_attempts_per_run")
+    calls_used = budget.get("llm_calls_used", 0)
+    calls_max = budget.get("max_llm_calls_per_run")
+    repairs_max_text = "?" if repairs_max is None else str(repairs_max)
+    calls_max_text = "?" if calls_max is None else str(calls_max)
+    return f"Repairs {repairs_used}/{repairs_max_text} · Agent calls {calls_used}/{calls_max_text}"
+
+
+class ProjectRunOrchestratorView(QWidget):
+    """Chronological narration/decision stream and budget for one Project Run's Orchestrator.
+
+    Absent or disabled Orchestrator configuration renders an explanatory empty state
+    rather than an empty table, so a Project that never attached one reads as "not used
+    here" instead of "broken".
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._data: dict[str, Any] | None = None
+
+        layout = QVBoxLayout(self)
+
+        self.budget_label = QLabel("")
+        self.budget_label.setObjectName("mutedText")
+        self.budget_label.setVisible(False)
+        layout.addWidget(self.budget_label)
+
+        self.event_tree = QTreeWidget()
+        self.event_tree.setHeaderLabels(["When", "Actor", "Event"])
+        self.event_tree.setColumnWidth(0, 150)
+        self.event_tree.setColumnWidth(1, 110)
+        self.event_tree.setRootIsDecorated(False)
+        self.event_tree.setVisible(False)
+        layout.addWidget(self.event_tree, 1)
+
+        self.disabled_state = EmptyState(
+            "No Orchestrator attached",
+            "Attach an Orchestrator in the Project editor to get automatic narration and "
+            "bounded self-repair on this Project's Runs.",
+            action_text="",
+        )
+        layout.addWidget(self.disabled_state)
+
+        self.unavailable_label = QLabel("")
+        self.unavailable_label.setObjectName("mutedText")
+        self.unavailable_label.setWordWrap(True)
+        self.unavailable_label.setVisible(False)
+        layout.addWidget(self.unavailable_label)
+
+        self.set_orchestrator(None)
+
+    def set_orchestrator(self, data: dict[str, Any] | None) -> None:
+        self._data = data
+        self.unavailable_label.setVisible(False)
+        enabled = bool(data and data.get("enabled"))
+        self.disabled_state.setVisible(not enabled)
+        self.budget_label.setVisible(enabled)
+        self.event_tree.setVisible(enabled)
+        self.event_tree.clear()
+        if not enabled:
+            return
+        self.budget_label.setText(_format_orchestrator_budget(data.get("budget")))
+        for event in data.get("events") or []:
+            self._add_event_row(event)
+
+    def _add_event_row(self, event: dict[str, Any]) -> None:
+        kind = str(event.get("kind") or "note")
+        actor = str(event.get("actor") or "")
+        summary = str(event.get("summary") or "")
+        node_id = event.get("node_id")
+        created_at = str(event.get("created_at") or "")[:19]
+        prefix = f"[{node_id}] " if node_id else ""
+        item = QTreeWidgetItem([created_at, actor, f"{prefix}{summary}"])
+        item.setIcon(2, icon(_ORCHESTRATOR_EVENT_ICON.get(kind, "info")))
+        item.setToolTip(2, summary)
+        self.event_tree.addTopLevelItem(item)
+
+    def set_unavailable(self, message: str) -> None:
+        self._data = None
+        self.disabled_state.setVisible(False)
+        self.event_tree.setVisible(False)
+        self.event_tree.clear()
+        self.budget_label.setVisible(False)
+        self.unavailable_label.setText(message)
+        self.unavailable_label.setVisible(True)

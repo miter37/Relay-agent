@@ -103,6 +103,7 @@ class TaskSpec:
     description: str | None = None
     task_summary: str | None = None
     default_worker: str | None = "auto"
+    default_model: str | None = None
     fallback_enabled: bool = True
     timeout_seconds: int | None = None
     profile: str | None = None
@@ -151,6 +152,7 @@ class TaskSpec:
             "task_summary": self.task_summary,
             "instructions": self.instructions,
             "default_worker": self.default_worker,
+            "default_model": self.default_model,
             "fallback_enabled": 1 if self.fallback_enabled else 0,
             "timeout_seconds": self.timeout_seconds,
             "profile": self.profile,
@@ -171,6 +173,7 @@ class TaskSpec:
             "task_summary",
             "instructions",
             "default_worker",
+            "default_model",
             "fallback_enabled",
             "timeout_seconds",
             "profile",
@@ -216,6 +219,7 @@ class TaskSpec:
             description=description,
             task_summary=snapshot.get("task_summary") or description,
             default_worker=worker,
+            default_model=snapshot.get("model") or request.get("model"),
             fallback_enabled=bool(fallback) if fallback is not None else True,
             timeout_seconds=snapshot.get("timeout_seconds") or request.get("timeout_seconds"),
             profile=snapshot.get("profile") or request.get("profile"),

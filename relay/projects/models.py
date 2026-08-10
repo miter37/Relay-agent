@@ -12,6 +12,25 @@ from ..validation import normalize_summary
 _ALIAS_PATTERN = re.compile(r"^A[1-9][0-9]*$")
 _POLICY_VALUES = {"stop"}
 
+# Orchestrator authority is a strict subset of what a human already does through the
+# CLI/GUI (retry, worker swap, instruction addendum, connection/output role rebind) and
+# never escapes the Run it is attached to; see docs/superpowers/plans/2026-08-10-project-orchestrator.md.
+ORCHESTRATOR_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "worker": None,
+    "model": None,
+    "profile": None,
+    "max_repair_attempts_per_node": 2,
+    "max_repair_attempts_per_run": 6,
+    "max_llm_calls_per_run": 8,
+}
+_ORCHESTRATOR_KEYS = set(ORCHESTRATOR_DEFAULTS)
+_ORCHESTRATOR_BUDGET_KEYS = {
+    "max_repair_attempts_per_node",
+    "max_repair_attempts_per_run",
+    "max_llm_calls_per_run",
+}
+
 # Machine-readable contract for `relay project schema`. Callers that only have the
 # CLI cannot read this module, and the binding rules below are enforced at run time
 # rather than at registration, so they have to be stated explicitly.
@@ -146,6 +165,7 @@ class ProjectSpec:
     output_selection: ProjectOutputSelection
     failure_policy: str = "stop"
     notification_policy: dict[str, Any] | None = None
+    orchestrator: dict[str, Any] | None = None
     description: str | None = None
     project_summary: str | None = None
     name: str | None = None
@@ -163,6 +183,7 @@ class ProjectSpec:
             "version": self.version,
             "failure_policy": self.failure_policy,
             **({"notification_policy": self.notification_policy} if self.notification_policy else {}),
+            **({"orchestrator": self.orchestrator} if self.orchestrator else {}),
             "nodes": [
                 {"node_id": n.node_id, "task_id": n.task_id, **({"checkpoint": n.checkpoint} if n.checkpoint else {})}
                 for n in self.nodes
@@ -258,6 +279,28 @@ class ProjectSpec:
                 raise RelayError("PROJECT_INVALID", "output_selection role must be non-empty.")
         if self.failure_policy not in _POLICY_VALUES:
             raise RelayError("PROJECT_INVALID", f"Unknown failure_policy: {self.failure_policy}")
+        self._validate_orchestrator()
+
+    def _validate_orchestrator(self) -> None:
+        if self.orchestrator is None:
+            return
+        if not isinstance(self.orchestrator, dict):
+            raise RelayError("PROJECT_INVALID", "orchestrator must be an object.")
+        unknown = set(self.orchestrator) - _ORCHESTRATOR_KEYS
+        if unknown:
+            raise RelayError("PROJECT_INVALID", f"Unknown orchestrator field(s): {sorted(unknown)}")
+        if "enabled" in self.orchestrator and not isinstance(self.orchestrator["enabled"], bool):
+            raise RelayError("PROJECT_INVALID", "orchestrator.enabled must be a boolean.")
+        for key in ("worker", "model", "profile"):
+            value = self.orchestrator.get(key)
+            if value is not None and not isinstance(value, str):
+                raise RelayError("PROJECT_INVALID", f"orchestrator.{key} must be a string.")
+        for key in _ORCHESTRATOR_BUDGET_KEYS:
+            if key not in self.orchestrator:
+                continue
+            value = self.orchestrator[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise RelayError("PROJECT_INVALID", f"orchestrator.{key} must be a positive integer.")
 
     def _topological_order(self, node_ids: list[str]) -> list[str]:
         indegree: dict[str, int] = {n: 0 for n in node_ids}
@@ -317,6 +360,9 @@ class ProjectSpec:
         notification_policy = payload.get("notification_policy") or payload.get("notification_policy_json")
         if isinstance(notification_policy, str):
             notification_policy = json.loads(notification_policy)
+        orchestrator = payload.get("orchestrator") or payload.get("orchestrator_json")
+        if isinstance(orchestrator, str):
+            orchestrator = json.loads(orchestrator)
         nodes = [
             ProjectNode(node_id=str(n["node_id"]), task_id=str(n["task_id"]), checkpoint=n.get("checkpoint"))
             for n in payload.get("nodes", [])
@@ -339,6 +385,7 @@ class ProjectSpec:
             output_selection=ProjectOutputSelection(items=output_items),
             failure_policy=str(payload.get("failure_policy", "stop")),
             notification_policy=notification_policy,
+            orchestrator=orchestrator,
             description=payload.get("description"),
             project_summary=payload.get("project_summary"),
             name=payload.get("name"),
