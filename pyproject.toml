@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "relay-ai-cli-broker"
 dynamic = ["version"]
-description = "Reliable delegation broker for Antigravity CLI, Claude Code, and Codex CLI"
+description = "Local control plane for durable, inspectable AI CLI workflows"
 requires-python = ">=3.11"
 dependencies = [
   "tzdata>=2025.2; platform_system == 'Windows'",

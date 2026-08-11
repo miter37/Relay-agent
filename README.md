@@ -1,7 +1,7 @@
 <div align="center">
-  <h1>🚀 Relay-agent</h1>
-  <p><strong>Run, monitor, and safely deliver work from Claude Code, Codex CLI, Antigravity, and your own agent CLIs.</strong></p>
-  <p>Desktop GUI · CLI automation · Local daemon · Persistent Task Run history</p>
+  <h1>🚀 Relay</h1>
+  <p><strong>Turn AI CLI work into durable, inspectable, reviewable workflows.</strong></p>
+  <p>Tasks · Projects · Artifacts · Review gates · Routines · Desktop GUI · CLI · Local daemon</p>
 
   <p>
     <a href="https://github.com/miter37/Relay-agent/actions/workflows/ci.yml"><img src="https://github.com/miter37/Relay-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -12,44 +12,80 @@
   </p>
 </div>
 
-Relay-agent is a local work broker for AI command-line tools. A person can create and inspect Task Runs in the desktop app, while an automation agent can submit the same work through the CLI. Both paths share one daemon, one SQLite history, and the same validated result-delivery contract.
+Relay is a local control plane for AI work. Define reusable Tasks, connect them into multi-step Projects, run Claude Code, Codex CLI, Antigravity, or manifest-backed custom Agent Apps, and decide what becomes a trusted result.
+
+Humans and automation agents use the same authenticated daemon, SQLite history, artifact lineage, and delivery contract. A one-off request, a repeatable Project Run, and a scheduled Routine are all observable work with durable evidence—not disappearing terminal output.
 
 <p align="center">
-  <img src="docs/assets/relay-agent-gui-main.png" alt="Relay-agent desktop dashboard" width="1200">
+  <img src="docs/assets/relay-agent-gui-main.png" alt="Relay desktop dashboard" width="1200">
 </p>
 
 <p align="center"><em>Monitor Relay health, search and filter Task Run history, and inspect selected work from the desktop dashboard.</em></p>
 
-> **Reliability boundary:** Relay-agent validates process completion, result-file creation, encoding, schema, artifact paths, and delivery. It does not verify the factual accuracy or reasoning quality of AI-generated content.
+> **Reliability boundary:** Relay validates execution, result-file creation, encoding, schemas, artifact paths, isolation, and delivery. Optional review gates help a human or a configured Project Orchestrator inspect a candidate before publication, but Relay does not claim that AI-generated content is factually correct or reasoning-quality verified.
 
 ## Contents
 
-- [Why Relay-agent](#why-relay-agent)
+- [Why Relay](#why-relay)
+- [The Relay workflow](#the-relay-workflow)
+- [Core concepts](#core-concepts)
 - [Requirements](#requirements)
 - [Quick start: desktop GUI](#quick-start-desktop-gui)
 - [Portable and CLI-only installation](#portable-and-cli-only-installation)
 - [Desktop workflow](#desktop-workflow)
 - [CLI workflow](#cli-workflow)
+- [Projects, review gates, and Project Runs](#projects-review-gates-and-project-runs)
+- [Routines and scheduled work](#routines-and-scheduled-work)
 - [Safe work in a real folder](#safe-work-in-a-real-folder)
 - [Custom Agent Apps](#custom-agent-apps)
 - [Automation with OpenClaw or Hermes](#automation-with-openclaw-or-hermes)
 - [Results, security, and operations](#results-security-and-operations)
 - [Documentation](#documentation)
 
-## Why Relay-agent
+## Why Relay
 
-Relay-agent adds a durable control and delivery layer around powerful AI CLIs.
+AI CLIs are excellent workers, but a serious workflow also needs a place to define the work, connect outputs, observe attempts, preserve evidence, and decide whether a result is ready to use. Relay provides that control and delivery layer locally.
 
-- **Desktop task control:** Create Task Runs with task text or a Markdown file, local attachments or delivered files selected by Task Run ID, Agent and model selection, profiles, fallback behavior, time limits, result paths, and artifact folders.
-- **One shared Task Run history:** GUI, CLI, and external-agent work appears in the same searchable history with status, source, timestamps, Attempts, and output locations.
-- **Detailed inspection:** Review Overview, Task, Progress, Answer, Result, Files, Logs, and Events without digging through Relay's internal database or workspaces.
-- **Non-interrupting progress checks:** Inspect process state, recent activity, stalls, and common error signals without sending another message to the running Agent.
-- **Useful Task Run controls:** Stop active work, run completed work again, copy task text, and open result or Artifact folders.
-- **Built-in and custom Agents:** Use Claude Code, Codex CLI, and Antigravity, or register manifest-backed Agent Apps for other local CLIs.
-- **Safe working-folder delivery:** Let an Agent work on an isolated copy, validate the changed-file set, then apply only those changes to a requested real folder.
-- **Persistent receipts:** Store Task Run metadata, Attempts, failures, and output paths in local SQLite history.
-- **Compatibility safety:** GUI write actions are disabled if the desktop app and daemon do not agree on the supported API or Relay Home.
-- **Automation-ready:** Submit background Task Runs, deduplicate external requests, wait for completion, and consume machine-readable receipts.
+- **Durable work model:** Turn instructions into reusable Tasks, then compose them into explicit Project DAGs with named Artifact inputs and outputs.
+- **Evidence, not just output:** Preserve attempts, progress diagnostics, logs, events, receipts, result files, Artifact metadata, and immutable lineage in one local history.
+- **A deliberate publication boundary:** Keep successful candidates in review until a human or configured Project Orchestrator confirms them; add feedback and rerun when the result needs work.
+- **Human and agent parity:** Use the desktop GUI, CLI, or authenticated daemon API without creating separate execution semantics or histories.
+- **Safe file delivery:** Run in an isolated working copy, validate the changed-file set, and apply only verified changes to a requested real folder while retaining Artifact copies.
+- **Operational automation:** Run Tasks or Projects on timezone-aware Schedules/Routines, inspect operational status, handle approvals and attention items, and consume machine-readable receipts.
+- **Worker flexibility with guardrails:** Use Claude Code, Codex CLI, Antigravity, or manifest-backed custom Agent Apps with deep capability tests, model discovery, fallback controls, and per-Agent security settings.
+- **Bounded agent assistance:** Let a Project Orchestrator narrate failures and make run-scoped, budgeted repairs without mutating the registered Project or Task definition.
+
+## The Relay workflow
+
+```text
+Define       →   Run             →   Inspect                 →   Decide            →   Reuse or repeat
+Task/Project     Worker CLI          attempts, logs,          candidate result       confirm Artifact,
+review rules     or Routine          files, lineage,          and evidence           give feedback,
+                                       Project pipeline                               rerun, or stop
+```
+
+The same lifecycle is available from the GUI and from automation:
+
+1. Define a Task or Project and its input/output contracts.
+2. Run it with a built-in or custom Agent App, manually or through a Routine.
+3. Follow progress and inspect the result, generated files, attempts, and Artifact lineage.
+4. If a review gate is enabled, confirm the candidate—or leave a comment and rerun it.
+5. Reuse only confirmed Artifacts in later work, or inspect the full receipt when diagnosing a failed run.
+
+## Core concepts
+
+| Concept | What it means |
+| --- | --- |
+| **Task** | A reusable instruction and delivery contract for one unit of AI work. |
+| **Task Run** | One execution record, including inputs, attempts, status, logs, result, and delivered files. |
+| **Project** | A persistent multi-step workflow that connects Tasks through explicit Artifact roles. |
+| **Project Run** | One execution of a Project, shown as a pipeline with step state, attempts, reviews, and evidence. |
+| **Artifact** | A delivered result with an immutable UID that can be inspected, traced, and reused safely. |
+| **Review gate** | An optional publication checkpoint: human or Orchestrator confirms, rejects, or requests a bounded rerun. |
+| **Routine** | A timezone-aware schedule for running a Task or Project through the local daemon. |
+| **Agent App** | A registered local AI CLI with a validated manifest, capabilities, model options, and environment policy. |
+
+Relay's reliability guarantee is about the boundary around AI execution: did the worker run, did it produce the requested contract, and was the result delivered safely? Review gates make readiness explicit without pretending that a process check is a quality guarantee.
 
 ## Requirements
 
@@ -156,7 +192,7 @@ Select **+ New Task** and provide as much or as little configuration as needed:
 - external request ID and duplicate-control options
 
 <p align="center">
-  <img src="docs/assets/relay-agent-new-task.png" alt="Relay-agent New Task form" width="1200">
+  <img src="docs/assets/relay-agent-new-task.png" alt="Relay New Task form" width="1200">
 </p>
 
 <p align="center"><em>The New Task form exposes the same Agent, model, fallback, file, result, and working-folder controls available through the CLI.</em></p>
@@ -226,6 +262,70 @@ relay result <task_run_id> --machine
 ```
 
 `request_id` is an idempotency key for one logical external request. Reusing it returns the existing Task Run even if a local task file has changed. Use a unique value such as `<conversation>-<task>-<agent>`.
+
+## Projects, review gates, and Project Runs
+
+Use a Project when the work has a shape worth preserving: research feeding strategy, analysis feeding a proposal, or several independent Tasks converging on one deliverable. A Project stores the graph, the Task snapshots, named input/output roles, and the final-output contract. It does not rely on agents guessing which file to pass to the next step.
+
+```sh
+relay project schema --machine
+relay project create --file project.json --machine
+relay project run <project_id> --machine
+relay project-run show <project_run_id> --machine
+relay project-run steps <project_run_id> --machine
+relay project-run receipt <project_run_id> --machine
+```
+
+In the desktop app, the Project Run view makes the run understandable at a glance:
+
+- **Pipeline** shows topology and current state, with final outputs easy to find.
+- **Artifacts** previews the final deliverable first, then the Task Artifacts behind it.
+- **Timeline** shows attempts, retries, and steps that have not started.
+- **Inspector** exposes the selected step's inputs, output roles, receipt, and evidence without hiding the graph.
+- **Orchestrator** shows narration, repair decisions, budgets, and the boundary of any run-scoped intervention.
+
+### Optional result review
+
+A review gate is a publication checkpoint, not a second execution status. A Task or Project node can finish producing a candidate while Relay keeps its result outside normal Artifact reuse until it is confirmed.
+
+- **Human review:** inspect the candidate, generated files, working-folder delta, and run evidence; confirm, reject, or add a comment and rerun.
+- **Orchestrator review:** provide explicit evaluation guidelines and a maximum automatic rerun count. The Orchestrator may approve or request a rerun within that budget; missing evidence, malformed decisions, errors, or an exhausted budget hand off to a human.
+- **Review history:** each review round records its reviewer, decision, feedback, candidate Artifact, and rerun relationship so the Project Run tells the whole story.
+
+Configure a Project node without rewriting its full definition:
+
+```sh
+relay project review-config <project_id> \
+  --node research \
+  --reviewer orchestrator \
+  --guidelines-file review-guidelines.md \
+  --max-reruns 2 \
+  --machine
+```
+
+Inspect and resolve review work from the CLI, GUI Reviews Inbox, or daemon API:
+
+```sh
+relay review list --status pending --machine
+relay review show <review_id> --machine
+relay review confirm <review_id> --machine
+relay review rerun <review_id> --comment "Add sources for the market-size claim" --machine
+```
+
+The Orchestrator is intentionally bounded. It can narrate a failure and repair a single Project Run through permitted actions such as retrying, switching to an available worker, rebinding a produced Artifact role, or appending a run-scoped instruction. It cannot silently rewrite the registered Project or Task definition, add nodes, or change the final-output contract.
+
+## Routines and scheduled work
+
+Run a Task or Project repeatedly through the local daemon with a timezone-aware Routine. Daily, weekly, monthly, every-N-days, and one-time rules support previews, pause/resume, manual runs, history, and safe retention. Scheduled executions remain ordinary Task Runs or Project Runs, so their results and evidence stay in the same history.
+
+```sh
+relay routine preview --type daily --time 09:00 --timezone Asia/Seoul --machine
+relay routine list --machine
+relay routine run-now <routine_id> --machine
+relay routine runs <routine_id> --machine
+```
+
+For the legacy Task Run scheduling flow, Relay also retains the `schedule` CLI and its compatibility behavior. Deleting a schedule or routine does not delete the work and outputs it already created.
 
 ## Safe work in a real folder
 
@@ -411,5 +511,5 @@ relay cleanup --status
 - [Project wiki index](wiki/index.md)
 
 <div align="center">
-  <i>Built for reliable local AI delegation.</i>
+  <i>Built for AI work that should finish, be inspectable, and be safe to publish.</i>
 </div>
