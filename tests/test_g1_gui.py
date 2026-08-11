@@ -222,20 +222,24 @@ class G1GuiTests(unittest.TestCase):
         self.assertTrue(self.window.runs_view.run_list.topLevelItem(0).isExpanded())
         self.assertTrue(self.window.runs_view.run_list.topLevelItem(0).child(0).isExpanded())
 
-    def test_result_response_populates_answer_and_raw_result_tabs(self):
+    def test_result_response_populates_answer_and_artifact_explorer(self):
         self.window.selected_job_id = "job-1"
         self.window.active_section = "runs"
         self.window.pending[1] = ("result", "job-1")
         payload = {
             "job_id": "job-1",
             "available": True,
+            "path": "/tmp/result.json",
+            "format": "json",
+            "text": '{"available": true}',
             "data": {"answer": "## Summary\n\nReadable answer"},
         }
 
         self.window._handle_response(1, payload, None)
 
         self.assertIn("Readable answer", self.window.job_detail_view.answer_browser.toPlainText())
-        self.assertIn("available", self.window.job_detail_view._browsers["Result"].toPlainText())
+        self.assertEqual(self.window.job_detail_view.artifacts_view.selected_record().role, "result")
+        self.assertIn("available", self.window.job_detail_view.artifacts_view.json_preview.topLevelItem(0).text(0))
 
     def test_progress_check_opens_logs_and_renders_persisted_check_events(self):
         self.window.current_mode = "normal"

@@ -1,3 +1,4 @@
+- 2026-08-12 02:18 | Unified Artifact Explorer across Task Run, Project Run, and Reviews with safe format previews, path actions, review-scoped candidate reads, and 837-test verification.
 - 2026-08-11 21:15 | Reframed GitHub README and package metadata around Relay's durable Task→Project→Artifact→review workflow; synchronized repository description and discovery topics.
 - 2026-08-11 19:58 | Fixed Project Orchestrator review config invocation and added regression coverage; live run recovered after worker re-verification and reached human review at positioning.
 - 2026-08-11 19:40 | Added `relay project review-config` and `project-run reviews`; agent Project docs updated; 822 tests, Ruff, and diff checks pass.

@@ -1341,7 +1341,7 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_artifacts_tab_lists_final_group_then_task_groups_without_selection(self):
+    def test_artifacts_tab_lists_final_group_then_task_groups_and_selects_primary(self):
         view = ProjectRunArtifactsView()
         view.set_run(
             "pr-1",
@@ -1356,8 +1356,8 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
 
         groups = [view.artifact_tree.topLevelItem(i).text(0) for i in range(view.artifact_tree.topLevelItemCount())]
         self.assertEqual(groups, ["Final Artifacts", "research", "render"])
-        self.assertIsNone(view._selected_artifact_uid)
-        self.assertTrue(view.empty_preview.isVisibleTo(view))
+        self.assertEqual(view._selected_artifact_uid, "a-final")
+        self.assertFalse(view.empty_preview.isVisibleTo(view))
 
     def test_json_artifact_renders_as_expandable_structure(self):
         view = ProjectRunArtifactsView()
@@ -1409,6 +1409,29 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
 
         self.assertEqual(view.preview_stack.currentWidget(), view.metadata_preview)
         self.assertIn("Loading", view.metadata_preview.text())
+
+    def test_awaiting_review_puts_candidate_artifacts_first_and_selects_them(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [{"artifact_uid": "published", "role": "output", "relative_path": "published.md"}],
+            {},
+            [
+                {
+                    "review_id": "review-1",
+                    "node_id": "review-node",
+                    "artifact_uid": "candidate",
+                    "role": "candidate",
+                    "relative_path": "candidate.md",
+                    "publication_status": "candidate",
+                }
+            ],
+        )
+
+        groups = [view.artifact_tree.topLevelItem(i).text(0) for i in range(view.artifact_tree.topLevelItemCount())]
+        self.assertEqual(groups[0], "Review candidate · review-node")
+        self.assertEqual(view._selected_artifact_uid, "candidate")
+        self.assertEqual(view.selected_record().review_id, "review-1")
 
 
 class ProjectRunTimelineWidgetTests(unittest.TestCase):

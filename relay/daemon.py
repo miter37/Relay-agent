@@ -76,6 +76,7 @@ from .api import (
     reject_review,
     rerun_review,
     retry_review_delivery,
+    review_artifact_content,
     routine_receipt,
     run_artifacts,
     run_detail,
@@ -392,9 +393,25 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 self._api_error(HTTPStatus.BAD_REQUEST, code, message)
             return
         if path.startswith("/v1/reviews/"):
-            review_id = path[len("/v1/reviews/") :]
+            parts = path.strip("/").split("/")
             try:
-                self._json(HTTPStatus.OK, get_review(self.daemon.engine, review_id))
+                if len(parts) == 6 and parts[3] == "artifacts" and parts[5] == "content":
+                    review_id, artifact_uid = parts[2], parts[4]
+                    limit = int(params.get("max_bytes", ["65536"])[0])
+                    self._json(
+                        HTTPStatus.OK,
+                        review_artifact_content(
+                            self.daemon.engine,
+                            review_id,
+                            artifact_uid,
+                            max_bytes=limit,
+                        ),
+                    )
+                else:
+                    review_id = path[len("/v1/reviews/") :]
+                    self._json(HTTPStatus.OK, get_review(self.daemon.engine, review_id))
+            except ValueError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(err))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return

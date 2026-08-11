@@ -72,6 +72,24 @@ class Phase2Tests(unittest.TestCase):
         self.assertEqual(result["text"], "0123")
         self.assertTrue(result["truncated"])
 
+    def test_artifact_content_reads_previewable_yaml_with_replacement(self):
+        job, _ = self.engine.create_job(JobRequest(task="YAML preview", worker="codex"), queued=True)
+        path = self.config.path_value("artifact_root") / job["job_id"] / "report.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"title: Relay\ninvalid: \xff")
+        self.db.add_artifact(
+            job["job_id"],
+            relative_path="report.yaml",
+            final_path=str(path),
+            mime_type="application/yaml",
+            size=path.stat().st_size,
+            sha256="yaml",
+            artifact_uid="yaml-artifact",
+        )
+        payload = artifact_content(self.db, "yaml-artifact", max_bytes=262144)
+        self.assertTrue(payload["available"])
+        self.assertIn("title: Relay", payload["text"])
+
     def test_non_replayable_task_is_not_recovered_by_search(self):
         job, _ = self.engine.create_job(JobRequest(task="Private phrase", worker="codex"), queued=True)
         self.db.update_job(job["job_id"], replayable=0, task_text=None, task_preview=None, request_json="{}")

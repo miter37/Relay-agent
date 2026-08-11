@@ -84,7 +84,7 @@ class G2TaskRunGuiTests(unittest.TestCase):
         labels = [view.tabs.tabText(index) for index in range(view.tabs.count())]
 
         self.assertEqual(
-            labels, ["Overview", "Task", "Inputs", "Progress", "Answer", "Result", "Files", "Logs", "Events"]
+            labels, ["Overview", "Task", "Inputs", "Progress", "Answer", "Artifacts", "Logs", "Events"]
         )
         self.assertFalse(view.cancel_button.isEnabled())
         self.assertTrue(view.cancel_button.isHidden())

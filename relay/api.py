@@ -1336,6 +1336,18 @@ def get_review(engine, review_id: str) -> dict[str, Any]:
     return ReviewService(engine.db, engine, engine.config).get(review_id)
 
 
+def review_artifact_content(
+    engine,
+    review_id: str,
+    artifact_uid: str,
+    *,
+    max_bytes: int = 65536,
+) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    return ReviewService(engine.db, engine, engine.config).artifact_content(review_id, artifact_uid, max_bytes)
+
+
 def task_run_review(engine, task_run_id: str) -> dict[str, Any]:
     job = engine.db.get_job(task_run_id)
     if not job:

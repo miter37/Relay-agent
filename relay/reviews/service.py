@@ -165,6 +165,25 @@ class ReviewService:
             "candidate_result": candidate_result,
         }
 
+    def artifact_content(self, review_id: str, artifact_uid: str, max_bytes: int) -> dict[str, Any]:
+        """Read an Artifact only through the Review that owns its current round."""
+        from ..search import normalize_max_bytes
+
+        session = self.db.get_review_session(review_id)
+        if not session:
+            raise RelayError("REVIEW_NOT_FOUND", f"Review not found: {review_id}")
+        rounds = self.db.list_review_rounds(review_id)
+        current = rounds[-1] if rounds else None
+        artifact = self.db.artifact_by_uid(artifact_uid)
+        if (
+            not current
+            or not artifact
+            or artifact.get("job_id") != current.get("task_run_id")
+            or artifact.get("publication_status") not in {"candidate", "published", "rejected"}
+        ):
+            raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
+        return self.db.artifact_content(artifact_uid, normalize_max_bytes(max_bytes))
+
     def list(self, *, status: str | None = None, limit: int = 100) -> dict[str, Any]:
         sessions = self.db.list_review_sessions(status=status, limit=limit)
         return {"ok": True, "reviews": [self._summary(item) for item in sessions]}

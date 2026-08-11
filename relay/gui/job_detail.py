@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .artifacts import ArtifactExplorerView, ArtifactGroup, ArtifactRecord
 from .design_html import kv_row
 from .design_tokens import COLORS, status_presentation
 from .design_typography import apply_type
@@ -31,9 +32,12 @@ class TaskRunDetailView(QWidget):
     tab_requested = Signal(str)
     open_folder_requested = Signal(str)
     open_log_requested = Signal(str)
+    artifact_preview_requested = Signal(str, str)
+    artifact_open_requested = Signal(str)
+    artifact_folder_requested = Signal(str)
     log_options_changed = Signal()
 
-    TAB_NAMES = ("Overview", "Task", "Inputs", "Progress", "Answer", "Result", "Files", "Logs", "Events")
+    TAB_NAMES = ("Overview", "Task", "Inputs", "Progress", "Answer", "Artifacts", "Logs", "Events")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,7 +89,16 @@ class TaskRunDetailView(QWidget):
         layout.addLayout(log_controls)
         self.tabs = QTabWidget()
         self._browsers: dict[str, QTextBrowser] = {}
+        self.artifacts_view = ArtifactExplorerView()
+        self.artifacts_view.preview_requested.connect(self.artifact_preview_requested.emit)
+        self.artifacts_view.open_file_requested.connect(self.artifact_open_requested.emit)
+        self.artifacts_view.open_folder_requested.connect(self.artifact_folder_requested.emit)
+        self._result_artifact: ArtifactRecord | None = None
+        self._file_artifacts: list[ArtifactRecord] = []
         for name in self.TAB_NAMES:
+            if name == "Artifacts":
+                self.tabs.addTab(self.artifacts_view, name)
+                continue
             browser = QTextBrowser()
             browser.setObjectName("evidencePane")
             browser.setOpenExternalLinks(False)
@@ -127,8 +140,10 @@ class TaskRunDetailView(QWidget):
         job_id = str(job.get("task_run_id") or job.get("job_id") or "")
         if job_id != self.job_id:
             self.set_answer(None)
-            self.set_content("Result", "")
             self.set_content("Logs", "")
+            self._result_artifact = None
+            self._file_artifacts = []
+            self.artifacts_view.set_groups([], auto_select_primary=False)
             self._check_pending = False
             self.stream_combo.blockSignals(True)
             self.stream_combo.setCurrentText("stdout")
@@ -227,7 +242,60 @@ class TaskRunDetailView(QWidget):
             review_html = "<i>This Task Run does not require result review.</i>"
         self.set_content("Review", review_html)
         self.set_content("Events", self._format_json(job.get("events", [])))
-        self.set_content("Files", self._format_json(job.get("artifacts", [])))
+        self.set_artifact_rows(job.get("artifacts", []))
+        output_path = str(job.get("output_path") or "")
+        if output_path:
+            self._set_result_record(
+                {
+                    "artifact_uid": f"result:{self.job_id}",
+                    "role": "result",
+                    "relative_path": output_path,
+                    "final_path": output_path,
+                    "publication_status": "published",
+                    "job_id": self.job_id,
+                    "mime_type": "application/json" if str(job.get("format")) == "json" else "",
+                    "is_primary": True,
+                }
+            )
+
+    def set_artifact_rows(self, artifacts: list[dict] | None) -> None:
+        self._file_artifacts = [
+            ArtifactRecord.from_mapping(item, is_primary=False)
+            for item in (artifacts or [])
+            if isinstance(item, dict)
+        ]
+        self._refresh_artifacts()
+
+    def set_result_payload(self, payload: dict) -> None:
+        job_id = str(payload.get("job_id") or payload.get("task_run_id") or self.job_id or "")
+        path = str(payload.get("path") or "")
+        if job_id and path:
+            uid = f"result:{job_id}"
+            self.artifacts_view.cache_content(uid, payload)
+            self._set_result_record(
+                {
+                    "artifact_uid": uid,
+                    "role": "result",
+                    "relative_path": path,
+                    "final_path": path,
+                    "mime_type": "application/json" if payload.get("format") == "json" else "",
+                    "size": payload.get("size"),
+                    "job_id": job_id,
+                    "is_primary": True,
+                }
+            )
+
+    def _set_result_record(self, raw: dict) -> None:
+        self._result_artifact = ArtifactRecord.from_mapping(raw, is_primary=True)
+        self._refresh_artifacts()
+
+    def _refresh_artifacts(self) -> None:
+        groups: list[ArtifactGroup] = []
+        if self._result_artifact:
+            groups.append(ArtifactGroup("Result", (self._result_artifact,)))
+        if self._file_artifacts:
+            groups.append(ArtifactGroup("Files", tuple(self._file_artifacts)))
+        self.artifacts_view.set_groups(groups, auto_select_primary=True)
 
     def set_content(self, tab_name: str, content: str) -> None:
         browser = self._browsers.get(tab_name)

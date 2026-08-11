@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .artifacts import ArtifactExplorerView, ArtifactGroup, ArtifactRecord
 from .design_icons import icon
 from .design_tokens import COLORS
 from .design_typography import apply_type
@@ -264,6 +265,8 @@ class ProjectRunsView(QWidget):
     reexecute_with_comment_requested = Signal(str, str)
     edit_task_requested = Signal(str)
     artifact_preview_requested = Signal(str)
+    artifact_path_open_requested = Signal(str)
+    artifact_folder_open_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -317,6 +320,8 @@ class ProjectRunsView(QWidget):
         self.detail.reexecute_with_comment_requested.connect(self.reexecute_with_comment_requested.emit)
         self.detail.edit_task_requested.connect(self.edit_task_requested.emit)
         self.detail.artifact_preview_requested.connect(self.artifact_preview_requested.emit)
+        self.detail.artifact_path_open_requested.connect(self.artifact_path_open_requested.emit)
+        self.detail.artifact_folder_open_requested.connect(self.artifact_folder_open_requested.emit)
         body.addWidget(self.detail, 1)
         root.addLayout(body, 1)
 
@@ -596,6 +601,8 @@ class ProjectRunDetailView(QWidget):
     reexecute_with_comment_requested = Signal(str, str)
     edit_task_requested = Signal(str)
     artifact_preview_requested = Signal(str)
+    artifact_path_open_requested = Signal(str)
+    artifact_folder_open_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -603,6 +610,7 @@ class ProjectRunDetailView(QWidget):
         self._steps: list[dict[str, Any]] = []
         self._task_run_details: dict[str, dict[str, Any]] = {}
         self._node_artifacts: dict[str, list[dict[str, Any]]] = {}
+        self._review_details: dict[str, dict[str, Any]] = {}
         self._pipeline_inspector_open = False
         self._pipeline_inspector_node_id: str | None = None
         # Nodes the Orchestrator made a repair decision on for this run, kept as
@@ -687,6 +695,8 @@ class ProjectRunDetailView(QWidget):
         self.artifacts_view = ProjectRunArtifactsView()
         self.artifacts_view.artifact_preview_requested.connect(self.artifact_preview_requested.emit)
         self.artifacts_view.open_artifact_requested.connect(self.open_output_requested.emit)
+        self.artifacts_view.artifact_path_open_requested.connect(self.artifact_path_open_requested.emit)
+        self.artifacts_view.artifact_folder_open_requested.connect(self.artifact_folder_open_requested.emit)
 
         self.timeline_view = ProjectRunTimelineView()
 
@@ -741,6 +751,7 @@ class ProjectRunDetailView(QWidget):
             self._pipeline_inspector_open = False
             self._pipeline_inspector_node_id = None
             self._repaired_node_ids = set()
+            self._review_details = {}
         self._steps = list(self._run.get("steps") or []) if isinstance(self._run.get("steps"), list) else []
 
         if not self._run.get("project_run_id"):
@@ -932,10 +943,29 @@ class ProjectRunDetailView(QWidget):
         )
 
     def _render_artifacts_tab(self) -> None:
+        review_artifacts: list[dict[str, Any]] = []
+        for review_id, review in self._review_details.items():
+            if not isinstance(review, dict):
+                continue
+            review_data = review.get("review") if isinstance(review.get("review"), dict) else review
+            if str(review_data.get("status") or "") not in {"pending_human", "needs_human", "delivery_failed"}:
+                continue
+            for item in review.get("artifacts") or []:
+                if isinstance(item, dict):
+                    review_artifacts.append(
+                        {
+                            **item,
+                            "review_id": review_id,
+                            "node_id": item.get("node_id") or review_data.get("node_id") or "",
+                            "publication_status": item.get("publication_status") or "candidate",
+                            "is_primary": True,
+                        }
+                    )
         self.artifacts_view.set_run(
             str(self._run.get("project_run_id") or ""),
             self._run.get("final_artifact_ids") or [],
             self._node_artifacts,
+            review_artifacts,
         )
 
     def _render_timeline(self) -> None:
@@ -1084,6 +1114,11 @@ class ProjectRunDetailView(QWidget):
         if isinstance(steps, list):
             self._run["receipt_steps"] = [s for s in steps if isinstance(s, dict)]
         self._refresh_inspector_for_current_selection()
+
+    def cache_review_detail(self, review_id: str, review: dict[str, Any]) -> None:
+        if review_id and isinstance(review, dict):
+            self._review_details[str(review_id)] = dict(review)
+            self._render_artifacts_tab()
 
     def cache_orchestrator(self, data: dict[str, Any]) -> None:
         if isinstance(data, dict):
@@ -1592,7 +1627,7 @@ class ProjectRunInspectorView(QWidget):
             self.edit_task_requested.emit(task_id)
 
 
-class ProjectRunArtifactsView(QWidget):
+class _LegacyProjectRunArtifactsView(QWidget):
     """Task-grouped Artifact catalog with a large read-only preview pane."""
 
     artifact_preview_requested = Signal(str)
@@ -1885,6 +1920,94 @@ class ProjectRunArtifactsView(QWidget):
                 add_value(self.json_preview, str(key), child_value)
         else:
             add_value(self.json_preview, "value", value)
+
+
+class ProjectRunArtifactsView(ArtifactExplorerView):
+    """Project Run adapter over the shared Artifact Explorer.
+
+    The legacy implementation remains below only as a temporary source of
+    behavior while the richer renderer task moves its responsibilities into
+    ``relay.gui.artifacts``. Existing Project Run callers keep their UID-based
+    signals during this transition.
+    """
+
+    artifact_preview_requested = Signal(str)
+    artifact_path_open_requested = Signal(str)
+    artifact_folder_open_requested = Signal(str)
+    open_artifact_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.preview_requested.connect(
+            lambda uid, _review_id: self.artifact_preview_requested.emit(uid)
+        )
+        self.open_file_requested.connect(self._handle_open_file)
+        self.open_folder_requested.connect(self.artifact_folder_open_requested.emit)
+
+    def set_run(
+        self,
+        project_run_id: str | None,
+        final_artifacts: list[dict[str, Any]] | None,
+        task_artifacts: dict[str, list[dict[str, Any]]] | None,
+        review_artifacts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.project_run_id = str(project_run_id or "")
+        groups: list[ArtifactGroup] = []
+        candidate_records = tuple(
+            ArtifactRecord.from_mapping(
+                item,
+                node_id=str(item.get("node_id") or ""),
+                review_id=str(item.get("review_id") or ""),
+                is_primary=True,
+            )
+            for item in (review_artifacts or [])
+            if isinstance(item, dict)
+        )
+        if candidate_records:
+            label = "Review candidate" + (f" · {candidate_records[0].node_id}" if candidate_records[0].node_id else "")
+            groups.append(ArtifactGroup(label, candidate_records))
+        final_records = tuple(
+            ArtifactRecord.from_mapping(item, is_primary=True)
+            for item in (final_artifacts or [])
+            if isinstance(item, dict)
+        )
+        if final_records:
+            groups.append(ArtifactGroup("Final Artifacts", final_records))
+        for node_id, items in (task_artifacts or {}).items():
+            records = tuple(
+                ArtifactRecord.from_mapping(
+                    item,
+                    node_id=str(node_id),
+                    is_primary=bool(item.get("is_final")),
+                )
+                for item in (items if isinstance(items, list) else [])
+                if isinstance(item, dict)
+            )
+            if records:
+                groups.append(ArtifactGroup(str(node_id), records))
+        merged_groups = [
+            ArtifactGroup(group.label, tuple(ArtifactRecord.merge(group.records)))
+            for group in groups
+        ]
+        self.set_groups(merged_groups, auto_select_primary=True)
+
+    def cache_artifact_content(self, artifact_uid: str, content: dict[str, Any]) -> None:
+        self.cache_content(artifact_uid, content)
+
+    def cache_artifact_error(self, artifact_uid: str, message: str) -> None:
+        self.cache_error(artifact_uid, message)
+
+    def _emit_open_uid(self) -> None:
+        record = self.selected_record()
+        if record and record.artifact_uid:
+            self.open_artifact_requested.emit(record.artifact_uid)
+
+    def _handle_open_file(self, path: str) -> None:
+        record = self.selected_record()
+        if record and record.review_id:
+            self.artifact_path_open_requested.emit(path)
+        else:
+            self._emit_open_uid()
 
 
 # --- Phase 3 (pipeline view) and Phase 4 (timeline view) helpers --------------

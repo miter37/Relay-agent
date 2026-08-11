@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .artifacts import ArtifactExplorerView, ArtifactGroup, ArtifactRecord
+
 
 class ReviewsView(QWidget):
     select_review_requested = Signal(str)
@@ -24,6 +26,9 @@ class ReviewsView(QWidget):
     rerun_requested = Signal(str, str)
     reject_requested = Signal(str, str)
     refresh_requested = Signal()
+    artifact_preview_requested = Signal(str, str)
+    open_artifact_requested = Signal(str)
+    open_artifact_folder_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -40,6 +45,11 @@ class ReviewsView(QWidget):
         panel.addWidget(self.title)
         self.detail = QTextBrowser()
         panel.addWidget(self.detail, 1)
+        self.artifacts_view = ArtifactExplorerView()
+        self.artifacts_view.preview_requested.connect(self.artifact_preview_requested.emit)
+        self.artifacts_view.open_file_requested.connect(lambda path: self.open_artifact_requested.emit(path))
+        self.artifacts_view.open_folder_requested.connect(lambda path: self.open_artifact_folder_requested.emit(path))
+        panel.addWidget(self.artifacts_view, 2)
         self.comment = QTextEdit()
         self.comment.setPlaceholderText("Optional feedback for a rerun")
         self.comment.setMaximumHeight(84)
@@ -84,6 +94,7 @@ class ReviewsView(QWidget):
             self._current_id = None
             self.title.setText("No reviews waiting")
             self.detail.setHtml("<p>When a Task or Project result needs review, it will appear here.</p>")
+            self.artifacts_view.set_groups([], auto_select_primary=False)
             self._set_action_state(False)
 
     def set_review(self, review: dict) -> None:
@@ -101,21 +112,54 @@ class ReviewsView(QWidget):
             f"<p><b>Guidelines</b><br>{escape(str(data.get('guidelines') or 'No extra guidelines.')).replace(chr(10), '<br>')}</p>",
             f"<p><b>Task Run:</b> {escape(str(task_run.get('job_id') or current.get('task_run_id') or 'Unavailable'))}</p>",
         ]
-        artifacts = review.get("artifacts") or []
-        if artifacts:
-            lines.append(
-                "<p><b>Result files</b></p><ul>"
-                + "".join(
-                    f"<li>{escape(str(item.get('relative_path') or item.get('name') or 'artifact'))} · {item.get('size') or 0} bytes</li>"
-                    for item in artifacts
-                )
-                + "</ul>"
-            )
-        candidate = review.get("candidate_result") or {}
-        if candidate.get("text") is not None:
-            lines.append(f"<p><b>Current result preview</b></p><pre>{escape(str(candidate.get('text')))}</pre>")
+        lines.append("<p><b>Artifacts</b> are shown below. Select one to preview it, inspect its path, or open it.</p>")
         self.title.setText(f"Review · {review_id[:12]}")
         self.detail.setHtml("".join(lines))
+        records: list[ArtifactRecord] = []
+        for item in review.get("artifacts") or []:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("publication_status") or "candidate")
+            records.append(
+                ArtifactRecord.from_mapping(
+                    item,
+                    review_id=review_id,
+                    is_primary=status == "candidate",
+                )
+            )
+        candidate = review.get("candidate_result") or {}
+        candidate_path = str(candidate.get("path") or "")
+        if candidate_path and not any(record.final_path == candidate_path for record in records):
+            records.append(
+                ArtifactRecord.from_mapping(
+                    {
+                        "artifact_uid": f"review-result:{review_id}",
+                        "role": "result",
+                        "relative_path": candidate_path,
+                        "final_path": candidate_path,
+                        "publication_status": "candidate",
+                        "mime_type": "application/json"
+                        if candidate_path.casefold().endswith(".json")
+                        else "",
+                    },
+                    review_id=review_id,
+                    is_primary=not records,
+                )
+            )
+        self.artifacts_view.set_groups(
+            [ArtifactGroup("Review candidate artifacts", tuple(records))] if records else [],
+            auto_select_primary=True,
+        )
+        if candidate_path and self.artifacts_view.selected_record() and candidate.get("text") is not None:
+            uid = f"review-result:{review_id}"
+            self.artifacts_view.cache_content(
+                uid,
+                {
+                    "available": True,
+                    "text": str(candidate.get("text") or ""),
+                    "truncated": bool(candidate.get("truncated")),
+                },
+            )
         self._set_action_state(str(data.get("status")) in {"pending_human", "needs_human", "delivery_failed"})
 
     def _select_item(self, item, _previous) -> None:
