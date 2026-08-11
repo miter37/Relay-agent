@@ -8,6 +8,7 @@ from pathlib import Path
 from .errors import RelayError
 from .models import JobRequest
 from .util import ensure_dir, sha256_file
+from .validation import ARTIFACT_ROLE_PATTERN, RESERVED_ARTIFACT_ROLES
 
 STANDARD_JSON_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15,9 +16,13 @@ STANDARD_JSON_SCHEMA = {
     "additionalProperties": False,
     "required": ["schema_version", "status", "answer", "sources", "uncertainties", "missing_items", "artifacts"],
     "properties": {
-        "schema_version": {"type": "string"},
+        # const, not just type, so a Worker sees the required literal instead of
+        # guessing a plausible-looking value like "1.0.0" and getting a hard
+        # SCHEMA_MISMATCH the schema gave it no way to anticipate.
+        "schema_version": {"type": "string", "const": "1.0"},
         "status": {"type": "string", "enum": ["complete", "partial", "failed"]},
         "answer": {"type": "string"},
+        "summary": {"type": "string", "maxLength": 1000},
         "sources": {"type": "array", "items": {"type": "string"}},
         "uncertainties": {"type": "array", "items": {"type": "string"}},
         "missing_items": {"type": "array", "items": {"type": "string"}},
@@ -32,6 +37,20 @@ STANDARD_JSON_SCHEMA = {
                     "description": {"type": "string"},
                     "encoding": {"type": "string", "enum": ["utf-8", "base64"]},
                     "content": {"type": "string"},
+                    # Optional by contract: an Artifact with no declared role gets the
+                    # default one. Spelled out here because a Worker that invents a
+                    # role breaks Project connections, which resolve an input by an
+                    # exact (source node, role) match.
+                    "role": {
+                        "type": "string",
+                        "pattern": ARTIFACT_ROLE_PATTERN.pattern,
+                        "description": (
+                            "Optional label for what this file is for. Omit it (or set it to null) "
+                            "unless the request explicitly assigns a role; do not invent one. "
+                            f"These roles are reserved by Relay and must never be declared: "
+                            f"{', '.join(sorted(RESERVED_ARTIFACT_ROLES))}."
+                        ),
+                    },
                 },
             },
         },
@@ -71,18 +90,35 @@ def build_request_markdown(
     artifact_dir: Path,
     attachments: list[dict],
     target_working_copy: Path | None = None,
+    artifact_inputs: list[dict] | None = None,
 ) -> str:
     format_rules = (
         "Return a UTF-8 JSON object matching schema.json exactly. Do not wrap it in Markdown fences.\n"
+        "- Include an optional summary containing 1–3 short sentences describing the work performed and the actual result.\n"
         "- For every requested artifact, include an artifacts entry with relative_path, description, encoding, "
         "and exact content. Use encoding=utf-8 for text and encoding=base64 for binary content. Relay "
         "materializes this payload into the artifact directory, so a valid payload is sufficient to complete "
         "the artifact request. You may also create the file directly. relative_path is relative to the artifact "
-        "directory; do not prefix it with artifacts/."
+        "directory; do not prefix it with artifacts/.\n"
+        "- An artifacts entry may set an optional role to label what the file is for "
+        f"(lowercase, matching {ARTIFACT_ROLE_PATTERN.pattern}). Files without a role get role=output. "
+        f"Roles reserved by Relay and rejected here: {', '.join(sorted(RESERVED_ARTIFACT_ROLES))}.\n"
+        "- Downstream Project steps select an input by (source node, role), and that selection must match "
+        "exactly one file. If this run produces several artifacts that a later step consumes separately, "
+        "give each one a distinct role."
         if request.result_format == "json"
         else "Return a non-empty UTF-8 plain-text result."
     )
     attachment_lines = "\n".join(f"- `{item['name']}` at `input/{item['name']}`" for item in attachments) or "- None"
+    artifact_input_lines = (
+        "\n".join(
+            f"- `{item['alias']}` at `input/{Path(item['snapshot_relative_path']).name}` "
+            f"(source {item['source_job_id']}/{item['source_relative_path']}, sha256={item['snapshot_sha256']})"
+            for item in artifact_inputs or []
+        )
+        or "- None"
+    )
+    task_input_lines = json.dumps(request.inputs or {}, ensure_ascii=False, indent=2)
     profile_rules = {
         "web-research": (
             "- Use current web sources where available.\n"
@@ -93,6 +129,8 @@ def build_request_markdown(
         "analysis-only": "- Do not modify input files.\n- Produce analysis only.",
         "general-artifact": "- Produce the requested result and any requested supporting artifacts.",
     }.get(request.profile, "- Complete the requested task faithfully.")
+    if request.profile_snapshot.get("instructions"):
+        profile_rules = "- " + str(request.profile_snapshot["instructions"]).replace("\n", "\n- ")
     task_text = request.task.strip()
     if target_working_copy and request.target_path:
         task_text = re.sub(rf"{re.escape(request.target_path)}[\\/]*", "target/", task_text, flags=re.IGNORECASE)
@@ -123,6 +161,14 @@ def build_request_markdown(
 
 ## Input Attachments
 {attachment_lines}
+
+## Artifact Inputs (immutable snapshots)
+{artifact_input_lines}
+
+## Task Inputs (optional)
+```json
+{task_input_lines}
+```
 
 ## User Task
 {task_text}

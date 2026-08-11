@@ -3,13 +3,22 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import mimetypes
 import os
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .errors import RelayError
 from .util import is_within, sha256_file
+
+logger = logging.getLogger(__name__)
+
+# Relay labels its own result file with this role, and connection/output selection
+# must resolve to exactly one Artifact per (node, role).
+RESERVED_ARTIFACT_ROLES = frozenset({"result"})
+ARTIFACT_ROLE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 REQUIRED_JSON_FIELDS = {
     "schema_version": str,
@@ -20,6 +29,67 @@ REQUIRED_JSON_FIELDS = {
     "missing_items": list,
     "artifacts": list,
 }
+_ARTIFACT_ROLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,63}$")
+
+
+def normalize_summary(
+    value: Any,
+    *,
+    max_chars: int,
+    field: str,
+    error_code: str = "SCHEMA_MISMATCH",
+) -> str | None:
+    """Return a plain bounded summary without changing the source document."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RelayError(error_code, f"{field} must be a string", True)
+    text = " ".join(value.split())
+    if not text:
+        return None
+    if len(text) <= max_chars:
+        return text
+    return text[: max(1, max_chars - 1)].rstrip() + "…"
+
+
+# Deterministic recovery for the small set of well-understood LLM JSON-generation
+# mistakes (discovered live: 2026-08-10, a real antigravity Task Run failed on exactly
+# the missing-key-escape pattern below). No LLM, no third-party dependency, and no
+# guessing at semantic content - each pattern is narrow enough that a match is
+# essentially never a legitimate document shape, so there is nothing ambiguous to
+# resolve. Anything outside these two patterns still fails exactly as before.
+#
+# 1. A trailing comma before a closing bracket/brace.
+# 2. A key inside a JSON document that was itself escaped for embedding in an outer
+#    string (e.g. an artifact's `content` field carrying a nested JSON document as
+#    text) whose quote(s) are missing their escaping backslash - the model dropped one
+#    or both. Scoped to keys preceded by a literal backslash-n (an *escaped* newline,
+#    i.e. still inside the outer string) rather than a real newline, so a legitimate
+#    top-level key - always preceded by a real newline/comma/brace, never the two
+#    literal characters "\" + "n" - is never touched.
+_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+_MISSING_KEY_ESCAPE = re.compile(r'(?<=\\n)(\s*)"([A-Za-z_][A-Za-z0-9_ \-]*?)\\?":\s*\\?"')
+
+
+def _escape_key_match(match: re.Match[str]) -> str:
+    return f'{match.group(1)}\\"{match.group(2)}\\": \\"'
+
+
+def _repair_json_text(text: str) -> str | None:
+    repaired = _MISSING_KEY_ESCAPE.sub(_escape_key_match, text)
+    repaired = _TRAILING_COMMA.sub(r"\1", repaired)
+    return repaired if repaired != text else None
+
+
+def _load_json_with_repair(text: str) -> tuple[Any, str | None]:
+    """Returns (value, repaired_text). repaired_text is None when no repair was needed."""
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError:
+        repaired = _repair_json_text(text)
+        if repaired is None:
+            raise
+        return json.loads(repaired), repaired
 
 
 def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
@@ -31,16 +101,26 @@ def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
     if size > max_bytes:
         raise RelayError("SCHEMA_MISMATCH", f"Result JSON exceeds maximum size: {size}")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise RelayError("INVALID_TEXT_ENCODING", "Result JSON is not UTF-8") from exc
+    try:
+        value, repaired_text = _load_json_with_repair(raw_text)
     except json.JSONDecodeError as exc:
         raise RelayError("INVALID_JSON", f"Result JSON parsing failed: {exc}", True) from exc
+    if repaired_text is not None:
+        # Persist the fix: result_path is what a human/agent reads directly per
+        # SKILL.md, so the on-disk file must match what actually validated, not just
+        # the in-memory value.
+        logger.warning("Auto-repaired malformed result JSON at %s", path)
+        path.write_text(repaired_text, encoding="utf-8")
     if not isinstance(value, dict):
         raise RelayError("SCHEMA_MISMATCH", "Result JSON must be an object", True)
     for field, expected in REQUIRED_JSON_FIELDS.items():
         if field not in value or not isinstance(value[field], expected):
             raise RelayError("SCHEMA_MISMATCH", f"Field {field!r} is missing or has the wrong type", True)
+    if "summary" in value:
+        value["summary"] = normalize_summary(value["summary"], max_chars=1000, field="summary")
     if value.get("schema_version") != "1.0":
         raise RelayError("SCHEMA_MISMATCH", "schema_version must be 1.0", True)
     if value["status"] not in {"complete", "partial", "failed"}:
@@ -62,6 +142,14 @@ def validate_json_result(path: Path, max_bytes: int) -> dict[str, Any]:
                 raise RelayError("SCHEMA_MISMATCH", "artifact encoding must be utf-8 or base64", True)
             if not isinstance(item.get("description", ""), str):
                 raise RelayError("SCHEMA_MISMATCH", "artifact description must be a string", True)
+        if isinstance(item, dict) and item.get("role") is not None:
+            # An explicit null means "no role declared" and is treated exactly like
+            # an absent key: strict structured-output modes cannot omit a property,
+            # so they spell an optional field as null. normalize_declared_roles()
+            # already skips None, so the artifact falls back to the default role.
+            role = item.get("role")
+            if not isinstance(role, str) or not _ARTIFACT_ROLE_RE.fullmatch(role):
+                raise RelayError("SCHEMA_MISMATCH", "artifact role must be a safe non-empty identifier", True)
     return value
 
 
@@ -138,7 +226,46 @@ def validate_text_result(path: Path, max_bytes: int) -> str:
     return text
 
 
-def scan_artifacts(artifact_dir: Path, max_files: int, max_total_bytes: int) -> list[dict[str, Any]]:
+def normalize_declared_roles(artifacts: Any) -> dict[str, str]:
+    """Map ``relative_path`` to the Artifact role a Worker declared in its result JSON.
+
+    Project connections and final-output selection resolve by ``(node, role)`` and
+    require exactly one match, so ``result`` stays reserved for the Relay-produced
+    result file and cannot be claimed by a Worker.
+    """
+    roles: dict[str, str] = {}
+    if not isinstance(artifacts, list):
+        return roles
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        relative_path = item.get("relative_path")
+        declared = item.get("role")
+        if not isinstance(relative_path, str) or declared is None or declared == "":
+            continue
+        role = str(declared).strip().lower()
+        if role in RESERVED_ARTIFACT_ROLES:
+            raise RelayError(
+                "SCHEMA_MISMATCH",
+                f"Artifact role '{role}' is reserved by Relay and cannot be declared: {relative_path}",
+                True,
+            )
+        if not ARTIFACT_ROLE_PATTERN.match(role):
+            raise RelayError(
+                "SCHEMA_MISMATCH",
+                f"Artifact role must match {ARTIFACT_ROLE_PATTERN.pattern}: {declared!r} for {relative_path}",
+                True,
+            )
+        roles[relative_path] = role
+    return roles
+
+
+def scan_artifacts(
+    artifact_dir: Path,
+    max_files: int,
+    max_total_bytes: int,
+    roles: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     files: list[dict[str, Any]] = []
     total = 0
@@ -157,15 +284,17 @@ def scan_artifacts(artifact_dir: Path, max_files: int, max_total_bytes: int) -> 
                 raise RelayError("ARTIFACT_PATH_VIOLATION", "Artifact count or total size exceeds configured limits")
             rel = path.relative_to(artifact_dir).as_posix()
             mime, _ = mimetypes.guess_type(path.name)
-            files.append(
-                {
-                    "name": path.name,
-                    "relative_path": rel,
-                    "mime_type": mime or "application/octet-stream",
-                    "size": size,
-                    "sha256": sha256_file(path),
-                }
-            )
+            item = {
+                "name": path.name,
+                "relative_path": rel,
+                "mime_type": mime or "application/octet-stream",
+                "size": size,
+                "sha256": sha256_file(path),
+            }
+            role = (roles or {}).get(rel)
+            if role:
+                item["role"] = role
+            files.append(item)
     return sorted(files, key=lambda x: x["relative_path"])
 
 
@@ -179,6 +308,7 @@ def reconcile_json_artifacts(value: dict[str, Any], artifacts: list[dict[str, An
             "name": item["name"],
             "relative_path": item["relative_path"],
             "description": descriptions.get(item["relative_path"], ""),
+            **({"role": item["role"]} if item.get("role") else {}),
         }
         for item in artifacts
     ]

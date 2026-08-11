@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from .errors import RelayError
-from .util import utc_now
+from .search import artifact_mime, artifact_search_content, fts_query, result_summary
+from .util import new_artifact_uid, new_job_id, utc_now
+from .validation import normalize_summary
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 17
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -24,6 +26,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     task_hash TEXT NOT NULL,
     task_text TEXT,
     task_preview TEXT,
+    task_summary TEXT,
+    result_summary TEXT,
+    review_status TEXT NOT NULL DEFAULT 'not_required',
+    review_id TEXT,
+    review_policy_json TEXT,
+    review_candidate_root TEXT,
+    review_target_delta_json TEXT,
     title TEXT,
     requested_worker TEXT NOT NULL,
     actual_worker TEXT,
@@ -44,6 +53,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     schedule_id TEXT,
     scheduled_for TEXT,
     replayable INTEGER NOT NULL DEFAULT 1,
+    trigger_type TEXT NOT NULL DEFAULT 'manual',
+    task_id TEXT,
+    task_snapshot_json TEXT,
+    input_manifest_json TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_request_id
@@ -53,6 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_completed_at ON jobs(completed_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_submitted_via ON jobs(submitted_via);
 CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_trigger ON jobs(trigger_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_catalog ON jobs(created_at DESC, job_id DESC);
 
 CREATE TABLE IF NOT EXISTS schedules (
     schedule_id TEXT PRIMARY KEY,
@@ -128,8 +143,36 @@ CREATE TABLE IF NOT EXISTS artifacts (
     mime_type TEXT,
     size INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
+    artifact_uid TEXT,
+    role TEXT NOT NULL DEFAULT 'output',
+    producer_attempt_id INTEGER,
+    producer TEXT NOT NULL DEFAULT 'worker',
+    publication_status TEXT NOT NULL DEFAULT 'published',
     created_at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_uid
+    ON artifacts(artifact_uid) WHERE artifact_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artifacts_job_role ON artifacts(job_id, role);
+
+CREATE TABLE IF NOT EXISTS artifact_lineage (
+    lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumer_job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    source_artifact_uid TEXT NOT NULL,
+    source_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    alias TEXT NOT NULL,
+    binding_mode TEXT NOT NULL DEFAULT 'snapshot',
+    source_relative_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    source_size INTEGER NOT NULL,
+    snapshot_relative_path TEXT NOT NULL,
+    snapshot_sha256 TEXT NOT NULL,
+    snapshot_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(consumer_job_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_artifact ON artifact_lineage(source_artifact_uid);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_job ON artifact_lineage(source_job_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer_job_id);
 
 CREATE TABLE IF NOT EXISTS events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,8 +194,253 @@ CREATE TABLE IF NOT EXISTS capability_audits (
     spec_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_audits_worker ON capability_audits(worker, audit_time);
-"""
 
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    task_summary TEXT,
+    instructions TEXT,
+    default_worker TEXT,
+    default_model TEXT,
+    fallback_enabled INTEGER NOT NULL DEFAULT 1,
+    timeout_seconds INTEGER,
+    profile TEXT,
+    result_format TEXT,
+    input_schema TEXT,
+    output_contract TEXT,
+    validation_policy TEXT,
+    review_policy_json TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_catalog ON tasks(updated_at DESC, task_id DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    project_summary TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    definition_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_projects_created ON projects(created_at);
+CREATE INDEX IF NOT EXISTS idx_projects_catalog ON projects(updated_at DESC, project_id DESC);
+
+CREATE TABLE IF NOT EXISTS project_runs (
+    project_run_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    project_version INTEGER NOT NULL,
+    project_snapshot_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    submitted_via TEXT NOT NULL,
+    final_artifact_ids_json TEXT,
+    warnings_json TEXT,
+    receipt_json TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_runs_status ON project_runs(status);
+CREATE INDEX IF NOT EXISTS idx_project_runs_catalog ON project_runs(created_at DESC, project_run_id DESC);
+
+CREATE TABLE IF NOT EXISTS project_run_steps (
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    active_task_run_id TEXT,
+    input_manifest_json TEXT,
+    resolved_connections_json TEXT,
+    step_overrides_json TEXT,
+    review_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_run_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_steps_active ON project_run_steps(active_task_run_id);
+
+CREATE TABLE IF NOT EXISTS project_step_runs (
+    project_run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    step_attempt INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL,
+    worker_override TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY (project_run_id, node_id, step_attempt),
+    UNIQUE (task_run_id),
+    FOREIGN KEY (project_run_id, node_id) REFERENCES project_run_steps(project_run_id, node_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS project_run_events (
+    event_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_events_run ON project_run_events(project_run_id, seq);
+
+CREATE TABLE IF NOT EXISTS project_run_orchestrator_state (
+    project_run_id TEXT PRIMARY KEY REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    llm_calls_used INTEGER NOT NULL DEFAULT 0,
+    repair_attempts_used INTEGER NOT NULL DEFAULT 0,
+    state_digest TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS review_sessions (
+    review_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    task_run_id TEXT,
+    project_run_id TEXT,
+    node_id TEXT,
+    approval_token TEXT,
+    reviewer TEXT NOT NULL,
+    status TEXT NOT NULL,
+    guidelines TEXT,
+    max_reruns INTEGER NOT NULL DEFAULT 0,
+    reruns_used INTEGER NOT NULL DEFAULT 0,
+    current_round INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_status ON review_sessions(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_task ON review_sessions(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_project ON review_sessions(project_run_id, node_id);
+
+CREATE TABLE IF NOT EXISTS review_rounds (
+    review_id TEXT NOT NULL REFERENCES review_sessions(review_id) ON DELETE CASCADE,
+    round_no INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL REFERENCES jobs(job_id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    comment TEXT,
+    evaluation_json TEXT,
+    candidate_manifest_json TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    PRIMARY KEY (review_id, round_no),
+    UNIQUE (task_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_rounds_task ON review_rounds(task_run_id);
+
+CREATE TABLE IF NOT EXISTS routines (
+    routine_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    rule_json TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    deleted_at TEXT,
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_grace_seconds INTEGER NOT NULL DEFAULT 43200,
+    version_policy TEXT NOT NULL DEFAULT 'latest',
+    pinned_version INTEGER,
+    input_policy_json TEXT,
+    notification_policy_json TEXT,
+    starts_at_utc TEXT,
+    ends_at_utc TEXT,
+    next_run_at_utc TEXT,
+    last_occurrence_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_routines_next_run ON routines(enabled, next_run_at_utc);
+
+CREATE TABLE IF NOT EXISTS routine_runs (
+    run_id TEXT PRIMARY KEY,
+    routine_id TEXT NOT NULL REFERENCES routines(routine_id) ON DELETE CASCADE,
+    occurrence_key TEXT NOT NULL,
+    scheduled_for_utc TEXT NOT NULL,
+    scheduled_for_local TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    task_run_id TEXT REFERENCES jobs(job_id),
+    project_run_id TEXT REFERENCES project_runs(project_run_id),
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(routine_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id, scheduled_for_utc);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_task ON routine_runs(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_run_id);
+
+ALTER TABLE jobs ADD COLUMN routine_id TEXT;
+ALTER TABLE project_runs ADD COLUMN routine_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_routine ON jobs(routine_id);
+CREATE INDEX IF NOT EXISTS idx_project_runs_routine ON project_runs(routine_id);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer TEXT,
+    reason TEXT,
+    edited_artifact_uid TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_project_run ON approvals(project_run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_token ON approvals(token);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    approval_id TEXT REFERENCES approvals(approval_id),
+    kind TEXT NOT NULL DEFAULT 'folder',
+    target_path TEXT NOT NULL,
+    artifact_uid TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_project_run ON deliveries(project_run_id);
+
+CREATE TABLE IF NOT EXISTS notification_events (
+    event_id TEXT PRIMARY KEY,
+    routine_id TEXT,
+    project_run_id TEXT,
+    trigger_type TEXT NOT NULL,
+    sink_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'delivered',
+    status_code INTEGER,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    error TEXT,
+    payload_hash TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_events_routine ON notification_events(routine_id);
+CREATE INDEX IF NOT EXISTS idx_notification_events_project ON notification_events(project_run_id);
+
+ALTER TABLE jobs ADD COLUMN receipt_schema_version INTEGER NOT NULL DEFAULT 1;
+"""
 MIGRATION_0_TO_1 = """
 ALTER TABLE jobs ADD COLUMN submitted_via TEXT NOT NULL DEFAULT 'legacy';
 ALTER TABLE jobs ADD COLUMN task_preview TEXT;
@@ -163,6 +451,7 @@ ALTER TABLE jobs ADD COLUMN replayable INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_jobs_completed_at ON jobs(completed_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_submitted_via ON jobs(submitted_via);
 CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON jobs(schedule_id, created_at);
+
 """
 
 MIGRATION_1_TO_2 = """
@@ -208,6 +497,327 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs(schedule_id, scheduled_for_utc);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_job ON schedule_runs(job_id);
+"""
+
+MIGRATION_2_TO_3 = """
+ALTER TABLE jobs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE jobs ADD COLUMN task_id TEXT;
+ALTER TABLE jobs ADD COLUMN task_snapshot_json TEXT;
+ALTER TABLE artifacts ADD COLUMN artifact_uid TEXT;
+ALTER TABLE artifacts ADD COLUMN role TEXT NOT NULL DEFAULT 'output';
+ALTER TABLE artifacts ADD COLUMN producer_attempt_id INTEGER;
+CREATE INDEX IF NOT EXISTS idx_jobs_trigger ON jobs(trigger_type, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_uid
+    ON artifacts(artifact_uid) WHERE artifact_uid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_artifacts_job_role ON artifacts(job_id, role);
+"""
+
+MIGRATION_3_TO_4 = """
+ALTER TABLE jobs ADD COLUMN input_manifest_json TEXT;
+CREATE TABLE IF NOT EXISTS artifact_lineage (
+    lineage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumer_job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    source_artifact_uid TEXT NOT NULL,
+    source_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    alias TEXT NOT NULL,
+    binding_mode TEXT NOT NULL DEFAULT 'snapshot',
+    source_relative_path TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    source_size INTEGER NOT NULL,
+    snapshot_relative_path TEXT NOT NULL,
+    snapshot_sha256 TEXT NOT NULL,
+    snapshot_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(consumer_job_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_artifact ON artifact_lineage(source_artifact_uid);
+CREATE INDEX IF NOT EXISTS idx_lineage_source_job ON artifact_lineage(source_job_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_consumer_job ON artifact_lineage(consumer_job_id);
+"""
+
+MIGRATION_4_TO_5 = """
+-- FTS5 tables are created opportunistically after the schema migration.
+"""
+
+MIGRATION_10_TO_11 = """
+ALTER TABLE jobs ADD COLUMN receipt_schema_version INTEGER NOT NULL DEFAULT 1;
+"""
+
+MIGRATION_11_TO_12 = """
+ALTER TABLE artifacts ADD COLUMN producer TEXT NOT NULL DEFAULT 'worker';
+"""
+
+MIGRATION_12_TO_13 = """
+ALTER TABLE tasks ADD COLUMN task_summary TEXT;
+ALTER TABLE jobs ADD COLUMN task_summary TEXT;
+ALTER TABLE jobs ADD COLUMN result_summary TEXT;
+CREATE INDEX IF NOT EXISTS idx_tasks_catalog ON tasks(updated_at DESC, task_id DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_catalog ON jobs(created_at DESC, job_id DESC);
+"""
+
+MIGRATION_13_TO_14 = """
+ALTER TABLE projects ADD COLUMN project_summary TEXT;
+CREATE INDEX IF NOT EXISTS idx_projects_catalog ON projects(updated_at DESC, project_id DESC);
+CREATE INDEX IF NOT EXISTS idx_project_runs_catalog ON project_runs(created_at DESC, project_run_id DESC);
+"""
+
+MIGRATION_14_TO_15 = """
+ALTER TABLE project_run_steps ADD COLUMN step_overrides_json TEXT;
+CREATE TABLE IF NOT EXISTS project_run_events (
+    event_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_events_run ON project_run_events(project_run_id, seq);
+CREATE TABLE IF NOT EXISTS project_run_orchestrator_state (
+    project_run_id TEXT PRIMARY KEY REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    llm_calls_used INTEGER NOT NULL DEFAULT 0,
+    repair_attempts_used INTEGER NOT NULL DEFAULT 0,
+    state_digest TEXT,
+    updated_at TEXT NOT NULL
+);
+"""
+
+MIGRATION_15_TO_16 = """
+ALTER TABLE tasks ADD COLUMN default_model TEXT;
+"""
+
+MIGRATION_16_TO_17 = """
+ALTER TABLE jobs ADD COLUMN review_status TEXT NOT NULL DEFAULT 'not_required';
+ALTER TABLE jobs ADD COLUMN review_id TEXT;
+ALTER TABLE jobs ADD COLUMN review_policy_json TEXT;
+ALTER TABLE jobs ADD COLUMN review_candidate_root TEXT;
+ALTER TABLE jobs ADD COLUMN review_target_delta_json TEXT;
+ALTER TABLE tasks ADD COLUMN review_policy_json TEXT;
+ALTER TABLE artifacts ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'published';
+ALTER TABLE project_run_steps ADD COLUMN review_id TEXT;
+CREATE TABLE IF NOT EXISTS review_sessions (
+    review_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    task_run_id TEXT,
+    project_run_id TEXT,
+    node_id TEXT,
+    approval_token TEXT,
+    reviewer TEXT NOT NULL,
+    status TEXT NOT NULL,
+    guidelines TEXT,
+    max_reruns INTEGER NOT NULL DEFAULT 0,
+    reruns_used INTEGER NOT NULL DEFAULT 0,
+    current_round INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_status ON review_sessions(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_task ON review_sessions(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_project ON review_sessions(project_run_id, node_id);
+CREATE TABLE IF NOT EXISTS review_rounds (
+    review_id TEXT NOT NULL REFERENCES review_sessions(review_id) ON DELETE CASCADE,
+    round_no INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL REFERENCES jobs(job_id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    comment TEXT,
+    evaluation_json TEXT,
+    candidate_manifest_json TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    PRIMARY KEY (review_id, round_no),
+    UNIQUE (task_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_rounds_task ON review_rounds(task_run_id);
+"""
+
+MIGRATION_9_TO_10 = """
+CREATE TABLE IF NOT EXISTS notification_events (
+    event_id TEXT PRIMARY KEY,
+    routine_id TEXT,
+    project_run_id TEXT,
+    trigger_type TEXT NOT NULL,
+    sink_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'delivered',
+    status_code INTEGER,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    error TEXT,
+    payload_hash TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_events_routine ON notification_events(routine_id);
+CREATE INDEX IF NOT EXISTS idx_notification_events_project ON notification_events(project_run_id);
+"""
+
+MIGRATION_8_TO_9 = """
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer TEXT,
+    reason TEXT,
+    edited_artifact_uid TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_project_run ON approvals(project_run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_token ON approvals(token);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    approval_id TEXT REFERENCES approvals(approval_id),
+    kind TEXT NOT NULL DEFAULT 'folder',
+    target_path TEXT NOT NULL,
+    artifact_uid TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_project_run ON deliveries(project_run_id);
+"""
+
+MIGRATION_7_TO_8 = """
+CREATE TABLE IF NOT EXISTS routines (
+    routine_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    rule_json TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    deleted_at TEXT,
+    overlap_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_policy TEXT NOT NULL DEFAULT 'skip',
+    missed_grace_seconds INTEGER NOT NULL DEFAULT 43200,
+    version_policy TEXT NOT NULL DEFAULT 'latest',
+    pinned_version INTEGER,
+    input_policy_json TEXT,
+    notification_policy_json TEXT,
+    starts_at_utc TEXT,
+    ends_at_utc TEXT,
+    next_run_at_utc TEXT,
+    last_occurrence_key TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_routines_next_run ON routines(enabled, next_run_at_utc);
+
+CREATE TABLE IF NOT EXISTS routine_runs (
+    run_id TEXT PRIMARY KEY,
+    routine_id TEXT NOT NULL REFERENCES routines(routine_id) ON DELETE CASCADE,
+    occurrence_key TEXT NOT NULL,
+    scheduled_for_utc TEXT NOT NULL,
+    scheduled_for_local TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    task_run_id TEXT REFERENCES jobs(job_id),
+    project_run_id TEXT REFERENCES project_runs(project_run_id),
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(routine_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id, scheduled_for_utc);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_task ON routine_runs(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_project ON routine_runs(project_run_id);
+
+ALTER TABLE jobs ADD COLUMN routine_id TEXT;
+ALTER TABLE project_runs ADD COLUMN routine_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_jobs_routine ON jobs(routine_id);
+CREATE INDEX IF NOT EXISTS idx_project_runs_routine ON project_runs(routine_id);
+"""
+
+MIGRATION_6_TO_7 = """
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    definition_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_projects_created ON projects(created_at);
+
+CREATE TABLE IF NOT EXISTS project_runs (
+    project_run_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(project_id),
+    project_version INTEGER NOT NULL,
+    project_snapshot_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    submitted_via TEXT NOT NULL,
+    final_artifact_ids_json TEXT,
+    warnings_json TEXT,
+    receipt_json TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_runs_project ON project_runs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_project_runs_status ON project_runs(status);
+
+CREATE TABLE IF NOT EXISTS project_run_steps (
+    project_run_id TEXT NOT NULL REFERENCES project_runs(project_run_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    active_task_run_id TEXT,
+    input_manifest_json TEXT,
+    resolved_connections_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_run_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_run_steps_active ON project_run_steps(active_task_run_id);
+
+CREATE TABLE IF NOT EXISTS project_step_runs (
+    project_run_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    step_attempt INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL,
+    worker_override TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY (project_run_id, node_id, step_attempt),
+    UNIQUE (task_run_id),
+    FOREIGN KEY (project_run_id, node_id) REFERENCES project_run_steps(project_run_id, node_id) ON DELETE CASCADE
+);
+"""
+
+MIGRATION_5_TO_6 = """CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    instructions TEXT,
+    default_worker TEXT,
+    fallback_enabled INTEGER NOT NULL DEFAULT 1,
+    timeout_seconds INTEGER,
+    profile TEXT,
+    result_format TEXT,
+    input_schema TEXT,
+    output_contract TEXT,
+    validation_policy TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_task ON jobs(task_id, created_at);
 """
 
 LEGACY_JOB_COLUMNS = {
@@ -271,6 +881,8 @@ class Database:
             if not tables:
                 conn.executescript(SCHEMA)
                 conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
+                self._ensure_search_tables(conn)
+                self.rebuild_search_index()
                 return
             if version == 0:
                 self._validate_legacy_schema(conn, tables)
@@ -283,29 +895,651 @@ class Database:
                     for statement in MIGRATION_1_TO_2.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for statement in MIGRATION_2_TO_3.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_3_TO_4.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_4_TO_5.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_5_TO_6.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_6_TO_7.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for migration in (
+                        MIGRATION_7_TO_8,
+                        MIGRATION_8_TO_9,
+                        MIGRATION_9_TO_10,
+                        MIGRATION_10_TO_11,
+                        MIGRATION_11_TO_12,
+                        MIGRATION_12_TO_13,
+                        MIGRATION_13_TO_14,
+                        MIGRATION_14_TO_15,
+                        MIGRATION_15_TO_16,
+                        MIGRATION_16_TO_17,
+                    ):
+                        for statement in migration.split(";"):
+                            if statement.strip():
+                                try:
+                                    conn.execute(statement)
+                                except sqlite3.OperationalError as exc:
+                                    if "duplicate column" not in str(exc):
+                                        raise
+                    self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
                     self._backfill_job_metadata(conn)
                     conn.execute("COMMIT")
+                    self._backfill_catalog_summaries(conn)
+                    self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
                 except Exception as exc:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            elif version == 1:
+            elif version in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
                 self.last_backup_path = self._create_backup()
                 try:
                     conn.execute("BEGIN")
-                    for statement in MIGRATION_1_TO_2.split(";"):
+                    if version == 1:
+                        for statement in MIGRATION_1_TO_2.split(";"):
+                            if statement.strip():
+                                conn.execute(statement)
+                    if version in {1, 2}:
+                        for statement in MIGRATION_2_TO_3.split(";"):
+                            if statement.strip():
+                                conn.execute(statement)
+                    if version in {1, 2, 3}:
+                        for statement in MIGRATION_3_TO_4.split(";"):
+                            if statement.strip():
+                                conn.execute(statement)
+                    for statement in MIGRATION_4_TO_5.split(";"):
                         if statement.strip():
                             conn.execute(statement)
+                    for statement in MIGRATION_5_TO_6.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_6_TO_7.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_7_TO_8.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_8_TO_9.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_9_TO_10.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_10_TO_11.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_11_TO_12.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_12_TO_13.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_13_TO_14.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    self._backfill_artifact_uids(conn)
                     conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
+                    conn.execute("COMMIT")
+                    self._backfill_catalog_summaries(conn)
+                    self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+
+            elif version == 7:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_7_TO_8.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_8_TO_9.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_9_TO_10.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_10_TO_11.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_11_TO_12.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_12_TO_13.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_13_TO_14.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute(f"PRAGMA user_version={CURRENT_SCHEMA_VERSION}")
+                    conn.execute("COMMIT")
+                    self._backfill_catalog_summaries(conn)
+                    self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+            elif version == 12:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_12_TO_13.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_13_TO_14.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
+                    conn.execute("COMMIT")
+                    self._backfill_catalog_summaries(conn)
+                    self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+            elif version == 13:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_13_TO_14.split(";"):
+                        if statement.strip():
+                            conn.execute(statement)
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
+                    conn.execute("COMMIT")
+                    self._backfill_project_summaries(conn)
+                    self._backfill_step_overrides(conn)
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+            elif version == 14:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_14_TO_15.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
+                    conn.execute("COMMIT")
+                    self._backfill_step_overrides(conn)
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+            elif version == 15:
+                self.last_backup_path = self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_15_TO_16.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=16")
                     conn.execute("COMMIT")
                 except Exception as exc:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            if version == CURRENT_SCHEMA_VERSION:
+            # All legacy branches above intentionally preserve their original
+            # migration code. Finish the additive review migration here so a
+            # v0-v16 database reaches the same v17 shape without duplicating
+            # another large version branch.
+            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if current_version == 16:
+                self.last_backup_path = self.last_backup_path or self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_16_TO_17.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=17")
+                    conn.execute("COMMIT")
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+                current_version = 17
+            if current_version == CURRENT_SCHEMA_VERSION:
                 self._backfill_job_metadata(conn)
+                self._ensure_search_tables(conn)
+                self._backfill_catalog_summaries(conn, read_results=False)
+                self._backfill_project_summaries(conn)
+                self._backfill_step_overrides(conn)
+        self._refresh_search_index_if_stale()
+
+    @staticmethod
+    def _ensure_search_tables(conn: sqlite3.Connection) -> bool:
+        if not Database._fts_available(conn):
+            return False
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS run_search USING fts5("
+            "run_id UNINDEXED,title,task_text,summary,worker,profile,trigger_type)"
+        )
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS artifact_search USING fts5("
+            "artifact_uid UNINDEXED,run_id UNINDEXED,name,role,mime_type,content_text)"
+        )
+        return True
+
+    @staticmethod
+    def _search_index_needs_rebuild(conn: sqlite3.Connection) -> bool:
+        expected_runs = int(conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
+        indexed_runs = int(conn.execute("SELECT COUNT(*) FROM run_search").fetchone()[0])
+        expected_artifacts = int(
+            conn.execute("SELECT COUNT(*) FROM artifacts WHERE artifact_uid IS NOT NULL").fetchone()[0]
+        )
+        indexed_artifacts = int(conn.execute("SELECT COUNT(*) FROM artifact_search").fetchone()[0])
+        return expected_runs != indexed_runs or expected_artifacts != indexed_artifacts
+
+    def _refresh_search_index_if_stale(self) -> None:
+        with self.connect() as conn:
+            if not self._ensure_search_tables(conn):
                 return
+            stale = self._search_index_needs_rebuild(conn)
+        if stale:
+            self.rebuild_search_index()
+
+    @staticmethod
+    def _fts_available(conn: sqlite3.Connection) -> bool:
+        try:
+            conn.execute("CREATE VIRTUAL TABLE temp.relay_fts_probe USING fts5(value)")
+            conn.execute("DROP TABLE temp.relay_fts_probe")
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    def search_capabilities(self) -> dict[str, bool]:
+        with self.connect() as conn:
+            return {"fts5_available": self._fts_available(conn)}
+
+    def _run_index_values(self, conn: sqlite3.Connection, job_id: str) -> tuple[Any, ...] | None:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        job = dict(row)
+        summary = result_summary(job)
+        task_text = job.get("task_text") or job.get("task_preview") or ""
+        if not task_text and bool(job.get("replayable", 1)):
+            try:
+                request = json.loads(job.get("request_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                request = {}
+            if isinstance(request, dict):
+                task_text = str(request.get("task") or "")
+        return (
+            job_id,
+            job.get("title") or "" if bool(job.get("replayable", 1)) else "",
+            task_text,
+            summary or "",
+            job.get("requested_worker") or "",
+            job.get("profile") or "",
+            job.get("trigger_type") or "manual",
+        )
+
+    def index_run(self, job_id: str) -> bool:
+        with self.connect() as conn:
+            if not self._ensure_search_tables(conn):
+                return False
+            values = self._run_index_values(conn, job_id)
+            if values is None:
+                return False
+            conn.execute("DELETE FROM run_search WHERE run_id=?", (job_id,))
+            conn.execute(
+                "INSERT INTO run_search(run_id,title,task_text,summary,worker,profile,trigger_type) VALUES(?,?,?,?,?,?,?)",
+                values,
+            )
+            return True
+
+    def index_artifact(self, artifact_uid: str) -> bool:
+        with self.connect() as conn:
+            if not self._ensure_search_tables(conn):
+                return False
+            row = conn.execute("SELECT * FROM artifacts WHERE artifact_uid=?", (artifact_uid,)).fetchone()
+            if not row:
+                return False
+            artifact = dict(row)
+            if artifact.get("publication_status") not in (None, "published"):
+                conn.execute("DELETE FROM artifact_search WHERE artifact_uid=?", (artifact_uid,))
+                return False
+            content, _available = artifact_search_content(artifact, max_bytes=1024 * 1024)
+            conn.execute("DELETE FROM artifact_search WHERE artifact_uid=?", (artifact_uid,))
+            conn.execute(
+                "INSERT INTO artifact_search(artifact_uid,run_id,name,role,mime_type,content_text) VALUES(?,?,?,?,?,?)",
+                (
+                    artifact_uid,
+                    artifact["job_id"],
+                    artifact.get("relative_path") or "",
+                    artifact.get("role") or "output",
+                    artifact_mime(artifact) or "",
+                    content or "",
+                ),
+            )
+            return True
+
+    def rebuild_search_index(self) -> bool:
+        with self.connect() as conn:
+            if not self._ensure_search_tables(conn):
+                return False
+            conn.execute("DELETE FROM run_search")
+            conn.execute("DELETE FROM artifact_search")
+            for row in conn.execute("SELECT job_id FROM jobs ORDER BY job_id").fetchall():
+                values = self._run_index_values(conn, row[0])
+                if values:
+                    conn.execute(
+                        "INSERT INTO run_search(run_id,title,task_text,summary,worker,profile,trigger_type) VALUES(?,?,?,?,?,?,?)",
+                        values,
+                    )
+            for row in conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_uid IS NOT NULL "
+                "AND (publication_status IS NULL OR publication_status='published') ORDER BY artifact_id"
+            ).fetchall():
+                artifact = dict(row)
+                content, _available = artifact_search_content(artifact, max_bytes=1024 * 1024)
+                conn.execute(
+                    "INSERT INTO artifact_search(artifact_uid,run_id,name,role,mime_type,content_text) VALUES(?,?,?,?,?,?)",
+                    (
+                        artifact["artifact_uid"],
+                        artifact["job_id"],
+                        artifact.get("relative_path") or "",
+                        artifact.get("role") or "output",
+                        artifact_mime(artifact) or "",
+                        content or "",
+                    ),
+                )
+            return True
+
+    def search_runs(
+        self,
+        query: str | None = None,
+        *,
+        status: str | None = None,
+        worker: str | None = None,
+        submitted_via: str | None = None,
+        trigger_type: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        role: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        from .search import normalize_limit
+
+        limit = normalize_limit(limit)
+        with self.connect() as conn:
+            if not self._fts_available(conn):
+                raise RelayError("SEARCH_UNAVAILABLE", "SQLite FTS5 is not available.")
+            where = [
+                "1=1",
+                "COALESCE(j.review_status, 'not_required') NOT IN ('pending_human','needs_human','delivery_failed','revision_queued')",
+            ]
+            params: list[Any] = []
+            join = ""
+            if query:
+                where.append("run_search MATCH ?")
+                params.append(fts_query(query))
+            if status:
+                where.append("j.status=?")
+                params.append(status.upper())
+            if worker:
+                where.append("(j.requested_worker=? OR j.actual_worker=?)")
+                params.extend([worker, worker])
+            if submitted_via:
+                where.append("j.submitted_via=?")
+                params.append(submitted_via)
+            if trigger_type:
+                where.append("j.trigger_type=?")
+                params.append(trigger_type)
+            if date_from:
+                where.append("COALESCE(j.completed_at,j.created_at)>=?")
+                params.append(date_from)
+            if date_to:
+                where.append("COALESCE(j.completed_at,j.created_at)<=?")
+                params.append(date_to)
+            if role:
+                where.append("EXISTS (SELECT 1 FROM artifacts ar WHERE ar.job_id=j.job_id AND ar.role=?)")
+                params.append(role)
+            if query:
+                select_rank = "bm25(run_search) AS relevance"
+                join = "JOIN run_search ON run_search.run_id=j.job_id"
+            else:
+                select_rank = "0.0 AS relevance"
+            sql = (
+                f"SELECT j.*, {select_rank} FROM jobs j {join} WHERE {' AND '.join(where)} "
+                "ORDER BY relevance ASC, COALESCE(j.completed_at,j.created_at) DESC, j.job_id DESC LIMIT ? OFFSET ?"
+            )
+            params.extend([limit, max(0, int(offset))])
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def search_artifacts(
+        self,
+        query: str | None = None,
+        *,
+        role: str | None = None,
+        mime_type: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        from .search import normalize_limit
+
+        limit = normalize_limit(limit)
+        with self.connect() as conn:
+            if not self._fts_available(conn):
+                raise RelayError("SEARCH_UNAVAILABLE", "SQLite FTS5 is not available.")
+            where = ["1=1", "(ar.publication_status IS NULL OR ar.publication_status='published')"]
+            params: list[Any] = []
+            join = ""
+            if query:
+                where.append("artifact_search MATCH ?")
+                params.append(fts_query(query))
+                join = "JOIN artifact_search ON artifact_search.artifact_uid=ar.artifact_uid"
+            if role:
+                where.append("ar.role=?")
+                params.append(role)
+            if mime_type:
+                where.append("ar.mime_type=?")
+                params.append(mime_type)
+            if date_from:
+                where.append("ar.created_at>=?")
+                params.append(date_from)
+            if date_to:
+                where.append("ar.created_at<=?")
+                params.append(date_to)
+            select_rank = "bm25(artifact_search) AS relevance" if query else "0.0 AS relevance"
+            sql = (
+                f"SELECT ar.*, {select_rank} FROM artifacts ar {join} WHERE {' AND '.join(where)} "
+                "ORDER BY relevance ASC, ar.created_at DESC, ar.artifact_id DESC LIMIT ? OFFSET ?"
+            )
+            params.extend([limit, max(0, int(offset))])
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def search_has_more(self, kind: str, query: str | None, offset: int, **filters: Any) -> bool:
+        rows = (
+            self.search_runs(query, limit=1, offset=offset + 1, **filters)
+            if kind == "runs"
+            else self.search_artifacts(query, limit=1, offset=offset + 1, **filters)
+        )
+        return bool(rows)
+
+    def artifact_content(self, artifact_uid: str, max_bytes: int) -> dict[str, Any]:
+        from .search import normalize_max_bytes
+
+        max_bytes = normalize_max_bytes(max_bytes)
+        artifact = self.artifact_by_uid(artifact_uid)
+        if not artifact:
+            raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
+        path = Path(str(artifact["final_path"]))
+        if not path.is_file():
+            return {"ok": True, "artifact_uid": artifact_uid, "available": False, "text": ""}
+        content, available = artifact_search_content(artifact, max_bytes=max_bytes)
+        if not available:
+            return {"ok": True, "artifact_uid": artifact_uid, "available": False, "text": ""}
+        raw = path.read_bytes()[:max_bytes]
+        return {
+            "ok": True,
+            "artifact_uid": artifact_uid,
+            "available": True,
+            "text": content,
+            "size": path.stat().st_size,
+            "truncated": path.stat().st_size > len(raw),
+            "mime_type": artifact_mime(artifact),
+        }
 
     def _validate_legacy_schema(self, conn: sqlite3.Connection, tables: set[str]) -> None:
         required_tables = {"jobs", "attempts", "artifacts", "events", "capability_audits"}
@@ -347,6 +1581,13 @@ class Database:
         value = " ".join((first_line or f"Job {job_id[:8]}").split())
         return value if len(value) <= 60 else value[:59].rstrip() + "…"
 
+    def _backfill_artifact_uids(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT artifact_id FROM artifacts WHERE artifact_uid IS NULL ORDER BY artifact_id"
+        ).fetchall()
+        for row in rows:
+            conn.execute("UPDATE artifacts SET artifact_uid=? WHERE artifact_id=?", (new_artifact_uid(), row[0]))
+
     def _backfill_job_metadata(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(
             "SELECT job_id,task_text,title,task_preview FROM jobs "
@@ -366,6 +1607,102 @@ class Database:
             if changes:
                 values.append(row[0])
                 conn.execute(f"UPDATE jobs SET {','.join(changes)} WHERE job_id=?", values)
+
+    def _backfill_step_overrides(self, conn: sqlite3.Connection) -> None:
+        """Move the legacy worker-override overlay out of ``resolved_connections_json``.
+
+        Before schema v15, ``retry_project_run(worker=...)`` stashed ``{"worker_override": ...}``
+        directly into ``resolved_connections_json``, the same field that otherwise holds the
+        step's resolved input bindings, and callers told the two shapes apart with an
+        ``isinstance(dict)`` check. Any row still carrying that shape gets its override moved
+        into ``step_overrides_json`` and the field cleared; rows already migrated (JSON array or
+        NULL) are left untouched, so this is safe to run on every startup.
+        """
+        rows = conn.execute(
+            "SELECT project_run_id, node_id, resolved_connections_json, step_overrides_json "
+            "FROM project_run_steps WHERE resolved_connections_json IS NOT NULL"
+        ).fetchall()
+        for project_run_id, node_id, resolved_json, overrides_json in rows:
+            try:
+                decoded = json.loads(resolved_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(decoded, dict) or "worker_override" not in decoded:
+                continue
+            overrides = {}
+            if overrides_json:
+                try:
+                    parsed = json.loads(overrides_json)
+                    if isinstance(parsed, dict):
+                        overrides = parsed
+                except (TypeError, json.JSONDecodeError):
+                    overrides = {}
+            overrides.setdefault("worker_override", decoded.get("worker_override"))
+            conn.execute(
+                "UPDATE project_run_steps SET step_overrides_json=?, resolved_connections_json=NULL "
+                "WHERE project_run_id=? AND node_id=?",
+                (json.dumps(overrides), project_run_id, node_id),
+            )
+
+    def _backfill_project_summaries(self, conn: sqlite3.Connection) -> None:
+        for row in conn.execute(
+            "SELECT project_id,name,description FROM projects WHERE project_summary IS NULL"
+        ).fetchall():
+            summary = normalize_summary(
+                row[2] or row[1], max_chars=500, field="project_summary", error_code="PROJECT_INVALID"
+            )
+            if summary:
+                conn.execute("UPDATE projects SET project_summary=? WHERE project_id=?", (summary, row[0]))
+
+    def _backfill_catalog_summaries(self, conn: sqlite3.Connection, *, read_results: bool = True) -> None:
+        """Populate bounded catalog fields without changing source requests or results."""
+        for row in conn.execute(
+            "SELECT task_id,description,instructions FROM tasks WHERE task_summary IS NULL"
+        ).fetchall():
+            summary = normalize_summary(
+                row[1] or row[2], max_chars=500, field="task_summary", error_code="TASK_INVALID"
+            )
+            if summary:
+                conn.execute("UPDATE tasks SET task_summary=? WHERE task_id=?", (summary, row[0]))
+
+        rows = conn.execute(
+            "SELECT job_id,task_summary,result_summary,task_snapshot_json,task_preview,task_text,output_path,replayable "
+            "FROM jobs WHERE task_summary IS NULL OR result_summary IS NULL"
+        ).fetchall()
+        for row in rows:
+            job_id, task_summary, result_value, snapshot_json, preview, task_text, output_path, replayable = row
+            if not replayable:
+                if task_summary is not None or result_value is not None:
+                    conn.execute("UPDATE jobs SET task_summary=NULL,result_summary=NULL WHERE job_id=?", (job_id,))
+                continue
+            snapshot: dict[str, Any] = {}
+            try:
+                decoded = json.loads(snapshot_json or "{}")
+                if isinstance(decoded, dict):
+                    snapshot = decoded
+            except (TypeError, json.JSONDecodeError):
+                pass
+            definition = snapshot.get("task_definition") or {}
+            task_candidate = (
+                snapshot.get("task_summary")
+                or definition.get("task_summary")
+                or definition.get("description")
+                or preview
+                or task_text
+            )
+            task_value = task_summary or normalize_summary(
+                task_candidate, max_chars=500, field="task_summary", error_code="TASK_INVALID"
+            )
+            result_candidate = result_value or (result_summary({"output_path": output_path}) if read_results else None)
+            result_value = result_value or normalize_summary(
+                result_candidate, max_chars=1000, field="result_summary", error_code="TASK_INVALID"
+            )
+            if task_value is not None or result_value is not None:
+                conn.execute(
+                    "UPDATE jobs SET task_summary=COALESCE(task_summary,?),"
+                    "result_summary=COALESCE(result_summary,?) WHERE job_id=?",
+                    (task_value, result_value, job_id),
+                )
 
     def create_job(self, row: dict[str, Any]) -> None:
         now = utc_now()
@@ -683,6 +2020,134 @@ class Database:
             rows = conn.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY artifact_id", (job_id,)).fetchall()
             return [dict(r) for r in rows]
 
+    def update_artifact_publication(self, artifact_uid: str, publication_status: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE artifacts SET publication_status=? WHERE artifact_uid=?",
+                (publication_status, artifact_uid),
+            )
+            if publication_status != "published":
+                if self._ensure_search_tables(conn):
+                    conn.execute("DELETE FROM artifact_search WHERE artifact_uid=?", (artifact_uid,))
+
+    def update_artifact_path(self, artifact_uid: str, final_path: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE artifacts SET final_path=? WHERE artifact_uid=?", (final_path, artifact_uid))
+
+    def create_review_session(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"created_at": now, "updated_at": now, **row}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO review_sessions ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_review_session(self, review_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM review_sessions WHERE review_id=?", (review_id,)).fetchone()
+            return dict(row) if row else None
+
+    def review_session_for_approval(self, approval_token: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM review_sessions WHERE approval_token=?", (approval_token,)).fetchone()
+            return dict(row) if row else None
+
+    def review_session_for_task(self, task_run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM review_sessions WHERE task_run_id=? ORDER BY updated_at DESC LIMIT 1",
+                (task_run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def review_session_for_project_node(self, project_run_id: str, node_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM review_sessions WHERE project_run_id=? AND node_id=? ORDER BY updated_at DESC LIMIT 1",
+                (project_run_id, node_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_review_sessions(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM review_sessions"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status=?"
+            params.append(status)
+        query += " ORDER BY updated_at ASC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def update_review_session(self, review_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE review_sessions SET {','.join(f'{key}=?' for key in keys)} WHERE review_id=?",
+                [changes[key] for key in keys] + [review_id],
+            )
+
+    def create_review_round(self, row: dict[str, Any]) -> None:
+        values = {"created_at": utc_now(), **row}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO review_rounds ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def list_review_rounds(self, review_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM review_rounds WHERE review_id=? ORDER BY round_no",
+                (review_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_review_round(self, review_id: str, round_no: int, **changes: Any) -> None:
+        if not changes:
+            return
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE review_rounds SET {','.join(f'{key}=?' for key in keys)} WHERE review_id=? AND round_no=?",
+                [changes[key] for key in keys] + [review_id, round_no],
+            )
+
+    def artifact_by_uid(self, artifact_uid: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM artifacts WHERE artifact_uid=?", (artifact_uid,)).fetchone()
+            return dict(row) if row else None
+
+    def add_lineage(self, row: dict[str, Any]) -> int:
+        values = {"created_at": utc_now(), "binding_mode": "snapshot", **row}
+        keys = list(values)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"INSERT INTO artifact_lineage ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+            return int(cursor.lastrowid)
+
+    def lineage_for_job(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM artifact_lineage WHERE consumer_job_id=? ORDER BY lineage_id", (job_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def lineage_for_artifact(self, artifact_uid: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM artifact_lineage WHERE source_artifact_uid=? ORDER BY lineage_id", (artifact_uid,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def add_audit(
         self,
         worker: str,
@@ -723,7 +2188,8 @@ class Database:
     def scrub_non_replayable(self, job_id: str) -> None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE jobs SET request_json='{}',task_text=NULL,task_preview=NULL,updated_at=? "
+                "UPDATE jobs SET request_json='{}',task_text=NULL,task_preview=NULL,"
+                "task_summary=NULL,result_summary=NULL,updated_at=? "
                 "WHERE job_id=? AND replayable=0",
                 (utc_now(), job_id),
             )
@@ -741,3 +2207,810 @@ class Database:
                 (utc_now(), utc_now(), job_id),
             )
             return cursor.rowcount > 0
+
+    def create_task(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"version": 1, **row, "created_at": row.get("created_at", now), "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO tasks ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_tasks(self, *, name: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM tasks"
+        params: list[Any] = []
+        if name:
+            query += " WHERE name LIKE ?"
+            params.append(f"%{name}%")
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def catalog_tasks(
+        self,
+        *,
+        limit: int = 100,
+        cursor: tuple[str, str] | None = None,
+        updated_since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 200:
+            raise ValueError("Catalog limit must be between 1 and 200")
+        where: list[str] = []
+        params: list[Any] = []
+        if updated_since:
+            where.append("updated_at>=?")
+            params.append(updated_since)
+        if cursor:
+            where.append("(updated_at<? OR (updated_at=? AND task_id<?))")
+            params.extend([cursor[0], cursor[0], cursor[1]])
+        sql = "SELECT * FROM tasks"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC, task_id DESC LIMIT ?"
+        params.append(limit + 1)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def catalog_task_runs(
+        self,
+        *,
+        limit: int = 100,
+        cursor: tuple[str, str] | None = None,
+        status: str | None = None,
+        task_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 200:
+            raise ValueError("Catalog limit must be between 1 and 200")
+        where: list[str] = [
+            "COALESCE(j.review_status, 'not_required') NOT IN ('pending_human','needs_human','delivery_failed','revision_queued')"
+        ]
+        params: list[Any] = []
+        if status:
+            where.append("j.status=?")
+            params.append(status)
+        if task_id:
+            where.append("j.task_id=?")
+            params.append(task_id)
+        if date_from:
+            where.append("j.created_at>=?")
+            params.append(date_from)
+        if date_to:
+            where.append("j.created_at<=?")
+            params.append(date_to)
+        if cursor:
+            where.append("(j.created_at<? OR (j.created_at=? AND j.job_id<?))")
+            params.extend([cursor[0], cursor[0], cursor[1]])
+        sql = (
+            "SELECT j.*, COUNT(a.artifact_id) AS artifact_count, "
+            "GROUP_CONCAT(DISTINCT a.role) AS artifact_roles "
+            "FROM jobs j LEFT JOIN artifacts a ON a.job_id=j.job_id "
+            "AND (a.publication_status IS NULL OR a.publication_status='published')"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " GROUP BY j.job_id ORDER BY j.created_at DESC, j.job_id DESC LIMIT ?"
+        params.append(limit + 1)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def update_task(self, task_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        task = self.get_task(task_id)
+        if not task:
+            raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+        changes["version"] = task["version"] + 1
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE tasks SET {','.join(f'{key}=?' for key in keys)} WHERE task_id=?",
+                [changes[key] for key in keys] + [task_id],
+            )
+
+    def delete_task(self, task_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
+            return cur.rowcount > 0
+
+    def runs_for_task(self, task_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+                (task_id, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def create_project(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {
+            "version": 1,
+            **row,
+            "deleted_at": None,
+            "created_at": row.get("created_at", now),
+            "updated_at": row.get("updated_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO projects ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_project(self, project_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_projects(
+        self, *, name: str | None = None, include_deleted: bool = False, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM projects"
+        params: list[Any] = []
+        where: list[str] = []
+        if not include_deleted:
+            where.append("deleted_at IS NULL")
+        if name:
+            where.append("name LIKE ?")
+            params.append(f"%{name}%")
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def catalog_projects(
+        self,
+        *,
+        limit: int = 100,
+        cursor: tuple[str, str] | None = None,
+        updated_since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 200:
+            raise ValueError("Catalog limit must be between 1 and 200")
+        where: list[str] = ["deleted_at IS NULL"]
+        params: list[Any] = []
+        if updated_since:
+            where.append("updated_at>=?")
+            params.append(updated_since)
+        if cursor:
+            where.append("(updated_at<? OR (updated_at=? AND project_id<?))")
+            params.extend([cursor[0], cursor[0], cursor[1]])
+        sql = "SELECT * FROM projects WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC, project_id DESC LIMIT ?"
+        params.append(limit + 1)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def update_project(self, project_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        existing = self.get_project(project_id)
+        if not existing:
+            raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
+        if existing.get("deleted_at") is not None:
+            raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
+        changes["version"] = existing["version"] + 1
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE projects SET {','.join(f'{key}=?' for key in keys)} WHERE project_id=?",
+                [changes[key] for key in keys] + [project_id],
+            )
+
+    def soft_delete_project(self, project_id: str) -> bool:
+        existing = self.get_project(project_id)
+        if not existing:
+            raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
+        if existing.get("deleted_at") is not None:
+            return False
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE projects SET deleted_at=?, version=version+1, updated_at=? WHERE project_id=?",
+                (utc_now(), utc_now(), project_id),
+            )
+        return True
+
+    def create_project_run(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"status": "accepted", **row, "created_at": row.get("created_at", now), "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO project_runs ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_project_run(self, project_run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM project_runs WHERE project_run_id=?", (project_run_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_project_run(self, project_run_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE project_runs SET {','.join(f'{key}=?' for key in keys)} WHERE project_run_id=?",
+                [changes[key] for key in keys] + [project_run_id],
+            )
+
+    def ensure_project_run_started(self, project_run_id: str, started_at: str) -> bool:
+        """Record the Project Run's first dispatch timestamp.
+
+        Uses ``COALESCE`` so concurrent dispatches only record the earliest
+        timestamp. Returns True when the column was updated.
+        """
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE project_runs SET started_at=COALESCE(started_at, ?), updated_at=? "
+                "WHERE project_run_id=? AND started_at IS NULL",
+                (started_at, utc_now(), project_run_id),
+            )
+            return cursor.rowcount > 0
+
+    def list_project_runs(
+        self, *, project_id: str | None = None, status: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM project_runs"
+        params: list[Any] = []
+        where: list[str] = []
+        if project_id:
+            where.append("project_id=?")
+            params.append(project_id)
+        if status:
+            where.append("status=?")
+            params.append(status)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def catalog_project_runs(
+        self,
+        *,
+        limit: int = 100,
+        cursor: tuple[str, str] | None = None,
+        status: str | None = None,
+        project_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 200:
+            raise ValueError("Catalog limit must be between 1 and 200")
+        where: list[str] = []
+        params: list[Any] = []
+        if status:
+            where.append("pr.status=?")
+            params.append(status)
+        if project_id:
+            where.append("pr.project_id=?")
+            params.append(project_id)
+        if date_from:
+            where.append("pr.created_at>=?")
+            params.append(date_from)
+        if date_to:
+            where.append("pr.created_at<=?")
+            params.append(date_to)
+        if cursor:
+            where.append("(pr.created_at<? OR (pr.created_at=? AND pr.project_run_id<?))")
+            params.extend([cursor[0], cursor[0], cursor[1]])
+        sql = (
+            "SELECT pr.*, p.name AS project_name, "
+            "COUNT(ps.node_id) AS step_count, "
+            "SUM(CASE WHEN ps.status='completed' THEN 1 ELSE 0 END) AS completed_step_count, "
+            "SUM(CASE WHEN ps.status='failed' THEN 1 ELSE 0 END) AS failed_step_count, "
+            "SUM(CASE WHEN ps.status='blocked' THEN 1 ELSE 0 END) AS blocked_step_count, "
+            "(SELECT COUNT(*) FROM review_sessions rs WHERE rs.project_run_id=pr.project_run_id "
+            "AND rs.status IN ('pending_human','needs_human','delivery_failed')) AS pending_review_count, "
+            "(SELECT ps2.node_id FROM project_run_steps ps2 "
+            "WHERE ps2.project_run_id=pr.project_run_id AND ps2.status='failed' "
+            "ORDER BY COALESCE(ps2.completed_at, ps2.updated_at) ASC, ps2.node_id ASC LIMIT 1) AS failed_node_id "
+            "FROM project_runs pr LEFT JOIN projects p ON p.project_id=pr.project_id "
+            "LEFT JOIN project_run_steps ps ON ps.project_run_id=pr.project_run_id"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " GROUP BY pr.project_run_id ORDER BY pr.created_at DESC, pr.project_run_id DESC LIMIT ?"
+        params.append(limit + 1)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    def create_or_update_project_step(self, row: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        values = {"updated_at": now, **row}
+        keys = list(values)
+        placeholders = ",".join("?" for _ in keys)
+        update_clause = ",".join(f"{k}=excluded.{k}" for k in keys if k != "project_run_id" and k != "node_id")
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO project_run_steps ({','.join(keys)}) VALUES ({placeholders}) "
+                f"ON CONFLICT(project_run_id, node_id) DO UPDATE SET {update_clause}",
+                [values[k] for k in keys],
+            )
+        return self.get_project_step(row["project_run_id"], row["node_id"])
+
+    def get_project_step(self, project_run_id: str, node_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM project_run_steps WHERE project_run_id=? AND node_id=?",
+                (project_run_id, node_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_project_steps(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT ps.*, "
+                "(SELECT COUNT(*) FROM project_step_runs x "
+                "WHERE x.project_run_id=ps.project_run_id AND x.node_id=ps.node_id) AS attempt_count "
+                "FROM project_run_steps ps WHERE ps.project_run_id=? ORDER BY ps.node_id",
+                (project_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_project_step(self, project_run_id: str, node_id: str, **changes: Any) -> None:
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE project_run_steps SET {','.join(f'{key}=?' for key in keys)} WHERE project_run_id=? AND node_id=?",
+                [changes[key] for key in keys] + [project_run_id, node_id],
+            )
+
+    def append_project_step_run(
+        self, project_run_id: str, node_id: str, task_run_id: str, worker_override: str | None
+    ) -> int:
+        with self.connect() as conn:
+            existing = conn.execute("SELECT 1 FROM project_step_runs WHERE task_run_id=?", (task_run_id,)).fetchone()
+            if existing:
+                raise RelayError("STEP_RUN_DUPLICATE", f"Task Run already attached: {task_run_id}")
+            attempt_row = conn.execute(
+                "SELECT COALESCE(MAX(step_attempt), 0) + 1 FROM project_step_runs WHERE project_run_id=? AND node_id=?",
+                (project_run_id, node_id),
+            ).fetchone()
+            attempt = int(attempt_row[0])
+            conn.execute(
+                "INSERT INTO project_step_runs (project_run_id, node_id, step_attempt, task_run_id, worker_override, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'queued', ?)",
+                (project_run_id, node_id, attempt, task_run_id, worker_override, utc_now()),
+            )
+            return attempt
+
+    def update_project_step_run(self, task_run_id: str, **changes: Any) -> None:
+        """Mirror the current Task Run state in the Project step-run ledger."""
+        if not changes:
+            return
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE project_step_runs SET {','.join(f'{key}=?' for key in keys)} WHERE task_run_id=?",
+                [changes[key] for key in keys] + [task_run_id],
+            )
+
+    def list_project_step_runs(
+        self, project_run_id: str | None = None, node_id: str | None = None, *, task_run_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM project_step_runs"
+        params: list[Any] = []
+        where: list[str] = []
+        if project_run_id:
+            where.append("project_run_id=?")
+            params.append(project_run_id)
+        if node_id:
+            where.append("node_id=?")
+            params.append(node_id)
+        if task_run_id:
+            where.append("task_run_id=?")
+            params.append(task_run_id)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY project_run_id, node_id, step_attempt"
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def claim_ready_steps(self, project_run_id: str, runnable: str, claimed: str) -> list[tuple[str, str]]:
+        claimed_list: list[tuple[str, str]] = []
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    "SELECT project_run_id, node_id FROM project_run_steps WHERE project_run_id=? AND status=?",
+                    (project_run_id, runnable),
+                ).fetchall()
+                for row in rows:
+                    cur = conn.execute(
+                        "UPDATE project_run_steps SET status=?, updated_at=? "
+                        "WHERE project_run_id=? AND node_id=? AND status=?",
+                        (claimed, utc_now(), row["project_run_id"], row["node_id"], runnable),
+                    )
+                    if cur.rowcount > 0:
+                        claimed_list.append((row["project_run_id"], row["node_id"]))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.rollback()
+                raise
+        return claimed_list
+
+    # --- orchestrator ------------------------------------------------------------
+
+    def append_project_run_event(
+        self,
+        project_run_id: str,
+        *,
+        node_id: str | None,
+        kind: str,
+        actor: str,
+        summary: str,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one narration/decision event; ``seq`` orders the run's event stream."""
+        event_id = new_job_id()
+        now = utc_now()
+        with self.connect() as conn:
+            seq_row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM project_run_events WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            seq = int(seq_row[0])
+            conn.execute(
+                "INSERT INTO project_run_events "
+                "(event_id, project_run_id, node_id, seq, kind, actor, summary, detail_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    project_run_id,
+                    node_id,
+                    seq,
+                    kind,
+                    actor,
+                    summary,
+                    json.dumps(detail) if detail is not None else None,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM project_run_events WHERE event_id=?", (event_id,)).fetchone()
+            return dict(row)
+
+    def list_project_run_events(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM project_run_events WHERE project_run_id=? ORDER BY seq",
+                (project_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_orchestrator_state(self, project_run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM project_run_orchestrator_state WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def upsert_orchestrator_state(self, project_run_id: str, **changes: Any) -> dict[str, Any]:
+        """Insert or merge orchestrator budget/state fields for a Project Run."""
+        now = utc_now()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM project_run_orchestrator_state WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            if existing:
+                if changes:
+                    keys = list(changes)
+                    conn.execute(
+                        f"UPDATE project_run_orchestrator_state SET {','.join(f'{k}=?' for k in keys)}, updated_at=? "
+                        "WHERE project_run_id=?",
+                        [changes[k] for k in keys] + [now, project_run_id],
+                    )
+            else:
+                values = {
+                    "project_run_id": project_run_id,
+                    "llm_calls_used": 0,
+                    "repair_attempts_used": 0,
+                    "state_digest": None,
+                    **changes,
+                    "updated_at": now,
+                }
+                keys = list(values)
+                conn.execute(
+                    f"INSERT INTO project_run_orchestrator_state ({','.join(keys)}) "
+                    f"VALUES ({','.join('?' for _ in keys)})",
+                    [values[k] for k in keys],
+                )
+            row = conn.execute(
+                "SELECT * FROM project_run_orchestrator_state WHERE project_run_id=?",
+                (project_run_id,),
+            ).fetchone()
+            return dict(row)
+
+    def create_routine(self, row):
+        from .util import utc_now
+
+        now = utc_now()
+        values = {
+            "enabled": 1,
+            "deleted_at": None,
+            "missed_grace_seconds": 43200,
+            "overlap_policy": "skip",
+            "missed_policy": "skip",
+            "version_policy": "latest",
+            **row,
+            "created_at": row.get("created_at", now),
+            "updated_at": row.get("updated_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO routines ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_routine(self, routine_id):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM routines WHERE routine_id=?", (routine_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_routines(self, *, include_deleted=False, name=None, limit=200):
+        query = "SELECT * FROM routines"
+        params = []
+        where = []
+        if not include_deleted:
+            where.append("deleted_at IS NULL")
+        if name:
+            where.append("name LIKE ?")
+            params.append(f"%{name}%")
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def update_routine(self, routine_id, **changes):
+        from .util import utc_now
+
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE routines SET {','.join(f'{key}=?' for key in keys)} WHERE routine_id=?",
+                [changes[key] for key in keys] + [routine_id],
+            )
+
+    def soft_delete_routine(self, routine_id):
+        from .util import utc_now
+
+        existing = self.get_routine(routine_id)
+        if not existing:
+            from .errors import RelayError
+
+            raise RelayError("ROUTINE_NOT_FOUND", f"Routine not found: {routine_id}")
+        if existing.get("deleted_at") is not None:
+            return False
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE routines SET deleted_at=?, updated_at=? WHERE routine_id=?",
+                (utc_now(), utc_now(), routine_id),
+            )
+        return True
+
+    def claim_routine_occurrence(self, routine_id, run_row):
+        import sqlite3 as _sq
+
+        from .util import utc_now
+
+        now = utc_now()
+        values = {**run_row, "routine_id": routine_id, "created_at": now, "updated_at": now}
+        keys = list(values)
+        with self.connect() as conn:
+            try:
+                conn.execute(
+                    f"INSERT INTO routine_runs ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                    [values[key] for key in keys],
+                )
+            except _sq.IntegrityError:
+                return False
+        return True
+
+    def get_routine_run(self, run_id):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM routine_runs WHERE run_id=?", (run_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_routine_run(self, run_id, **changes):
+        from .util import utc_now
+
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE routine_runs SET {','.join(f'{key}=?' for key in keys)} WHERE run_id=?",
+                [changes[key] for key in keys] + [run_id],
+            )
+
+    def list_routine_runs(self, *, routine_id=None, status=None, limit=100):
+        query = "SELECT * FROM routine_runs"
+        params = []
+        where = []
+        if routine_id:
+            where.append("routine_id=?")
+            params.append(routine_id)
+        if status:
+            where.append("status=?")
+            params.append(status)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def active_runs_for_routine(self, routine_id):
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM routine_runs WHERE routine_id=? AND status NOT IN ('completed', 'failed', 'cancelled', 'skipped')",
+                (routine_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def create_approval(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {
+            "status": "pending",
+            "reviewer": None,
+            "reason": None,
+            "edited_artifact_uid": None,
+            "decided_at": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO approvals ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_or_create_pending_approval(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Atomically return the pending approval for a Project step, creating it once."""
+        now = utc_now()
+        values = {
+            "status": "pending",
+            "reviewer": None,
+            "reason": None,
+            "edited_artifact_uid": None,
+            "decided_at": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM approvals WHERE project_run_id=? AND node_id=? AND status='pending' "
+                    "ORDER BY created_at LIMIT 1",
+                    (values["project_run_id"], values["node_id"]),
+                ).fetchone()
+                if existing:
+                    conn.execute("COMMIT")
+                    return dict(existing)
+                keys = list(values)
+                conn.execute(
+                    f"INSERT INTO approvals ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                    [values[key] for key in keys],
+                )
+                created = conn.execute("SELECT * FROM approvals WHERE token=?", (values["token"],)).fetchone()
+                conn.execute("COMMIT")
+                return dict(created)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def get_approval(self, token: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM approvals WHERE token=?", (token,)).fetchone()
+            return dict(row) if row else None
+
+    def list_approvals(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM approvals WHERE project_run_id=? ORDER BY created_at",
+                (project_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_approval(self, token: str, **changes: Any) -> None:
+        if not changes:
+            return
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE approvals SET {','.join(f'{key}=?' for key in keys)} WHERE token=?",
+                [changes[key] for key in keys] + [token],
+            )
+
+    def create_delivery(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {
+            "kind": "folder",
+            "status": "completed",
+            "error": None,
+            "approval_id": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO deliveries ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def list_deliveries(self, project_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM deliveries WHERE project_run_id=? ORDER BY created_at",
+                (project_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def create_notification_event(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {
+            "status": "delivered",
+            "status_code": None,
+            "attempt": 1,
+            "error": None,
+            "payload_hash": None,
+            "routine_id": None,
+            "project_run_id": None,
+            **row,
+            "created_at": row.get("created_at", now),
+        }
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO notification_events ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def list_notification_events(
+        self, *, routine_id: str | None = None, project_run_id: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM notification_events"
+        params: list[Any] = []
+        where: list[str] = []
+        if routine_id:
+            where.append("routine_id=?")
+            params.append(routine_id)
+        if project_run_id:
+            where.append("project_run_id=?")
+            params.append(project_run_id)
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]

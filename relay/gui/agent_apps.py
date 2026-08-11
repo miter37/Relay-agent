@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -19,6 +20,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .design_tokens import SPACING
+from .design_typography import apply_type
+from .design_widgets import IconButton, LabeledButton
 
 
 class AgentAppWizard(QDialog):
@@ -103,10 +108,18 @@ class AgentAppWizard(QDialog):
             "Saving a changed runtime definition disables the Agent until the tested definition is enabled again."
         )
         self.change_warning.setWordWrap(True)
+        self.change_warning.setObjectName("mutedText")
+        apply_type(self.change_warning, "caption")
         root.addWidget(self.change_warning)
-        root.addWidget(QLabel("Deep test"))
+        deep_test_title = QLabel("Deep test")
+        deep_test_title.setObjectName("sectionTitle")
+        apply_type(deep_test_title, "title.section")
+        deep_test_title.setContentsMargins(0, SPACING["md"], 0, 0)
+        root.addWidget(deep_test_title)
         self.test_result = QLabel("Run the test before saving this Agent App.")
         self.test_result.setWordWrap(True)
+        self.test_result.setObjectName("mutedText")
+        apply_type(self.test_result, "caption")
         root.addWidget(self.test_result)
 
         actions = QHBoxLayout()
@@ -114,13 +127,19 @@ class AgentAppWizard(QDialog):
         self.test_button.clicked.connect(self._request_test)
         actions.addWidget(self.test_button)
         actions.addStretch(1)
-        cancel = QPushButton("Cancel")
+        self.cancel_button = cancel = QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        actions.addWidget(cancel)
         self.save_button = QPushButton("Save agent")
+        self.save_button.setObjectName("primaryAction")
+        apply_type(self.save_button, "body.strong")
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self._request_save)
-        actions.addWidget(self.save_button)
+        # QDialogButtonBox orders accept/reject per platform convention, matching the
+        # dialogs that build their footer from it directly.
+        footer = QDialogButtonBox()
+        footer.addButton(self.save_button, QDialogButtonBox.AcceptRole)
+        footer.addButton(cancel, QDialogButtonBox.RejectRole)
+        actions.addWidget(footer)
         root.addLayout(actions)
         self._connect_changes()
 
@@ -266,7 +285,7 @@ class AgentAppListView(QWidget):
         root = QVBoxLayout(self)
         header = QHBoxLayout()
         header.addWidget(QLabel("<b>Agent Apps</b>"), 1)
-        self.add_button = QPushButton("+ Add agent app")
+        self.add_button = LabeledButton("plus", "Add agent app", tone="primary")
         self.add_button.clicked.connect(self.create_requested)
         header.addWidget(self.add_button)
         root.addLayout(header)
@@ -274,16 +293,16 @@ class AgentAppListView(QWidget):
         self.agent_list.itemClicked.connect(self._select)
         root.addWidget(self.agent_list, 1)
         actions = QHBoxLayout()
-        self.edit_button = QPushButton("Edit")
+        self.edit_button = IconButton("pencil", "Edit this Agent App")
         self.edit_button.clicked.connect(self._edit)
         actions.addWidget(self.edit_button)
-        self.test_button = QPushButton("Test")
+        self.test_button = IconButton("beaker", "Run a capability test")
         self.test_button.clicked.connect(self._test)
         actions.addWidget(self.test_button)
-        self.toggle_button = QPushButton("Enable")
+        self.toggle_button = IconButton("power", "Enable this Agent App")
         self.toggle_button.clicked.connect(self._toggle)
         actions.addWidget(self.toggle_button)
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = IconButton("trash", "Delete this Agent App", tone="danger")
         self.delete_button.clicked.connect(self._delete)
         actions.addWidget(self.delete_button)
         root.addLayout(actions)
@@ -318,7 +337,8 @@ class AgentAppListView(QWidget):
         for button in (self.edit_button, self.test_button, self.toggle_button, self.delete_button):
             button.setEnabled(enabled)
         if enabled and self._selected:
-            self.toggle_button.setText("Disable" if self._selected.get("enabled") else "Enable")
+            is_enabled = bool(self._selected.get("enabled"))
+            self.toggle_button.set_tooltip("Disable this Agent App" if is_enabled else "Enable this Agent App")
 
     def _edit(self) -> None:
         if self._selected:

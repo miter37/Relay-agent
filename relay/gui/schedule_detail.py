@@ -7,12 +7,15 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QTabWidget,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
+
+from .design_html import kv_row
+from .design_typography import apply_type
+from .design_widgets import IconButton, LabeledButton
 
 
 class ScheduleDetailView(QWidget):
@@ -31,31 +34,34 @@ class ScheduleDetailView(QWidget):
         root = QVBoxLayout(self)
         header = QHBoxLayout()
         self.title_label = QLabel("Schedule")
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label.setObjectName("detailTitle")
+        apply_type(self.title_label, "title.detail")
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel()
         header.addWidget(self.status_label)
-        self.run_now_button = QPushButton("Run now")
-        self.run_now_button.clicked.connect(self._run_now)
-        header.addWidget(self.run_now_button)
-        self.pause_button = QPushButton("Pause")
+        self.pause_button = IconButton("pause", "Pause this Schedule")
         self.pause_button.clicked.connect(self._pause)
         header.addWidget(self.pause_button)
-        self.resume_button = QPushButton("Resume")
+        self.resume_button = IconButton("play", "Resume this Schedule")
         self.resume_button.clicked.connect(self._resume)
         header.addWidget(self.resume_button)
-        self.edit_button = QPushButton("Edit")
+        self.edit_button = IconButton("pencil", "Edit this Schedule")
         self.edit_button.clicked.connect(self._edit)
         header.addWidget(self.edit_button)
-        self.copy_button = QPushButton("Copy")
+        self.copy_button = IconButton("copy", "Duplicate this Schedule")
         self.copy_button.clicked.connect(self._copy)
         header.addWidget(self.copy_button)
-        self.delete_button = QPushButton("Delete")
+        self.delete_button = IconButton("trash", "Delete this Schedule", tone="danger")
         self.delete_button.clicked.connect(self._delete)
         header.addWidget(self.delete_button)
-        self.open_output_button = QPushButton("Open output")
+        self.open_output_button = IconButton("folder-open", "Open the last output folder")
         self.open_output_button.clicked.connect(self._open_output)
         header.addWidget(self.open_output_button)
+        # Same primary-action promotion as the other detail screens; placed
+        # last so it still reads as the one action that outweighs the rest.
+        self.run_now_button = LabeledButton("play", "Run now", tone="primary")
+        self.run_now_button.clicked.connect(self._run_now)
+        header.addWidget(self.run_now_button)
         root.addLayout(header)
 
         self.tabs = QTabWidget()
@@ -83,18 +89,11 @@ class ScheduleDetailView(QWidget):
             ("Next run", schedule.get("next_run_at_utc")),
             ("Last run", schedule.get("last_run")),
             ("Time zone", schedule.get("timezone")),
-            ("Source job", schedule.get("source_job_id")),
+            ("Source Task Run", schedule.get("source_job_id")),
             ("Output folder", schedule.get("output_root")),
             ("Attention", schedule.get("attention_code")),
         )
-        self.overview.setHtml(
-            "<table>{}</table>".format(
-                "".join(
-                    f"<tr><td><b>{escape(str(key))}</b></td><td>{escape(str(value or '—'))}</td></tr>"
-                    for key, value in fields
-                )
-            )
-        )
+        self.overview.setHtml(f"<table>{''.join(kv_row(key, value or '—') for key, value in fields)}</table>")
         self.task_settings.setHtml(self._format(schedule.get("task_settings") or schedule.get("rule") or {}))
         self.run_history.setHtml(self._format(runs))
 

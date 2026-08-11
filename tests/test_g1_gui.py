@@ -45,18 +45,13 @@ class G1GuiTests(unittest.TestCase):
         self.assertEqual(self.window.windowTitle(), "Relay-agent")
         self.assertEqual(self.window.sidebar.minimumWidth(), 0)
         self.assertIn("Relay Home:", self.window.statusBar().currentMessage())
-        self.assertFalse(hasattr(self.window, "health_timer"))
+        self.assertTrue(self.window.health_timer.isActive())
         self.assertIn("Health:", self.window.health_label.text())
+        self.assertEqual(self.window.register_task_button.accessibleName(), "Register a new Task")
 
-    def test_new_task_keeps_working_folder_separate_from_files_folder(self):
-        view = self.window.new_task_view
-        view.target_edit.setText(r"D:\project")
-        view.artifact_edit.setText(r"D:\relay-copies")
-
-        payload = view.payload()
-
-        self.assertEqual(payload["target_path"], r"D:\project")
-        self.assertEqual(payload["artifact_path"], r"D:\relay-copies")
+    def test_runs_is_a_master_detail_view(self):
+        self.assertIs(self.window.runs_view.detail, self.window.job_detail_view)
+        self.assertIs(self.window.detail_stack.currentWidget(), self.window.runs_view)
 
     def test_health_status_is_visible_and_uses_manual_refresh(self):
         self.window._set_connection(
@@ -93,11 +88,11 @@ class G1GuiTests(unittest.TestCase):
             "failed": {"job_id": "failed", "status": "FAILED", "title": "Failed", "submitted_via": "gui"},
         }
         self.window._render_jobs()
-        self.assertEqual(self.window.job_list.topLevelItemCount(), 1)
-        self.window.result_filter.setCurrentText("Failed")
+        self.assertEqual(self.window.runs_view.run_list.topLevelItemCount(), 1)
+        self.window.runs_view.result_filter.setCurrentText("Failed")
         self.window._render_jobs()
-        self.assertEqual(self.window.job_list.topLevelItemCount(), 1)
-        failed_group = self.window.job_list.topLevelItem(0)
+        self.assertEqual(self.window.runs_view.run_list.topLevelItemCount(), 1)
+        failed_group = self.window.runs_view.run_list.topLevelItem(0)
         failed_date = failed_group.child(0)
         failed_task = failed_date.child(0)
         self.assertEqual(failed_task.text(0), "Failed")
@@ -129,19 +124,19 @@ class G1GuiTests(unittest.TestCase):
 
         self.assertIsNone(self.window.current_detail)
 
-    def test_new_task_ignores_stale_detail_response(self):
-        self.window.selected_job_id = "job-1"
-        self.window.detail_view_mode = "job"
-        self.window._show_new_task()
-        self.window.pending[1] = ("detail", "job-1")
-
-        self.window._handle_response(1, {"job_id": "job-1", "status": "COMPLETED"}, None)
-
-        self.assertIs(self.window.detail_stack.currentWidget(), self.window.new_task_view)
+    def test_section_navigation_preserves_run_selection(self):
+        self.window.current_mode = "normal"
+        self.window.jobs = {"job-1": {"job_id": "job-1", "status": "RUNNING", "title": "Weather"}}
+        self.window._select_run("job-1")
+        self.window._show_tasks()
+        self.assertEqual(self.window.selected_job_id, "job-1")
+        self.window._show_runs()
+        self.assertEqual(self.window.selected_job_id, "job-1")
+        self.assertIs(self.window.detail_stack.currentWidget(), self.window.runs_view)
 
     def test_settings_ignores_stale_detail_response(self):
         self.window.selected_job_id = "job-1"
-        self.window.detail_view_mode = "job"
+        self.window.active_section = "runs"
         self.window._show_settings()
         self.window.pending[1] = ("detail", "job-1")
 
@@ -195,15 +190,15 @@ class G1GuiTests(unittest.TestCase):
             }
         }
         self.window._render_jobs()
-        group = self.window.job_list.topLevelItem(0)
+        group = self.window.runs_view.run_list.topLevelItem(0)
         date = group.child(0)
         group.setExpanded(False)
         date.setExpanded(False)
 
         self.window._render_jobs()
 
-        self.assertFalse(self.window.job_list.topLevelItem(0).isExpanded())
-        self.assertFalse(self.window.job_list.topLevelItem(0).child(0).isExpanded())
+        self.assertFalse(self.window.runs_view.run_list.topLevelItem(0).isExpanded())
+        self.assertFalse(self.window.runs_view.run_list.topLevelItem(0).child(0).isExpanded())
 
     def test_finished_tree_keeps_user_expansion_after_refresh(self):
         self.window.jobs = {
@@ -215,7 +210,7 @@ class G1GuiTests(unittest.TestCase):
             }
         }
         self.window._render_jobs()
-        group = self.window.job_list.topLevelItem(0)
+        group = self.window.runs_view.run_list.topLevelItem(0)
         date = group.child(0)
         group.setExpanded(False)
         date.setExpanded(False)
@@ -224,12 +219,12 @@ class G1GuiTests(unittest.TestCase):
 
         self.window._render_jobs()
 
-        self.assertTrue(self.window.job_list.topLevelItem(0).isExpanded())
-        self.assertTrue(self.window.job_list.topLevelItem(0).child(0).isExpanded())
+        self.assertTrue(self.window.runs_view.run_list.topLevelItem(0).isExpanded())
+        self.assertTrue(self.window.runs_view.run_list.topLevelItem(0).child(0).isExpanded())
 
     def test_result_response_populates_answer_and_raw_result_tabs(self):
         self.window.selected_job_id = "job-1"
-        self.window.detail_view_mode = "job"
+        self.window.active_section = "runs"
         self.window.pending[1] = ("result", "job-1")
         payload = {
             "job_id": "job-1",
@@ -245,7 +240,7 @@ class G1GuiTests(unittest.TestCase):
     def test_progress_check_opens_logs_and_renders_persisted_check_events(self):
         self.window.current_mode = "normal"
         self.window.selected_job_id = "job-1"
-        self.window.detail_view_mode = "job"
+        self.window.active_section = "runs"
         self.window.current_detail = {"job_id": "job-1", "status": "RUNNING"}
         self.window.job_detail_view.set_job(
             {
@@ -346,7 +341,7 @@ class G1GuiTests(unittest.TestCase):
 
             self.assertEqual(self.window.current_mode, "normal")
             self.assertIn(job["job_id"], self.window.jobs)
-            self.assertTrue(self.window.new_task_button.isEnabled())
+            self.assertTrue(self.window.register_task_button.isEnabled())
         finally:
             if thread.is_alive():
                 client.request("POST", "/shutdown")

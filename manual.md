@@ -3,7 +3,7 @@
 이 문서는 Hermes AI 등 **자동화된 에이전트(Agent)**들이 **Relay CLI**를 사용하여 다른 AI CLI(Claude Code, Codex CLI, Antigravity CLI)에게 일회성 작업을 위임하고 그 결과를 회수하기 위한 공식 사용 매뉴얼입니다.
 
 ## 1. 개요 및 목적
-Relay는 에이전트가 긴 작업이나 반복적인 서브 태스크를 다른 AI에게 위임할 때 사용하는 "로컬 작업 브로커"입니다. 
+Relay는 에이전트가 긴 작업이나 반복적인 서브 태스크를 다른 AI에게 위임할 때 사용하는 "로컬 업무 브로커"입니다.
 에이전트가 직접 터미널에 `claude`나 `codex` 명령어를 치면서 실시간 상호작용(프롬프트 입력, 승인 등)을 하는 것은 비효율적이고 오류가 발생하기 쉽습니다. 
 
 Relay를 사용하면 다음이 보장됩니다.
@@ -37,7 +37,7 @@ relay submit `
   --format json `
   --out "C:\AgentWork\result-1001.json" `
   --artifacts "C:\AgentWork\artifacts-1001" `
-  --request-id "job-1001" `
+  --request-id "task-run-1001" `
   --caller hermes `
   --machine
 ```
@@ -45,31 +45,61 @@ relay submit `
 ```json
 {
   "ok": true,
-  "job_id": "01KY4K...",
+  "task_run_id": "01KY4K...",
   "status": "queued"
 }
 ```
-**주의:** 여기서 반환된 `job_id`를 메모리에 저장해 두어야 합니다.
+**주의:** 여기서 반환된 Task Run ID를 메모리에 저장해 두어야 합니다. 호환 응답에 legacy identifier가 함께 있어도 canonical `task_run_id`를 사용합니다.
 
 ### Step 2.3: 상태 확인 및 대기 (Status / Wait)
 작업이 끝났는지 주기적으로 확인하려면 `status`를, 일정 시간 동안 기다리려면 `wait`를 사용합니다.
 
 ```powershell
 # 상태만 즉시 확인
-relay status <JOB_ID> --machine
+relay status <TASK_RUN_ID> --machine
 
 # 최대 30분(1800초)까지 완료될 때까지 블로킹하며 대기
-relay wait <JOB_ID> --timeout 1800 --machine
+relay wait <TASK_RUN_ID> --timeout 1800 --machine
 ```
 
 ### Step 2.4: 최종 결과 회수 (Result)
 상태가 `completed` 또는 `partial`로 바뀌었다면, 결과를 회수합니다.
 
 ```powershell
-relay result <JOB_ID> --machine
+relay result <TASK_RUN_ID> --machine
 ```
 * 반환된 JSON에서 `result_path` 위치를 읽어 실제 데이터(`C:\AgentWork\result-1001.json`)를 파싱하여 사용자에게 답변을 구성합니다.
 * 자동화 환경에서는 영수증의 `ok`와 `status`를 함께 확인하세요. `failed` 또는 `cancelled` 결과는 Relay CLI도 비정상 종료 코드(2)를 반환합니다.
+
+### Step 2.5: 기존 Task와 결과물 탐색
+
+새 작업을 제출하기 전에 Agent는 Catalog를 읽어 등록 Task와 과거 Task Run 후보를 확인해야 합니다.
+
+```powershell
+relay catalog tasks --machine
+relay task show <TASK_ID> --machine
+relay catalog task-runs --status completed --machine
+relay result <TASK_RUN_ID> --machine
+relay artifact show <ARTIFACT_UID> --machine
+relay artifact lineage <ARTIFACT_UID> --machine
+relay catalog projects --machine
+relay project show <PROJECT_ID> --machine
+relay catalog project-runs --status completed --machine
+relay project-run show <PROJECT_RUN_ID> --machine
+```
+
+`task_summary`, `result_summary`, `failure_reason`을 먼저 비교하고, 유망 후보의 전체 Task 정의와 영수증만 추가로 읽습니다. Relay가 후보를 추천하거나 순위를 매긴다고 가정하지 않습니다. 적합한 Task가 없으면 기존 Task를 억지로 실행하지 말고 새 Task 생성을 제안합니다.
+
+기존 결과물을 새 Task Run의 입력으로 재사용할 때는 파일 경로를 직접 전달하지 않고 Artifact UID와 alias를 사용합니다.
+
+```powershell
+relay run "이전 보고서를 최신 자료로 갱신" --input-artifact <ARTIFACT_UID>=A1 --machine
+relay run-lineage <TASK_RUN_ID> --machine
+```
+
+새 Task Run 완료 후 Lineage에서 원본 Artifact UID와 `binding_mode=snapshot` 연결을 확인합니다. 기존 `relay search --kind runs|artifacts`는 명시적인 전문 검색이 필요할 때 사용할 수 있지만 Catalog의 대체 기능은 아닙니다.
+
+Machine 응답에서는 Catalog 목록의 `items`, Artifact 본문의 `text`, Catalog status의 lowercase 표기를 canonical field로 사용합니다. 기존 `projects`와 `project_runs`는 호환 alias입니다.
 
 ---
 

@@ -54,7 +54,8 @@ result.parent.mkdir(parents=True, exist_ok=True)
 artifact_dir = Path(os.environ.get("RELAY_ARTIFACT_DIR", str(cwd / "artifacts")))
 artifact_dir.mkdir(parents=True, exist_ok=True)
 (artifact_dir / "probe-artifact.txt").write_text("RELAY_ARTIFACT_OK", encoding="utf-8")
-(artifact_dir / "research-notes.txt").write_text("Mock research notes", encoding="utf-8")
+if os.environ.get("RELAY_MOCK_SINGLE_ARTIFACT") != "1":
+    (artifact_dir / "research-notes.txt").write_text("Mock research notes", encoding="utf-8")
 target_dir_value = os.environ.get("RELAY_TARGET_DIR")
 if behavior in {"target-create", "target-invalid"} and target_dir_value:
     target_dir = Path(target_dir_value)
@@ -77,10 +78,14 @@ value = {
     ],
     "uncertainties": ["Mock uncertainty"] if status == "partial" else [],
     "missing_items": [],
-    "artifacts": [
-        {"name": "probe-artifact.txt", "relative_path": "probe-artifact.txt", "description": "probe"},
-        {"name": "research-notes.txt", "relative_path": "research-notes.txt", "description": "notes"},
-    ],
+    "artifacts": (
+        [{"name": "probe-artifact.txt", "relative_path": "probe-artifact.txt", "description": "probe"}]
+        if os.environ.get("RELAY_MOCK_SINGLE_ARTIFACT") == "1"
+        else [
+            {"name": "probe-artifact.txt", "relative_path": "probe-artifact.txt", "description": "probe"},
+            {"name": "research-notes.txt", "relative_path": "research-notes.txt", "description": "notes"},
+        ]
+    ),
 }
 fmt = os.environ.get("RELAY_RESULT_FORMAT", "json")
 if behavior == "target-invalid" and fmt == "json":

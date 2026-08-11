@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,44 @@ from ..errors import RelayError
 from ..model_catalog import DiscoveredModel, ModelCatalog
 from ..model_discovery import list_codex_models
 from .base import Adapter, AdapterContext
+
+
+def strictify_output_schema(node: Any) -> None:
+    """Rewrite a JSON Schema in place for OpenAI structured-output strict mode.
+
+    Strict mode requires every object's ``required`` to list every key in its
+    ``properties`` -- at *every* nesting level, not just the root. Handing it a
+    schema that violates this at any depth fails the request outright with
+    ``invalid_json_schema`` and Codex exits non-zero, which Relay then reports as
+    PROCESS_CRASHED (see ``artifacts.items.role``).
+
+    A property the source schema left out of ``required`` is genuinely optional,
+    so it is made nullable before being added: null is how strict mode spells "no
+    value". Forcing an optional field into ``required`` as-is would instead make
+    Codex invent a value -- an artifact ``role`` nobody asked for -- and Project
+    connections resolve inputs by exact ``(node, role)`` match, so an invented
+    role silently breaks bindings that expect the default.
+    """
+    if not isinstance(node, dict):
+        return
+    if node.get("type") == "object":
+        properties = node.get("properties") or {}
+        required = list(node.get("required") or [])
+        for key, prop in properties.items():
+            if key in required or not isinstance(prop, dict):
+                continue
+            prop_type = prop.get("type")
+            if isinstance(prop_type, str) and prop_type != "null":
+                prop["type"] = [prop_type, "null"]
+        node["required"] = [*required, *(key for key in properties if key not in required)]
+    for prop in (node.get("properties") or {}).values():
+        strictify_output_schema(prop)
+    items = node.get("items")
+    if isinstance(items, list):
+        for item in items:
+            strictify_output_schema(item)
+    elif items is not None:
+        strictify_output_schema(items)
 
 
 class CodexAdapter(Adapter):
@@ -111,6 +150,10 @@ class CodexAdapter(Adapter):
         if model:
             args.extend(["--model", str(model)])
         if ctx.result_format == "json":
+            if ctx.schema_file.exists():
+                schema = json.loads(ctx.schema_file.read_text(encoding="utf-8"))
+                strictify_output_schema(schema)
+                ctx.schema_file.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
             args.extend(["--output-schema", str(ctx.schema_file)])
         args.append("-")
         prompt = (
@@ -129,6 +172,8 @@ class CodexAdapter(Adapter):
             "RELAY_ARTIFACT_DIR": str(ctx.artifact_dir),
             "RELAY_RESULT_FORMAT": ctx.result_format,
         }
+        if os.environ.get("RELAY_MISSION_E2E") == "1":
+            env["RELAY_MOCK_SINGLE_ARTIFACT"] = "1"
         return args, prompt, env
 
     def normalize_output(self, ctx: AdapterContext, stdout_path: Path, stderr_path: Path) -> None:

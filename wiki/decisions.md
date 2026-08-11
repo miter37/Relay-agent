@@ -2,20 +2,43 @@
 
 ## Active
 
-- **Relay 1.1.0 represents G5 Custom Agent Apps.** One Agent registry serves CLI, GUI, Jobs, and Schedules.
+- **Public execution terminology is Project/Task/Task Run/Project Run/Attempt.** `Job` and standalone `Run` are not new user-facing concepts; legacy `jobs` storage, `job_id`, `/v1/jobs`, and old CLI/search aliases remain only for compatibility.
+- **Task registration and execution are separate.** Registering a reusable Task creates no Task Run; a Run is created only by explicitly executing a previously registered Task and may supply different inputs each time.
+- **GUI Task inputs use a flat definition builder.** People define named text, number, Yes/No, or choice fields as single values or lists; Relay compiles the definition to JSON Schema internally, while advanced CLI/Agent schemas remain preserved but GUI-read-only.
+- **Task Run inputs are a first-class immutable execution record.** Validated resolved values are saved in the Run request and Task snapshot, carried into receipts, and shown separately from artifact lineage in Run detail.
+- **GUI execution begins from registered Tasks only.** The GUI exposes no ad-hoc `/v1/jobs` creation path; Task Runs are browsed in a master-detail Runs screen, and section navigation preserves each section's selection.
+- **Task Run actions are state-gated and execution-focused.** Stop and progress checks are shown only while a Run is active; terminal Runs may be repeated from their immutable snapshot after confirmation. Copying or promoting a historical Run to a Task is not part of the GUI model.
+- **Profiles are reusable execution-policy objects.** They define how work is performed, not the Task's business objective, Worker, or permissions. Six built-ins are read-only; custom Profiles are editable and every Run snapshots the resolved rules.
+- **Phases 0–6 are CLI/daemon-core first.** Task, Project, and Routine GUI surfaces are implemented; approval, comparison, operations, and lifecycle GUI surfaces remain deferred.
+- **Compatibility is additive.** Existing Task Run IDs, Schedules, Project/Task Runs, outputs, and Relay Home databases are preserved; legacy Job IDs remain aliases and schema v17 migrates forward with backups. Catalog fields and routes are additive.
+- **Artifact handoff is immutable and executable.** Project edges and explicit inputs resolve Artifact UIDs into verified snapshots and lineage before child execution.
+- **Projects and Routines are daemon-owned persistent state machines.** Claims are short atomic DB operations; Worker execution never holds a DB transaction.
+- **Internal orchestration is a service caller.** Project/Routine child Runs must satisfy service-isolation acknowledgement and never masquerade as human submissions.
+- **Human edits are first-class Artifacts.** They record `producer=human`, preserve draft lineage, and override the original role for downstream checkpoint consumers.
+- **Operational delivery is best-effort and observable.** Webhooks are allowlisted, signed when configured, retried, and logged per attempt.
+- **Lifecycle archives are deterministic and integrity checked.** Entry hashes are verified before import and notification secrets are excluded.
+
+- **Relay 1.1.0 represents G5 Custom Agent Apps.** One Agent registry serves CLI, GUI, Task Runs, and Schedules.
 - **Custom Agent execution is shell-free.** Manifests provide argv tokens; shell operators and command substitution are rejected.
 - **Enablement is audit-bound.** Executable version and runtime definition hash must match a successful deep audit.
 - **GUI pre-save testing is non-persistent.** A tested definition receives a short-lived one-use token instead of creating a cancellable ghost Agent.
 - **Custom Agent environments are allowlisted.** Operational variables and manifest-declared names are inherited; secret values are never stored in manifests.
-- **Schedules produce ordinary Jobs.** Schedule lifecycle data remains separate while history and outputs survive Schedule deletion.
-- **Schedule eligibility is separate from schedule permission.** A successful replayable Job may open the Schedule editor; saving still requires service-isolation acknowledgement.
-- **GUI health is user-triggered.** Health is checked at startup and by an explicit refresh action, not on a continuous timer.
+- **Schedules produce ordinary Task Runs.** Schedule lifecycle data remains separate while history and outputs survive Schedule deletion.
+- **Schedule eligibility is separate from schedule permission.** A successful replayable Task Run may open the Schedule editor; saving still requires service-isolation acknowledgement.
+- **GUI health is low-frequency.** Health is checked at startup, every 600 seconds, and by an explicit refresh action.
 - **Finished history is hierarchical.** The GUI uses a collapsible Finished/date/task tree; task names and result states are separate columns.
-- **Task-entry safety defaults are explicit.** GUI-created Jobs default fallback, force-new, and overwrite to enabled, with inline help explaining the consequences.
+- **Task-entry safety defaults are explicit.** GUI-created Task Runs default fallback, force-new, and overwrite to enabled, with inline help explaining the consequences.
 - **Unified Full Access Mode:** Workers support a unified `full_access_mode` flag which toggles their respective security bypasses (e.g., YOLO, skip permissions). GUI and CLI read the same daemon/config state; a running daemon is updated through `/v1/security/full-access/{worker}`. When disabled, sandbox/permission errors return specific guidance advising the user about this setting.
-- **Windows worker consoles stay hidden:** GUI, daemon health probes, model discovery, and job workers launch child processes with `CREATE_NO_WINDOW`; job output remains in Relay logs and files.
-- **Working folders and artifacts are distinct.** Interactive Jobs apply a verified isolated delta to `target_path` and copy changed/created files to `artifact_path`; result files retain their existing meaning.
+- **Windows worker consoles stay hidden:** GUI, daemon health probes, model discovery, and Task Run workers launch child processes with `CREATE_NO_WINDOW`; Task Run output remains in Relay logs and files.
+- **Working folders and artifacts are distinct.** Interactive Task Runs apply a verified isolated delta to `target_path` and copy changed/created files to `artifact_path`; result files retain their existing meaning.
 - **Progress checks are observational and manual.** They never message or signal the Agent; structured results are events shown in the Logs tab without modifying Agent stdout/stderr.
+- **Agent discovery is Catalog-first.** Relay exposes bounded Task/Task Run metadata but does not rank or recommend candidates; Agents compare selected details and reuse prior output only through immutable Artifact UIDs, then verify Lineage.
+- **Project discovery uses the same Catalog boundary.** Project and Project Run lists expose bounded summaries, counts, statuses, and stable detail paths; full DAGs and snapshots require explicit detail reads.
+- **The Project Orchestrator's authority is a strict subset of what a human already does through the CLI/GUI, scoped to one Project Run.** It may retry, swap to an available worker, append a run-scoped instruction addendum, or rebind a connection/output role to a role a node actually produced; it can never change a Task's output schema, add/remove nodes, or change which node delivers a final output. The registered Project and Task definitions are never mutated by it — a recurring repair becomes a promotion proposal for the user to apply, not a silent edit. This makes the deliverable contract structural rather than a matter of trust: result validation always runs against the original Task schema, and role rebinds are enforced by the same exactly-one-Artifact-match logic a human's own correction would hit.
+- **A deterministic Tier 0 resolves what it can before any LLM call, so a clean Run costs zero Orchestrator calls and most repairs (retry, single-candidate role/worker swap) never reach the agent.** Tier 1 (one LLM call, dispatched as an ordinary Task Run with `submitted_via="orchestrator"`) is reached only when Tier 0 returns unresolved, and only while a per-run/per-node/LLM-call budget remains; a repeated `(node, strategy)` pair is refused. Any Orchestrator failure at any tier falls back to today's deterministic behavior — a Project Run's terminal-state guarantee never depends on the Orchestrator succeeding.
+- **Absent or disabled Orchestrator configuration means byte-identical behavior to a Project with no Orchestrator at all** — no snapshot field, no `project_run_events` rows, no extra queries beyond the config check. This was verified directly (`tests/test_orchestrator_e2e.py`), not assumed.
+- **Result review is an optional publication gate, not a second execution status.** Task/Project execution can reach successful output generation while `workflow_status=needs_review`; candidate files, Working-folder deltas, and Artifact search/reuse remain unpublished until confirmation. Human feedback starts a new review round; human reruns are unlimited, automatic Project reruns default to two and then hand off to a human.
+- **Project Orchestrator review reuses the Project's existing Orchestrator configuration.** Its review prompt treats result evidence as untrusted data, accepts only approve/rerun/human-review decisions, uses a separate bounded review-call budget, and fails closed to human review on missing evidence, malformed output, errors, or exhausted reruns.
 
 ## Superseded
 

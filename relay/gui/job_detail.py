@@ -11,15 +11,19 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QTabWidget,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
 
+from .design_html import kv_row
+from .design_tokens import COLORS, status_presentation
+from .design_typography import apply_type
+from .design_widgets import IconButton, StatusBadge
 
-class JobDetailView(QWidget):
+
+class TaskRunDetailView(QWidget):
     cancel_requested = Signal(str)
     check_requested = Signal(str)
     rerun_requested = Signal(str)
@@ -29,34 +33,32 @@ class JobDetailView(QWidget):
     open_log_requested = Signal(str)
     log_options_changed = Signal()
 
-    TAB_NAMES = ("Overview", "Task", "Progress", "Answer", "Result", "Files", "Logs", "Events")
+    TAB_NAMES = ("Overview", "Task", "Inputs", "Progress", "Answer", "Result", "Files", "Logs", "Events")
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.job_id: str | None = None
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
-        self.title_label = QLabel("Job")
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.title_label = QLabel("Task Run")
+        self.title_label.setObjectName("pageTitle")
+        apply_type(self.title_label, "title.detail")
         header.addWidget(self.title_label, 1)
-        self.status_label = QLabel()
+        self.status_label = StatusBadge()
         header.addWidget(self.status_label)
-        self.cancel_button = QPushButton("Stop task")
+        self.cancel_button = IconButton("stop", "Stop this Task Run", tone="danger")
         self.cancel_button.clicked.connect(self._cancel)
         header.addWidget(self.cancel_button)
-        self.check_button = QPushButton("Check progress")
+        self.check_button = IconButton("activity", "Check progress now")
         self.check_button.clicked.connect(self._check)
         header.addWidget(self.check_button)
-        self.rerun_button = QPushButton("Run again")
+        self.rerun_button = IconButton("rerun", "Run again with the same inputs", tone="accent")
         self.rerun_button.clicked.connect(self._rerun)
         header.addWidget(self.rerun_button)
-        self.schedule_button = QPushButton("Schedule")
+        self.schedule_button = IconButton("clock", "Create a Schedule from this Run")
         self.schedule_button.clicked.connect(self._schedule)
         header.addWidget(self.schedule_button)
-        self.copy_task_button = QPushButton("Copy task")
-        self.copy_task_button.clicked.connect(self._copy_task)
-        header.addWidget(self.copy_task_button)
-        self.open_folder_button = QPushButton("Open folder")
+        self.open_folder_button = IconButton("folder-open", "Open the output folder")
         self.open_folder_button.clicked.connect(self._open_folder)
         header.addWidget(self.open_folder_button)
         layout.addLayout(header)
@@ -73,7 +75,7 @@ class JobDetailView(QWidget):
         self.auto_scroll_check = QCheckBox("Auto-scroll")
         self.auto_scroll_check.setChecked(True)
         log_controls.addWidget(self.auto_scroll_check)
-        self.open_log_button = QPushButton("Open full log")
+        self.open_log_button = IconButton("file-text", "Open the full log file")
         self.open_log_button.clicked.connect(self._open_log)
         log_controls.addWidget(self.open_log_button)
         log_controls.addStretch(1)
@@ -85,6 +87,7 @@ class JobDetailView(QWidget):
         self._browsers: dict[str, QTextBrowser] = {}
         for name in self.TAB_NAMES:
             browser = QTextBrowser()
+            browser.setObjectName("evidencePane")
             browser.setOpenExternalLinks(False)
             self._browsers[name] = browser
             if name == "Answer":
@@ -93,7 +96,7 @@ class JobDetailView(QWidget):
                 answer_layout.setContentsMargins(0, 0, 0, 0)
                 answer_actions = QHBoxLayout()
                 answer_actions.addStretch(1)
-                self.copy_answer_button = QPushButton("Copy answer")
+                self.copy_answer_button = IconButton("copy", "Copy the answer")
                 self.copy_answer_button.clicked.connect(self._copy_answer)
                 answer_actions.addWidget(self.copy_answer_button)
                 answer_layout.addLayout(answer_actions)
@@ -108,10 +111,20 @@ class JobDetailView(QWidget):
         self.task_text = ""
         self._check_pending = False
         self._can_check_progress = False
+        # No Run is selected yet, so no Run action applies. ``set_job`` re-shows
+        # each button according to the Run's own ``actions`` payload.
+        for button in (
+            self.cancel_button,
+            self.check_button,
+            self.rerun_button,
+            self.schedule_button,
+            self.open_folder_button,
+        ):
+            button.setVisible(False)
         self.set_answer(None)
 
     def set_job(self, job: dict) -> None:
-        job_id = str(job.get("job_id") or "")
+        job_id = str(job.get("task_run_id") or job.get("job_id") or "")
         if job_id != self.job_id:
             self.set_answer(None)
             self.set_content("Result", "")
@@ -121,22 +134,31 @@ class JobDetailView(QWidget):
             self.stream_combo.setCurrentText("stdout")
             self.stream_combo.blockSignals(False)
         self.job_id = job_id
-        self.title_label.setText(str(job.get("title") or self.job_id or "Job"))
+        self.title_label.setText(str(job.get("title") or self.job_id or "Task Run"))
         status = str(job.get("status") or "UNKNOWN")
-        self.status_label.setText(self._status_text(status))
-        self.status_label.setStyleSheet(self._status_style(status))
+        self.status_label.set_status(status)
         actions = job.get("actions") or {}
-        self.cancel_button.setEnabled(bool(actions.get("can_cancel")))
+        can_cancel = bool(actions.get("can_cancel"))
+        self.cancel_button.setVisible(can_cancel)
+        self.cancel_button.setEnabled(can_cancel)
         self._can_check_progress = bool(actions.get("can_check_progress"))
+        self.check_button.setVisible(self._can_check_progress)
         self.check_button.setEnabled(self._can_check_progress and not self._check_pending)
-        self.rerun_button.setEnabled(bool(actions.get("can_rerun")))
-        self.schedule_button.setEnabled(bool(actions.get("can_schedule")))
-        self.schedule_button.setToolTip(
+        can_rerun = bool(actions.get("can_rerun"))
+        self.rerun_button.setVisible(can_rerun)
+        self.rerun_button.setEnabled(can_rerun)
+        self.rerun_button.set_tooltip("Creates a new Task Run using this Run's saved Task snapshot and input values.")
+        can_schedule = bool(actions.get("can_schedule"))
+        self.schedule_button.setVisible(can_schedule)
+        self.schedule_button.setEnabled(can_schedule)
+        self.schedule_button.set_tooltip(
             "Service isolation must be acknowledged before saving a schedule."
             if actions.get("schedule_requires_isolation")
             else "Schedule this completed task"
         )
-        self.open_folder_button.setEnabled(bool(actions.get("can_open_folder")))
+        can_open_folder = bool(actions.get("can_open_folder"))
+        self.open_folder_button.setVisible(can_open_folder)
+        self.open_folder_button.setEnabled(can_open_folder)
         self.attempt_combo.blockSignals(True)
         self.attempt_combo.clear()
         for attempt in job.get("attempts") or []:
@@ -160,25 +182,50 @@ class JobDetailView(QWidget):
             ("Result file", job.get("output_path")),
             ("Files folder", job.get("artifact_path")),
             ("Working folder", (job.get("request") or {}).get("target_path")),
-            ("Job ID", job.get("job_id")),
+            ("Task Run ID", job.get("task_run_id") or job.get("job_id")),
         )
         request = job.get("request") or {}
         task_text = str(request.get("task") or job.get("task_text") or job.get("task_preview") or "").strip()
         self.task_text = task_text
-        self.copy_task_button.setEnabled(bool(task_text) and bool(actions.get("can_copy", True)))
         request_preview = job.get("task_preview") or task_text
         self.set_content(
             "Overview",
             "<table>{}</table>{}".format(
-                "".join(
-                    f"<tr><td><b>{escape(str(key))}</b></td><td>{escape(str(value or '—'))}</td></tr>"
-                    for key, value in fields
-                ),
+                "".join(kv_row(key, value or "—") for key, value in fields),
                 f"<p><b>Requested task</b></p><pre>{escape(str(request_preview or 'Task details are unavailable.'))}</pre>",
             ),
         )
         self.set_content("Task", escape(str(task_text or "Task details are hidden by your history settings.")))
+        task_inputs = job.get("task_inputs") or {}
+        warning = job.get("input_integrity_warning")
+        task_input_html = (
+            self._format_json(task_inputs) if task_inputs else "<i>No Task input values were supplied.</i>"
+        )
+        artifact_html = self._format_json(job.get("lineage") or job.get("inputs") or [])
+        self.set_content(
+            "Inputs",
+            "<h3>Task input values</h3>"
+            + (f"<p>{escape(str(warning))}</p>" if warning else "")
+            + task_input_html
+            + "<h3>Artifact inputs and lineage</h3>"
+            + artifact_html,
+        )
         self.set_content("Progress", self._format_json(job.get("attempts", [])))
+        review = job.get("review") or {}
+        review_data = review.get("review") if isinstance(review.get("review"), dict) else review
+        if review_data:
+            current_round = review.get("current_round") or {}
+            review_html = (
+                f"<h3>Review status: {escape(str(review_data.get('status') or job.get('review_status') or ''))}</h3>"
+                f"<p><b>Reviewer:</b> {escape(str(review_data.get('reviewer') or 'human'))}</p>"
+                f"<p><b>Guidelines</b><br>{escape(str(review_data.get('guidelines') or 'No extra guidelines.')).replace(chr(10), '<br>')}</p>"
+                f"<p><b>Current round:</b> {current_round.get('round_no') or 1} · "
+                f"<b>Reruns:</b> {review_data.get('reruns_used', 0)}/{review_data.get('max_reruns', 0)}</p>"
+                f"{self._format_json(review.get('artifacts') or job.get('artifacts') or [])}"
+            )
+        else:
+            review_html = "<i>This Task Run does not require result review.</i>"
+        self.set_content("Review", review_html)
         self.set_content("Events", self._format_json(job.get("events", [])))
         self.set_content("Files", self._format_json(job.get("artifacts", [])))
 
@@ -244,16 +291,12 @@ class JobDetailView(QWidget):
 
     def set_check_pending(self, pending: bool) -> None:
         self._check_pending = pending
-        self.check_button.setText("Checking…" if pending else "Check progress")
+        self.check_button.set_tooltip("Checking…" if pending else "Check progress now")
         self.check_button.setEnabled(self._can_check_progress and not pending)
 
     def _copy_answer(self) -> None:
         if self.answer_text:
             QApplication.clipboard().setText(self.answer_text)
-
-    def _copy_task(self) -> None:
-        if self.task_text:
-            QApplication.clipboard().setText(self.task_text)
 
     @staticmethod
     def _status_text(status: str) -> str:
@@ -266,16 +309,13 @@ class JobDetailView(QWidget):
 
     @staticmethod
     def _status_style(status: str) -> str:
-        colors = {
-            "COMPLETED": ("#166534", "#DCFCE7", "#86EFAC"),
-            "PARTIAL": ("#92400E", "#FEF3C7", "#FCD34D"),
-            "FAILED": ("#991B1B", "#FEE2E2", "#FCA5A5"),
-            "CANCELLED": ("#475569", "#F1F5F9", "#CBD5E1"),
-        }
-        foreground, background, border = colors.get(status, ("#1D4ED8", "#DBEAFE", "#93C5FD"))
+        presentation = status_presentation(status)
+        foreground = COLORS[presentation.color_token]
+        background = COLORS["bg.surface"]
+        border = COLORS[presentation.color_token]
         return (
             f"QLabel {{ color: {foreground}; background: {background}; border: 1px solid {border}; "
-            "border-radius: 10px; padding: 5px 10px; font-size: 13px; font-weight: 800; }"
+            "border-radius: 6px; padding: 5px 10px; font-size: 13px; font-weight: 700; }"
         )
 
     def selected_attempt(self) -> dict | None:
@@ -283,3 +323,8 @@ class JobDetailView(QWidget):
         if attempt_id is None:
             return None
         return {"attempt_id": int(attempt_id)}
+
+
+# Compatibility import for existing GUI extensions and tests. New code should
+# use the canonical TaskRunDetailView name.
+JobDetailView = TaskRunDetailView

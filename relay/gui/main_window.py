@@ -8,38 +8,90 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QSplitter,
     QStackedWidget,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from ..compatibility import evaluate_compatibility
 from .agent_apps import AgentAppWizard
-from .job_detail import JobDetailView
-from .new_task import NewTaskView
+from .design_icon_app import app_icon
+from .design_tokens import METRICS, SPACING
+from .design_typography import apply_type
+from .design_widgets import IconButton, NavButton
+from .profiles import ProfilesView
+from .project_runs import ProjectRunsView, _artifact_kind
+from .projects import ProjectRunMonitorDialog, ProjectsView
+from .reviews import ReviewsView
+from .routines import RoutinesView
 from .rpc_client import GuiRpcClient
+from .runs import RunsView
 from .schedule_detail import ScheduleDetailView
 from .schedule_editor import ScheduleEditorDialog
 from .settings import SettingsView
 from .state import GuiState
+from .tasks import TasksView
 
 
 class MainWindow(QMainWindow):
+    @property
+    def selected_job_id(self) -> str | None:
+        return self.selection["runs"]
+
+    @selected_job_id.setter
+    def selected_job_id(self, value: str | None) -> None:
+        self.selection["runs"] = str(value) if value else None
+
+    @property
+    def selected_task_id(self) -> str | None:
+        return self.selection["tasks"]
+
+    @selected_task_id.setter
+    def selected_task_id(self, value: str | None) -> None:
+        self.selection["tasks"] = str(value) if value else None
+
+    @property
+    def selected_project_id(self) -> str | None:
+        return self.selection["projects"]
+
+    @selected_project_id.setter
+    def selected_project_id(self, value: str | None) -> None:
+        self.selection["projects"] = str(value) if value else None
+
+    @property
+    def selected_routine_id(self) -> str | None:
+        return self.selection["routines"]
+
+    @selected_routine_id.setter
+    def selected_routine_id(self, value: str | None) -> None:
+        self.selection["routines"] = str(value) if value else None
+
+    @property
+    def selected_schedule_id(self) -> str | None:
+        return self.selection["schedules"]
+
+    @selected_schedule_id.setter
+    def selected_schedule_id(self, value: str | None) -> None:
+        self.selection["schedules"] = str(value) if value else None
+
+    @property
+    def selected_project_run_id(self) -> str | None:
+        return self.selection["project_runs"]
+
+    @selected_project_run_id.setter
+    def selected_project_run_id(self, value: str | None) -> None:
+        self.selection["project_runs"] = str(value) if value else None
+
     def __init__(self, config, *, gui_version: str, expected_home_id: str):
         super().__init__()
         self.config = config
@@ -49,13 +101,11 @@ class MainWindow(QMainWindow):
         self.client = GuiRpcClient(config)
         self.client.response.connect(self._handle_response)
         self.pending: dict[int, object] = {}
-        self.job_input_lookups: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
         self.agent_definitions: list[dict] = []
         self.custom_agent_apps: list[dict] = []
         self.schedules: dict[str, dict] = {}
         self.schedule_runs: dict[str, list[dict]] = {}
-        self.selected_schedule_id: str | None = None
         self.schedule_editor: ScheduleEditorDialog | None = None
         self.schedule_editor_mode = "create"
         self.schedule_editor_schedule_id: str | None = None
@@ -67,16 +117,40 @@ class MainWindow(QMainWindow):
         self.current_mode = "disconnected"
         self.current_filter = ""
         self.finished_cursor: str | None = None
-        self.job_tree_expanded: dict[str, bool] = {}
-        self.selected_job_id: str | None = None
+        self.active_section = "runs"
+        self.selection: dict[str, str | None] = {
+            "runs": None,
+            "tasks": None,
+            "projects": None,
+            "routines": None,
+            "schedules": None,
+            "profiles": None,
+            "project_runs": None,
+        }
         self.current_detail: dict | None = None
-        self.detail_view_mode = "empty"
         self.log_attempt_id: int | None = None
         self.log_offset: int | None = None
         self.progress_check_job_id: str | None = None
         self.health_check_request_id: int | None = None
+        self.task_run_file_lookups: dict[tuple[int, str], dict] = {}
+        self.tasks_index: dict[str, dict] = {}
+        self.profiles: list[dict] = []
+        self._pending_task_edit_id: str | None = None
+
+        self.projects_index: dict[str, dict] = {}
+        self.project_editor = None
+        self.project_run_dialog = None
+
+        self.routines_index: dict[str, dict] = {}
+        self.routine_editor = None
+
+        self.project_runs_index: dict[str, dict] = {}
+        self.reviews_index: dict[str, dict] = {}
+        self.project_run_cursor: str | None = None
+        self.project_run_last_tick_at: float = 0.0
 
         self.setWindowTitle("Relay-agent")
+        self.setWindowIcon(app_icon())
         self.resize(1280, 720)
         self._build_ui()
         self._restore_state()
@@ -87,96 +161,129 @@ class MainWindow(QMainWindow):
         self.finished_timer = QTimer(self)
         self.finished_timer.timeout.connect(self._refresh_finished)
         self.finished_timer.start(3000)
+        self.project_run_timer = QTimer(self)
+        self.project_run_timer.timeout.connect(self._project_run_timer_tick)
+        self.project_run_timer.start(2000)
         self.log_timer = QTimer(self)
         self.log_timer.timeout.connect(self._refresh_log)
         self.log_timer.start(1000)
+        self.health_timer = QTimer(self)
+        self.health_timer.timeout.connect(self._refresh_health)
+        # Health is a low-frequency status signal; manual refresh remains available.
+        self.health_timer.start(600000)
         self._refresh_health()
 
     def _build_ui(self) -> None:
         root = QWidget()
         outer = QVBoxLayout(root)
-        header = QFrame()
-        header_layout = QVBoxLayout(header)
+        self.top_bar = QFrame()
+        self.top_bar.setObjectName("topBar")
+        header_layout = QVBoxLayout(self.top_bar)
         title_row = QFrame()
         title_layout = QHBoxLayout(title_row)
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.addWidget(QLabel("<b>Relay-agent</b>"))
+        # "Relay" is the one piece of text that never changes; the active section
+        # name sits after it, separated and visually secondary, so the brand always
+        # reads first regardless of which screen is open.
+        self.brand_label = QLabel("Relay")
+        self.brand_label.setObjectName("brandMark")
+        apply_type(self.brand_label, "title.page")
+        title_layout.addWidget(self.brand_label)
+        title_layout.addSpacing(SPACING["xl"])
+        self.page_title_label = QLabel("Runs")
+        self.page_title_label.setObjectName("pageTitle")
+        apply_type(self.page_title_label, "title.detail")
+        title_layout.addWidget(self.page_title_label)
         title_layout.addStretch(1)
+        self.health_dot = QLabel("●")
+        self.health_dot.setObjectName("healthDot")
+        apply_type(self.health_dot, "caption")
         self.health_label = QLabel("Health: Checking…")
+        self.health_label.setObjectName("healthBadge")
+        apply_type(self.health_label, "caption")
         self.daemon_label = self.health_label
         self.health_time_label = QLabel("Not checked")
-        self.health_refresh_button = QPushButton("Refresh health")
+        self.health_time_label.setObjectName("mutedText")
+        apply_type(self.health_time_label, "caption")
+        self.health_refresh_button = IconButton("refresh", "Refresh daemon health")
         self.health_refresh_button.clicked.connect(self._refresh_health)
+        title_layout.addWidget(self.health_dot)
         title_layout.addWidget(self.health_label)
         title_layout.addWidget(self.health_time_label)
         title_layout.addWidget(self.health_refresh_button)
-        self.new_task_button = QPushButton("+ New Task")
-        self.new_task_button.setStyleSheet(
-            "QPushButton { background: #2563EB; color: white; border: 0; border-radius: 7px; "
-            "padding: 8px 16px; font-weight: 700; }"
-            "QPushButton:hover { background: #1D4ED8; }"
-            "QPushButton:disabled { background: #93C5FD; color: #EFF6FF; }"
-        )
-        self.new_task_button.clicked.connect(self._show_new_task)
-        title_layout.addWidget(self.new_task_button)
+        # A visible gap between the passive health readout and the one action in the
+        # global bar keeps them from reading as a single blended control cluster.
+        title_layout.addSpacing(SPACING["lg"])
+        self.register_task_button = IconButton("plus", "Register a new Task", tone="accent")
+        self.register_task_button.clicked.connect(self._show_task_registration)
+        title_layout.addWidget(self.register_task_button)
         header_layout.addWidget(title_row)
         self.banner = QLabel()
         self.banner.setWordWrap(True)
         self.banner.hide()
         header_layout.addWidget(self.banner)
-        outer.addWidget(header)
+        outer.addWidget(self.top_bar)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setObjectName("mainSplitter")
         self.sidebar = QWidget()
+        self.sidebar.setObjectName("sidebarNav")
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search tasks, names, agents...")
-        self.search.textChanged.connect(self._on_filter_changed)
-        sidebar_layout.addWidget(self.search)
-        self.result_filter = self._combo("Result", ["All", "Completed", "Partial", "Failed", "Cancelled"])
-        self.agent_filter = self._combo("Agent", ["All", "Claude", "Codex", "Antigravity"])
-        self.source_filter = self._combo("Source", ["All", "Command line", "GUI", "Hermes", "Schedule"])
-        self.date_filter = self._combo("Date", ["Any time", "Today", "Last 7 days", "Last 30 days"])
-        filter_row = QHBoxLayout()
-        for combo in (self.result_filter, self.agent_filter, self.source_filter, self.date_filter):
-            filter_row.addWidget(combo, 1)
-        sidebar_layout.addLayout(filter_row)
-        for combo in (self.result_filter, self.agent_filter, self.source_filter, self.date_filter):
-            combo.currentIndexChanged.connect(self._on_filter_changed)
-        sidebar_layout.addWidget(QLabel("<b>Schedules</b>"))
+        sidebar_layout.setSpacing(1)
+        self.runs_button = NavButton("list", "Runs")
+        self.runs_button.clicked.connect(self._show_runs)
+        sidebar_layout.addWidget(self.runs_button)
+        self.project_runs_button = NavButton("folder-tree", "Project Runs")
+        self.project_runs_button.clicked.connect(self._show_project_runs)
+        sidebar_layout.addWidget(self.project_runs_button)
+        self.reviews_button = NavButton("check-circle", "Reviews")
+        self.reviews_button.clicked.connect(self._show_reviews)
+        sidebar_layout.addWidget(self.reviews_button)
+        self.tasks_button = NavButton("checklist", "Tasks")
+        self.tasks_button.clicked.connect(self._show_tasks)
+        sidebar_layout.addWidget(self.tasks_button)
+        self.profiles_button = NavButton("user", "Profiles")
+        self.profiles_button.clicked.connect(self._show_profiles)
+        sidebar_layout.addWidget(self.profiles_button)
+        self.projects_button = NavButton("folder-tree", "Projects")
+        self.projects_button.clicked.connect(self._show_projects)
+        sidebar_layout.addWidget(self.projects_button)
+        self.routines_button = NavButton("repeat", "Routines")
+        self.routines_button.clicked.connect(self._show_routines)
+        sidebar_layout.addWidget(self.routines_button)
+
+        self.schedules_header = QLabel("Schedules")
+        self.schedules_header.setObjectName("mutedText")
+        apply_type(self.schedules_header, "overline")
+        self.schedules_header.setContentsMargins(SPACING["md"], SPACING["lg"], SPACING["md"], SPACING["xs"])
+        sidebar_layout.addWidget(self.schedules_header)
         self.schedule_list = QListWidget()
         self.schedule_list.setMaximumHeight(150)
         self.schedule_list.itemClicked.connect(self._select_schedule)
         sidebar_layout.addWidget(self.schedule_list)
-        self.settings_button = QPushButton("Settings")
+        # An empty bordered box reads as a broken panel; the group appears once
+        # there is at least one Schedule to show.
+        self.schedules_header.setVisible(False)
+        self.schedule_list.setVisible(False)
+
+        sidebar_layout.addStretch(1)
+        self.settings_button = NavButton("gear", "Settings")
         self.settings_button.clicked.connect(self._show_settings)
         sidebar_layout.addWidget(self.settings_button)
-        self.job_list = QTreeWidget()
-        self.job_list.setHeaderLabels(["Task", "Status"])
-        self.job_list.setColumnWidth(0, 210)
-        self.job_list.setRootIsDecorated(True)
-        self.job_list.setAlternatingRowColors(True)
-        self.job_list.itemClicked.connect(self._select_item)
-        self.job_list.itemExpanded.connect(lambda item: self._remember_job_tree_state(item, True))
-        self.job_list.itemCollapsed.connect(lambda item: self._remember_job_tree_state(item, False))
-        sidebar_layout.addWidget(self.job_list, 1)
-        self.load_more = QPushButton("Load more")
-        self.load_more.clicked.connect(self._load_more_finished)
-        self.load_more.setEnabled(False)
-        sidebar_layout.addWidget(self.load_more)
         self.splitter.addWidget(self.sidebar)
 
         self.detail_stack = QStackedWidget()
-        self.empty_detail = QLabel("Select a job to view its overview.")
+        self.empty_detail = QLabel("Select a Task Run to view its overview.")
+        self.empty_detail.setObjectName("emptyState")
         self.empty_detail.setAlignment(Qt.AlignCenter)
+        self.empty_detail.setWordWrap(True)
         self.detail_stack.addWidget(self.empty_detail)
-        self.new_task_view = NewTaskView()
-        self.new_task_view.create_requested.connect(self._create_task)
-        self.new_task_view.job_files_requested.connect(self._add_files_from_job)
-        self.detail_stack.addWidget(self.new_task_view)
-        self.job_detail_view = JobDetailView()
+        self.runs_view = RunsView()
+        self.runs_view.select_run_requested.connect(self._select_run)
+        self.runs_view.filters_changed.connect(self._on_filter_changed)
+        self.runs_view.load_more_requested.connect(self._load_more_finished)
+        self.job_detail_view = self.runs_view.detail
         self.job_detail_view.cancel_requested.connect(self._cancel_job)
         self.job_detail_view.check_requested.connect(self._check_job)
         self.job_detail_view.rerun_requested.connect(self._rerun_job)
@@ -185,7 +292,74 @@ class MainWindow(QMainWindow):
         self.job_detail_view.open_folder_requested.connect(self._open_folder)
         self.job_detail_view.open_log_requested.connect(self._open_log)
         self.job_detail_view.log_options_changed.connect(self._log_options_changed)
-        self.detail_stack.addWidget(self.job_detail_view)
+        self.detail_stack.addWidget(self.runs_view)
+        self.project_runs_view = ProjectRunsView()
+        self.project_runs_view.select_run_requested.connect(self._select_project_run)
+        self.project_runs_view.filters_changed.connect(self._on_project_runs_filter_changed)
+        self.project_runs_view.action_requested.connect(self._submit_project_run_action_v2)
+        self.project_runs_view.open_output_requested.connect(self._open_project_run_artifact)
+        self.project_runs_view.artifact_preview_requested.connect(self._preview_project_run_artifact)
+        self.project_runs_view.approve_requested.connect(self._approve_project_run_checkpoint)
+        self.project_runs_view.reject_requested.connect(self._reject_project_run_checkpoint)
+        self.project_runs_view.open_run_logs_requested.connect(self._open_project_run_logs)
+        self.project_runs_view.open_run_answer_requested.connect(self._open_project_run_answer)
+        self.project_runs_view.reexecute_from_node_requested.connect(self._reexecute_project_run_from_node)
+        self.project_runs_view.reexecute_with_comment_requested.connect(self._reexecute_project_run_with_comment)
+        self.project_runs_view.edit_task_requested.connect(self._edit_task_from_project_run_node)
+        self.detail_stack.addWidget(self.project_runs_view)
+        self.tasks_view = TasksView()
+        self.tasks_view.refresh_requested.connect(self._refresh_tasks)
+        self.tasks_view.create_requested.connect(self._open_task_editor_for_create)
+        self.tasks_view.select_task_requested.connect(self._select_task)
+        self.tasks_view.edit_task_requested.connect(self._open_task_editor_for_edit)
+        self.tasks_view.delete_task_requested.connect(self._delete_task_requested)
+        self.tasks_view.run_task_requested.connect(self._open_task_runner)
+        self.tasks_view.task_create_submitted.connect(self._submit_create_task)
+        self.tasks_view.task_edit_submitted.connect(self._submit_update_task)
+        self.tasks_view.task_run_submitted.connect(self._submit_run_task)
+        self.tasks_view.task_run_files_requested.connect(self._load_task_run_files)
+        self.detail_stack.addWidget(self.tasks_view)
+        self.reviews_view = ReviewsView()
+        self.reviews_view.refresh_requested.connect(self._refresh_reviews)
+        self.reviews_view.select_review_requested.connect(self._select_review)
+        self.reviews_view.confirm_requested.connect(self._confirm_review)
+        self.reviews_view.rerun_requested.connect(self._rerun_review)
+        self.reviews_view.reject_requested.connect(self._reject_review)
+        self.detail_stack.addWidget(self.reviews_view)
+        self.profiles_view = ProfilesView()
+        self.profiles_view.create_requested.connect(
+            lambda payload: self._request_post("profile_create", "/v1/profiles", payload)
+        )
+        self.profiles_view.update_requested.connect(
+            lambda pid, payload: self._request_post(("profile_update", pid), f"/v1/profiles/{pid}", payload)
+        )
+        self.profiles_view.delete_requested.connect(
+            lambda pid: self._request_delete(("profile_delete", pid), f"/v1/profiles/{pid}")
+        )
+        self.detail_stack.addWidget(self.profiles_view)
+        self.projects_view = ProjectsView()
+        self.projects_view.refresh_requested.connect(self._refresh_projects)
+        self.projects_view.create_requested.connect(self._open_project_editor_for_create)
+        self.projects_view.select_project_requested.connect(self._select_project)
+        self.projects_view.edit_project_requested.connect(self._open_project_editor_for_edit)
+        self.projects_view.delete_project_requested.connect(self._delete_project_requested)
+        self.projects_view.run_project_requested.connect(self._submit_create_project_run)
+        self.projects_view.project_create_submitted.connect(self._submit_create_project)
+        self.projects_view.project_edit_submitted.connect(self._submit_update_project)
+        self.projects_view.project_run_submitted.connect(self._submit_project_run_action)
+        self.detail_stack.addWidget(self.projects_view)
+        self.routines_view = RoutinesView()
+        self.routines_view.refresh_requested.connect(self._refresh_routines)
+        self.routines_view.create_requested.connect(self._open_routine_editor_for_create)
+        self.routines_view.select_routine_requested.connect(self._select_routine)
+        self.routines_view.edit_routine_requested.connect(self._open_routine_editor_for_edit)
+        self.routines_view.delete_routine_requested.connect(self._delete_routine_requested)
+        self.routines_view.run_routine_requested.connect(self._run_routine_now)
+        self.routines_view.detail.child_run_requested.connect(self._open_routine_child_run)
+        self.routines_view.routine_create_submitted.connect(self._submit_create_routine)
+        self.routines_view.routine_edit_submitted.connect(self._submit_update_routine)
+        self.routines_view.routine_run_submitted.connect(self._submit_run_routine)
+        self.detail_stack.addWidget(self.routines_view)
         self.schedule_detail_view = ScheduleDetailView()
         self.schedule_detail_view.run_now_requested.connect(self._run_schedule_now)
         self.schedule_detail_view.pause_requested.connect(self._pause_schedule)
@@ -198,6 +372,7 @@ class MainWindow(QMainWindow):
         self.settings_view = SettingsView()
         self.settings_view.autostart_changed.connect(self._toggle_autostart)
         self.settings_view.antigravity_activate_requested.connect(self._activate_antigravity)
+        self.settings_view.doctor_requested.connect(self._run_deep_doctor)
         self.settings_view.full_access_mode_changed.connect(self._set_full_access_mode)
         agent_apps = self.settings_view.agent_apps_view
         agent_apps.create_requested.connect(self._create_agent_app)
@@ -207,19 +382,13 @@ class MainWindow(QMainWindow):
         agent_apps.delete_requested.connect(self._delete_agent_app)
         self.detail_stack.addWidget(self.settings_view)
         self.splitter.addWidget(self.detail_stack)
-        self.splitter.setSizes([320, 960])
+        self.splitter.setSizes([METRICS["sidebarWidth"], 1280 - METRICS["sidebarWidth"]])
         outer.addWidget(self.splitter, 1)
         self.setCentralWidget(root)
         self.statusBar().showMessage(f"Relay Home: {self.config.home}")
         self._set_connection("checking", "waiting for daemon health check")
-
-    @staticmethod
-    def _combo(prefix: str, values: list[str]) -> QComboBox:
-        combo = QComboBox()
-        combo.setObjectName(prefix.lower().replace(" ", "_"))
-        combo.addItems(values)
-        combo.setToolTip(prefix)
-        return combo
+        self._activate_navigation("runs")
+        self.detail_stack.setCurrentWidget(self.runs_view)
 
     def _restore_state(self) -> None:
         geometry = self.state.value("window/geometry")
@@ -228,25 +397,22 @@ class MainWindow(QMainWindow):
         splitter_state = self.state.value("window/splitter_state")
         if splitter_state:
             self.splitter.restoreState(splitter_state)
-        self.search.setText(str(self.state.value("filters/search", "")))
+        self.runs_view.search_edit.setText(str(self.state.value("filters/search", "")))
 
     def closeEvent(self, event) -> None:
-        for timer in (self.active_timer, self.finished_timer, self.log_timer):
+        for timer in (self.active_timer, self.finished_timer, self.log_timer, self.project_run_timer):
             timer.stop()
         self.client.close()
         self.state.set_value("window/geometry", self.saveGeometry())
         self.state.set_value("window/splitter_state", self.splitter.saveState())
-        self.state.set_value("filters/search", self.search.text())
+        self.state.set_value("filters/search", self.runs_view.search_edit.text())
         super().closeEvent(event)
 
     def _request(self, kind, path: str) -> None:
         self.pending[self.client.get(path)] = kind
 
     def _show_settings(self) -> None:
-        self.selected_job_id = None
-        self.current_detail = None
-        self.detail_view_mode = "settings"
-
+        self._activate_navigation("settings")
         self.detail_stack.setCurrentWidget(self.settings_view)
         if self.current_mode == "normal":
             self._request("autostart", "/v1/autostart")
@@ -365,6 +531,12 @@ class MainWindow(QMainWindow):
             timeout_ms=310000,
         )
 
+    def _run_deep_doctor(self, worker: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.settings_view.set_doctor_pending(worker, True)
+        self._request_post(("doctor", worker), "/v1/doctor/deep", {"worker": worker}, timeout_ms=310000)
+
     def _maybe_prompt_autostart(self) -> None:
         if self.autostart_status.get("enabled") or self._state_truthy("gui/autostart_prompted"):
             return
@@ -388,29 +560,383 @@ class MainWindow(QMainWindow):
     def _request_post(self, kind, path: str, payload: dict, *, timeout_ms: int = 15000) -> None:
         self.pending[self.client.post(path, payload, timeout_ms=timeout_ms)] = kind
 
-    def _show_new_task(self) -> None:
-        self.selected_job_id = None
-        self.current_detail = None
-        self.detail_view_mode = "new_task"
-        self.detail_stack.setCurrentWidget(self.new_task_view)
-
-    def _create_task(self, payload: dict) -> None:
+    def _show_task_registration(self) -> None:
         if self.current_mode != "normal":
             return
-        self._request_post("create", "/v1/jobs", payload)
+        self._show_tasks()
+        self._open_task_editor_for_create()
 
-    def _add_files_from_job(self, job_id: str) -> None:
-        if self.current_mode != "normal" or self.job_input_lookups:
+    # ----- Registered Tasks (Phase 3) ---------------------------------------
+
+    def _show_runs(self) -> None:
+        self._activate_navigation("runs")
+        self.detail_stack.setCurrentWidget(self.runs_view)
+        self._render_jobs()
+        if self.selected_job_id and self.current_mode == "normal":
+            self._request(("detail", self.selected_job_id), f"/v1/jobs/{self.selected_job_id}")
+
+    def _show_project_runs(self) -> None:
+        self._activate_navigation("project_runs")
+        self.detail_stack.setCurrentWidget(self.project_runs_view)
+        if self.current_mode == "normal":
+            self._refresh_project_runs(force=True)
+            self._refresh_project_runs_projects()
+
+    def _refresh_project_runs_projects(self) -> None:
+        if self.current_mode != "normal":
             return
-        self.job_input_lookups[job_id] = {"responses": {}, "errors": []}
-        self.new_task_view.set_job_file_lookup_pending(True)
-        encoded_job_id = quote(job_id, safe="")
-        self._request(("job_input", job_id, "result"), f"/v1/jobs/{encoded_job_id}/result")
-        self._request(("job_input", job_id, "artifacts"), f"/v1/jobs/{encoded_job_id}/artifacts")
+        self._request("project_runs_projects", "/v1/projects")
 
-    def _record_job_input_response(self, kind: tuple, payload: dict | None, error=None) -> None:
-        _, job_id, source = kind
-        lookup = self.job_input_lookups.get(job_id)
+    def _refresh_project_runs(self, *, force: bool = False) -> None:
+        if self.current_mode != "normal":
+            return
+        self.project_run_cursor = None
+        self._request("project_runs_list", "/v1/catalog/project-runs?limit=200")
+
+    def _on_project_runs_filter_changed(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self._refresh_project_runs(force=True)
+
+    def _select_project_run(self, project_run_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.selected_project_run_id = project_run_id
+        self.project_runs_view.select_run(project_run_id)
+        self._request(("project_run_v2_detail", project_run_id), f"/v1/project-runs/{project_run_id}")
+        self._request(("project_run_v2_steps", project_run_id), f"/v1/project-runs/{project_run_id}/steps")
+        self._request(("project_run_v2_approvals", project_run_id), f"/v1/project-runs/{project_run_id}/approvals")
+        self._request(("project_run_v2_reviews", project_run_id), f"/v1/project-runs/{project_run_id}/reviews")
+        self._request(("project_run_v2_receipt", project_run_id), f"/v1/project-runs/{project_run_id}/receipt")
+        self._request(
+            ("project_run_v2_orchestrator", project_run_id), f"/v1/project-runs/{project_run_id}/orchestrator"
+        )
+
+    def _request_node_artifacts(self, project_run_id: str, steps: list[dict]) -> None:
+        for step in steps or []:
+            if not isinstance(step, dict):
+                continue
+            task_run_id = str(step.get("active_task_run_id") or "")
+            node_id = str(step.get("node_id") or "")
+            if not task_run_id or not node_id:
+                continue
+            encoded_job_id = quote(task_run_id, safe="")
+            self._request(
+                ("project_run_v2_node_detail", project_run_id, task_run_id),
+                f"/v1/jobs/{encoded_job_id}",
+            )
+            self._request(
+                ("project_run_v2_node_artifacts", project_run_id, node_id),
+                f"/v1/jobs/{encoded_job_id}/artifacts",
+            )
+
+    def _submit_project_run_action_v2(self, project_run_id: str, action: str, payload: dict) -> None:
+        if self.current_mode != "normal":
+            return
+        if action == "cancel":
+            self._request_post(
+                ("project_run_action", ("project_run_cancel", project_run_id)),
+                f"/v1/project-runs/{project_run_id}/cancel",
+                {},
+            )
+            return
+        if action == "retry":
+            run = self.project_runs_index.get(project_run_id) or {}
+            failed_node = run.get("failed_node_id")
+            if not failed_node:
+                self.banner.setText("This Run has no recorded failed step to retry from.")
+                self.banner.show()
+                return
+            choice = QMessageBox.question(
+                self,
+                "Retry from failure",
+                f"Retry the failed Run starting at step '{failed_node}'?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if choice != QMessageBox.Yes:
+                return
+            self._request_post(
+                ("project_run_action", ("project_run_retry", project_run_id)),
+                f"/v1/project-runs/{project_run_id}/retry",
+                {"from_node": failed_node},
+            )
+            return
+        if action == "reexec":
+            run = self.project_runs_index.get(project_run_id) or {}
+            failed_node = run.get("failed_node_id")
+            if not failed_node:
+                self.banner.setText("Select a failed step first; the Run has no record to re-execute from.")
+                self.banner.show()
+                return
+            choice = QMessageBox.question(
+                self,
+                "Re-execute from step",
+                f"Re-execute the Run starting at step '{failed_node}' with cascaded descendants?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if choice != QMessageBox.Yes:
+                return
+            self._request_post(
+                ("project_run_action", ("project_run_reexec", project_run_id)),
+                f"/v1/project-runs/{project_run_id}/partial-reexecute",
+                {"from_node": failed_node, "cascade": True},
+            )
+            return
+        self.banner.setText(f"Unknown Project Run action: {action}")
+        self.banner.show()
+
+    def _reexecute_project_run_from_node(self, node_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        project_run_id = self.selected_project_run_id
+        if not project_run_id or not node_id:
+            return
+        choice = QMessageBox.question(
+            self,
+            "Re-execute from step",
+            f"Re-execute this Run starting at step '{node_id}' with cascaded descendants?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self._request_post(
+            ("project_run_action", ("project_run_reexec", project_run_id)),
+            f"/v1/project-runs/{project_run_id}/partial-reexecute",
+            {"from_node": node_id, "cascade": True},
+        )
+
+    def _reexecute_project_run_with_comment(self, node_id: str, comment: str) -> None:
+        if self.current_mode != "normal":
+            return
+        project_run_id = self.selected_project_run_id
+        if not project_run_id or not node_id or not comment.strip():
+            return
+        self._request_post(
+            ("project_run_action", ("project_run_reexec", project_run_id)),
+            f"/v1/project-runs/{project_run_id}/partial-reexecute",
+            {"from_node": node_id, "cascade": True, "instruction_addendum": comment.strip()},
+        )
+
+    def _edit_task_from_project_run_node(self, task_id: str) -> None:
+        if self.current_mode != "normal" or not task_id:
+            return
+        self._pending_task_edit_id = task_id
+        self._show_tasks()
+
+    def _open_project_run_artifact(self, artifact_uid: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request(("project_run_artifact", artifact_uid), f"/v1/artifacts/{artifact_uid}")
+
+    def _preview_project_run_artifact(self, artifact_uid: str) -> None:
+        if self.current_mode != "normal" or not self.selected_project_run_id or not artifact_uid:
+            return
+        encoded_uid = quote(str(artifact_uid), safe="")
+        self._request(
+            ("project_run_artifact_detail", self.selected_project_run_id, str(artifact_uid)),
+            f"/v1/artifacts/{encoded_uid}",
+        )
+
+    def _open_project_run_logs(self, task_run_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.selected_job_id = task_run_id
+        self._show_runs()
+        self._request(("detail", task_run_id), f"/v1/jobs/{task_run_id}")
+
+    def _open_project_run_answer(self, task_run_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.selected_job_id = task_run_id
+        self._show_runs()
+        self._request(("detail", task_run_id), f"/v1/jobs/{task_run_id}")
+
+    def _approve_project_run_checkpoint(self, project_run_id: str, token: str) -> None:
+        if self.current_mode != "normal":
+            return
+        choice = QMessageBox.question(
+            self,
+            "Approve checkpoint",
+            "Approve this checkpoint and let the Run continue?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self._request_post(
+            ("project_run_action", ("project_run_approve", project_run_id)),
+            f"/v1/project-runs/{project_run_id}/approvals/{token}/approve",
+            {},
+        )
+
+    def _reject_project_run_checkpoint(self, project_run_id: str, token: str) -> None:
+        if self.current_mode != "normal":
+            return
+        choice = QMessageBox.warning(
+            self,
+            "Reject checkpoint",
+            "Reject this checkpoint? The Run will fail.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self._request_post(
+            ("project_run_action", ("project_run_reject", project_run_id)),
+            f"/v1/project-runs/{project_run_id}/approvals/{token}/reject",
+            {"reason": ""},
+        )
+
+    def _show_reviews(self) -> None:
+        self._activate_navigation("reviews")
+        self.detail_stack.setCurrentWidget(self.reviews_view)
+        if self.current_mode == "normal":
+            self._refresh_reviews()
+
+    def _refresh_reviews(self) -> None:
+        if self.current_mode == "normal":
+            self._request("reviews", "/v1/reviews?limit=100")
+
+    def _select_review(self, review_id: str) -> None:
+        if self.current_mode == "normal" and review_id:
+            self._request(("review_detail", review_id), f"/v1/reviews/{quote(review_id, safe='')}")
+
+    def _confirm_review(self, review_id: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(("review_action", "confirm"), f"/v1/reviews/{quote(review_id, safe='')}/confirm", {})
+
+    def _rerun_review(self, review_id: str, comment: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(
+                ("review_action", "rerun"),
+                f"/v1/reviews/{quote(review_id, safe='')}/rerun",
+                {"comment": comment},
+            )
+
+    def _reject_review(self, review_id: str, reason: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(
+                ("review_action", "reject"),
+                f"/v1/reviews/{quote(review_id, safe='')}/reject",
+                {"reason": reason},
+            )
+
+    def _activate_navigation(self, section: str | None) -> None:
+        buttons = {
+            "runs": self.runs_button,
+            "project_runs": self.project_runs_button,
+            "reviews": self.reviews_button,
+            "tasks": self.tasks_button,
+            "profiles": self.profiles_button,
+            "projects": self.projects_button,
+            "routines": self.routines_button,
+            "settings": self.settings_button,
+        }
+        for name, button in buttons.items():
+            button.setChecked(name == section)
+        if section:
+            self.active_section = section
+            self.page_title_label.setText(section.title())
+
+    def _runs_detail_is_active(self) -> bool:
+        return self.active_section == "runs" and self.detail_stack.currentWidget() is self.runs_view
+
+    def _project_runs_is_active(self) -> bool:
+        return self.active_section == "project_runs" and self.detail_stack.currentWidget() is self.project_runs_view
+
+    def _show_tasks(self) -> None:
+        self._activate_navigation("tasks")
+        self.detail_stack.setCurrentWidget(self.tasks_view)
+        self.tasks_view.set_available_workers(
+            [str(agent.get("agent_id")) for agent in self.agent_definitions if agent.get("agent_id")]
+        )
+        if self.current_mode == "normal":
+            self._refresh_tasks()
+            self._request("profiles", "/v1/profiles")
+
+    def _show_profiles(self) -> None:
+        self._activate_navigation("profiles")
+        self.detail_stack.setCurrentWidget(self.profiles_view)
+        if self.current_mode == "normal":
+            self._request("profiles", "/v1/profiles")
+
+    def _refresh_tasks(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request("tasks", "/v1/tasks")
+
+    def _select_task(self, task_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.selected_task_id = task_id
+        self._request(("task_detail", task_id), f"/v1/tasks/{task_id}")
+        self._request(("task_runs", task_id), f"/v1/tasks/{task_id}/runs?limit=20")
+
+    def _open_task_editor_for_create(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self.tasks_view.show_create_editor()
+
+    def _open_task_editor_for_edit(self, task_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.tasks_view.show_edit_editor(task_id)
+
+    def _delete_task_requested(self, task_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        task = self.tasks_index.get(task_id) or {}
+        choice = QMessageBox.warning(
+            self,
+            "Delete Task",
+            f"Delete the registered Task '{(task.get('name') or task_id)}'? Historical Runs stay intact.",
+            QMessageBox.Cancel | QMessageBox.Yes,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self._request_delete(("task_delete", task_id), f"/v1/tasks/{task_id}")
+
+    def _open_task_runner(self, task_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.tasks_view.show_run_dialog(task_id)
+
+    def _submit_create_task(self, payload: dict) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request_post("task_create", "/v1/tasks", payload)
+
+    def _submit_update_task(self, task_id: str, payload: dict) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request_post(("task_update", task_id), f"/v1/tasks/{task_id}", payload)
+
+    def _submit_run_task(self, task_id: str, overrides: dict) -> None:
+        if self.current_mode != "normal":
+            return
+        # Keep every per-run value in the canonical request object.  This
+        # avoids top-level truthiness merging dropping values such as false,
+        # zero, or an empty list before the daemon snapshots the Task Run.
+        payload = {"queued": True, "submitted_via": "gui", "request": overrides}
+        self._request_post(("task_run", task_id), f"/v1/tasks/{task_id}/run", payload)
+
+    def _load_task_run_files(self, dialog, job_id: str) -> None:
+        if self.current_mode != "normal":
+            dialog.set_source_run_error("Relay daemon is not available.")
+            return
+        key = (id(dialog), job_id)
+        self.task_run_file_lookups[key] = {"dialog": dialog, "responses": {}, "errors": []}
+        encoded_job_id = quote(job_id, safe="")
+        self._request(("task_run_files", key, "result"), f"/v1/jobs/{encoded_job_id}/result")
+        self._request(("task_run_files", key, "artifacts"), f"/v1/jobs/{encoded_job_id}/artifacts")
+
+    def _record_task_run_files(self, kind: tuple, payload: dict | None, error=None) -> None:
+        _, key, source = kind
+        lookup = self.task_run_file_lookups.get(key)
         if lookup is None:
             return
         lookup["responses"][source] = payload or {}
@@ -418,31 +944,228 @@ class MainWindow(QMainWindow):
             lookup["errors"].append(str(error))
         if {"result", "artifacts"} - set(lookup["responses"]):
             return
-
-        self.job_input_lookups.pop(job_id, None)
-        self.new_task_view.set_job_file_lookup_pending(False)
-        responses = lookup["responses"]
-        files = self._job_input_candidates(responses.get("result") or {}, responses.get("artifacts") or {})
+        self.task_run_file_lookups.pop(key, None)
+        dialog = lookup["dialog"]
+        if not dialog.isVisible():
+            return
+        files = self._job_input_candidates(
+            lookup["responses"].get("result") or {}, lookup["responses"].get("artifacts") or {}
+        )
         if not files:
-            self.banner.setText(
-                f"No delivered result or artifact files are available for Job {job_id}. "
-                "Check the Job ID and make sure the Job has finished."
+            dialog.set_source_run_error("No delivered result or artifact files are available for that Task Run.")
+            return
+        dialog.set_source_run_files(files)
+
+    # ----- Registered Projects (Phase 4) ------------------------------------
+
+    def _show_projects(self) -> None:
+        self._activate_navigation("projects")
+        self.detail_stack.setCurrentWidget(self.projects_view)
+        if self.current_mode == "normal":
+            self._refresh_projects()
+            self.projects_view.set_tasks(list(self.tasks_index.values()))
+
+    def _refresh_projects(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request("projects", "/v1/projects")
+        self._request("project_tasks", "/v1/tasks?limit=200")
+
+    def _select_project(self, project_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.selected_project_id = project_id
+        self._request(("project_detail", project_id), f"/v1/projects/{project_id}")
+        self._request(("project_runs", project_id), f"/v1/projects/{project_id}/runs")
+
+    def _open_project_editor_for_create(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self.projects_view.show_create_editor()
+
+    def _open_project_editor_for_edit(self, project_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.projects_view.show_edit_editor(project_id)
+
+    def _delete_project_requested(self, project_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        project = self.projects_index.get(project_id) or {}
+        choice = QMessageBox.warning(
+            self,
+            "Delete Project",
+            f"Delete the registered Project '{(project.get('name') or project_id)}'? "
+            "Project Runs and child Artifacts remain intact.",
+            QMessageBox.Cancel | QMessageBox.Yes,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self._request_delete(("project_delete", project_id), f"/v1/projects/{project_id}")
+
+    def _submit_create_project(self, payload: dict) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request_post("project_create", "/v1/projects", payload)
+
+    def _submit_update_project(self, project_id: str, payload: dict) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request_post(("project_update", project_id), f"/v1/projects/{project_id}", payload)
+
+    def _submit_create_project_run(self, project_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        project = self.projects_index.get(project_id) or {}
+        project_name = str(project.get("name") or project_id)
+        choice = QMessageBox.question(
+            self,
+            "Run Project?",
+            f'Start a new Project Run for "{project_name}"?',
+            QMessageBox.Cancel | QMessageBox.Yes,
+            QMessageBox.Cancel,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self._request_post(("project_run_create", project_id), f"/v1/projects/{project_id}/run", {})
+
+    def _submit_project_run_action(self, project_run_id: str, payload: dict) -> None:
+        if self.current_mode != "normal":
+            return
+        action = payload.get("action")
+        if action == "cancel":
+            self._request_post(
+                ("project_run_action", ("project_run_cancel", project_run_id)),
+                f"/v1/project-runs/{project_run_id}/cancel",
+                {},
             )
-            self.banner.show()
             return
-        if self.detail_view_mode != "new_task":
-            self.banner.setText(f"Job {job_id} files are ready. Return to New Task and add them again.")
-            self.banner.show()
+        if action == "retry":
+            self._request_post(
+                ("project_run_action", ("project_run_retry", project_run_id)),
+                f"/v1/project-runs/{project_run_id}/retry",
+                {"from_node": payload.get("from_node")},
+            )
             return
-        self.banner.hide()
-        self.new_task_view.choose_job_files(job_id, files)
+        if action == "partial-reexecute":
+            self._request_post(
+                ("project_run_action", ("project_run_reexec", project_run_id)),
+                f"/v1/project-runs/{project_run_id}/partial-reexecute",
+                {"from_node": payload.get("from_node"), "cascade": bool(payload.get("cascade", True))},
+            )
+            return
+        if action == "refresh":
+            self._request(("project_run_steps", project_run_id), f"/v1/project-runs/{project_run_id}/steps")
+            return
+        self.banner.setText(f"Unknown Project Run action: {action}")
+        self.banner.show()
+
+    # ----- Registered Routines (Phase 5) ------------------------------------
+
+    def _show_routines(self) -> None:
+        self._activate_navigation("routines")
+        self.detail_stack.setCurrentWidget(self.routines_view)
+        self.routines_view.set_tasks(list(self.tasks_index.values()))
+        self.routines_view.set_projects(list(self.projects_index.values()))
+        if self.current_mode == "normal":
+            self._refresh_routines()
+
+    def _refresh_routines(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self._request("routines", "/v1/routines?limit=200")
+        self._request("routine_tasks", "/v1/tasks?limit=200")
+        self._request("routine_projects", "/v1/projects?limit=200")
+
+    def _select_routine(self, routine_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.selected_routine_id = str(routine_id)
+        self._request(("routine_detail", self.selected_routine_id), f"/v1/routines/{routine_id}")
+        self._request(("routine_runs", self.selected_routine_id), f"/v1/routines/{routine_id}/runs?limit=100")
+        self._request(("routine_receipt", self.selected_routine_id), f"/v1/routines/{routine_id}/receipt")
+
+    def _open_routine_editor_for_create(self) -> None:
+        if self.current_mode != "normal":
+            return
+        self.routines_view.show_create_editor()
+        self.routines_view.editor.preview_requested.connect(
+            lambda payload, editor=self.routines_view.editor: self._preview_routine(editor, payload)
+        )
+
+    def _open_routine_editor_for_edit(self, routine_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        self.routines_view.show_edit_editor(routine_id)
+        self.routines_view.editor.preview_requested.connect(
+            lambda payload, editor=self.routines_view.editor: self._preview_routine(editor, payload)
+        )
+
+    def _delete_routine_requested(self, routine_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        routine = self.routines_index.get(routine_id) or {}
+        choice = QMessageBox.warning(
+            self,
+            "Delete Routine",
+            f"Delete the Routine '{routine.get('name') or routine_id}'? Historical Runs remain intact.",
+            QMessageBox.Cancel | QMessageBox.Yes,
+            QMessageBox.Cancel,
+        )
+        if choice == QMessageBox.Yes:
+            self._request_delete(("routine_delete", routine_id), f"/v1/routines/{routine_id}")
+
+    def _submit_create_routine(self, payload: dict) -> None:
+        if self.current_mode == "normal":
+            self._request_post("routine_create", "/v1/routines", payload)
+
+    def _submit_update_routine(self, routine_id: str, payload: dict) -> None:
+        if self.current_mode == "normal":
+            self._request_post(("routine_update", routine_id), f"/v1/routines/{routine_id}", payload)
+
+    def _run_routine_now(self, routine_id: str) -> None:
+        self._submit_run_routine(routine_id)
+
+    def _submit_run_routine(self, routine_id: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(("routine_run", routine_id), f"/v1/routines/{routine_id}/run-now", {})
+
+    def _preview_routine(self, editor, payload: dict) -> None:
+        if self.current_mode == "normal":
+            self._request_post(("routine_preview", editor), "/v1/routines/preview", payload)
+
+    def _open_routine_child_run(self, child_type: str, run_id: str) -> None:
+        if self.current_mode != "normal":
+            return
+        if child_type == "task":
+            self.selected_job_id = run_id
+            self._show_runs()
+            self._request(("detail", run_id), f"/v1/jobs/{run_id}")
+            return
+        self.project_run_dialog = ProjectRunMonitorDialog(project_run_id=run_id, parent=self)
+        self.project_run_dialog.accepted_action.connect(
+            lambda action, payload: self._submit_project_run_action(
+                payload.get("project_run_id", run_id), {"action": action, **payload}
+            )
+        )
+        self.project_run_dialog.open()
+        self._request(("project_run_detail", run_id), f"/v1/project-runs/{run_id}")
+        self._request(("project_run_steps", run_id), f"/v1/project-runs/{run_id}/steps")
 
     @staticmethod
     def _job_input_candidates(result: dict, artifacts: dict) -> list[dict]:
         candidates: list[dict] = []
         seen: set[str] = set()
 
-        def append_candidate(kind: str, value: str | None, *, name: str | None = None, size=None) -> None:
+        def append_candidate(
+            kind: str,
+            value: str | None,
+            *,
+            name: str | None = None,
+            size=None,
+            artifact: dict | None = None,
+        ) -> None:
             if not value:
                 return
             path = Path(value)
@@ -458,6 +1181,16 @@ class MainWindow(QMainWindow):
                     "name": name or path.name,
                     "path": str(path),
                     "size": path.stat().st_size if size is None else size,
+                    **(
+                        {
+                            "artifact_uid": artifact.get("artifact_uid"),
+                            "role": artifact.get("role"),
+                            "sha256": artifact.get("sha256"),
+                            "source_job_id": artifact.get("job_id"),
+                        }
+                        if artifact
+                        else {}
+                    ),
                 }
             )
 
@@ -469,11 +1202,33 @@ class MainWindow(QMainWindow):
                 artifact.get("final_path"),
                 name=artifact.get("relative_path"),
                 size=artifact.get("size"),
+                artifact=artifact,
             )
         return candidates
 
+    @staticmethod
+    def _job_artifact_candidates(artifacts: dict) -> list[dict]:
+        return [item for item in MainWindow._job_input_candidates({}, artifacts) if item.get("artifact_uid")]
+
+    @staticmethod
+    def _artifact_inputs_from_candidates(candidates: list[dict]) -> list[dict]:
+        return [
+            {"artifact_uid": item["artifact_uid"], "alias": f"A{index}"}
+            for index, item in enumerate(candidates, start=1)
+            if item.get("artifact_uid")
+        ]
+
     def _cancel_job(self, job_id: str) -> None:
-        if self.current_mode == "normal":
+        if self.current_mode != "normal":
+            return
+        confirmed = QMessageBox.question(
+            self,
+            "Stop Task Run",
+            "Stop this active Task Run? Its current work may be incomplete.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if confirmed == QMessageBox.Yes:
             self._request_post("cancel", f"/v1/jobs/{job_id}/cancel", {})
 
     def _check_job(self, job_id: str) -> None:
@@ -486,7 +1241,17 @@ class MainWindow(QMainWindow):
         self._request_post(("progress_check", job_id), f"/v1/jobs/{job_id}/check", {})
 
     def _rerun_job(self, job_id: str) -> None:
-        if self.current_mode == "normal":
+        if self.current_mode != "normal":
+            return
+        confirmed = QMessageBox.question(
+            self,
+            "Run Task Again",
+            "Create a new Task Run with this Run's saved Task snapshot and input values?\n\n"
+            "To change the Task or inputs, open the registered Task instead.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if confirmed == QMessageBox.Yes:
             self._request_post("rerun", f"/v1/jobs/{job_id}/rerun", {})
 
     def _schedule_job(self, job_id: str) -> None:
@@ -595,6 +1360,29 @@ class MainWindow(QMainWindow):
             self.finished_cursor = None
             self._request("finished", self._finished_path())
             self._request("schedules", "/v1/schedules")
+            self._request("reviews", "/v1/reviews?limit=100")
+
+    def _project_run_timer_tick(self) -> None:
+        if not self._project_runs_is_active() or self.current_mode != "normal":
+            return
+        import time
+
+        now = time.monotonic()
+        live = self.project_runs_view.has_live_run_selected()
+        # Refresh the list every ~5s while the screen is open, regardless of selection.
+        if now - self.project_run_last_tick_at >= 5.0:
+            self._refresh_project_runs()
+            return
+        # Otherwise refresh only the selected Run's detail/steps when it is still live.
+        if live and self.selected_project_run_id:
+            self._request(
+                ("project_run_v2_detail", self.selected_project_run_id),
+                f"/v1/project-runs/{self.selected_project_run_id}",
+            )
+            self._request(
+                ("project_run_v2_steps", self.selected_project_run_id),
+                f"/v1/project-runs/{self.selected_project_run_id}/steps",
+            )
 
     def _load_more_finished(self) -> None:
         if self.current_mode == "normal" and self.finished_cursor:
@@ -602,18 +1390,21 @@ class MainWindow(QMainWindow):
 
     def _finished_path(self, *, cursor: str | None = None) -> str:
         query: dict[str, str] = {"bucket": "finished", "limit": "50"}
-        if self.search.text().strip():
-            query["q"] = self.search.text().strip()
-        if self.result_filter.currentIndex():
-            query["result"] = self.result_filter.currentText().lower()
-        if self.agent_filter.currentIndex():
-            query["agent"] = self.agent_filter.currentText().lower()
-        if self.source_filter.currentIndex():
+        filters = self.runs_view.filters()
+        if filters["search"]:
+            query["q"] = filters["search"]
+            query["search_backend"] = "fts"
+            return "/v1/search/runs?" + urlencode({"q": filters["search"], "limit": "50"})
+        if filters["result"] != "All":
+            query["result"] = filters["result"].lower()
+        if filters["agent"] != "All":
+            query["agent"] = filters["agent"].lower()
+        if filters["source"] != "All":
             query["source"] = {"Command line": "cli", "GUI": "gui", "Hermes": "hermes", "Schedule": "schedule"}[
-                self.source_filter.currentText()
+                filters["source"]
             ]
         now = datetime.now().astimezone()
-        date_choice = self.date_filter.currentText()
+        date_choice = filters["date"]
         if date_choice != "Any time":
             days = {"Today": 0, "Last 7 days": 7, "Last 30 days": 30}[date_choice]
             start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
@@ -640,6 +1431,8 @@ class MainWindow(QMainWindow):
                 self._set_connection("disconnected", "Relay daemon is unavailable")
             elif isinstance(kind, tuple) and kind[0] == "schedule_preview":
                 kind[1].set_preview_error(str(error or "Invalid schedule"))
+            elif isinstance(kind, tuple) and kind[0] == "routine_preview":
+                kind[1].set_preview_error(str(error or "Invalid routine rule"))
             elif isinstance(kind, tuple) and kind[0] == "agent_app_manifest_test":
                 kind[1].set_test_result(
                     {"status": "failed", "error": str(error or "Agent test failed")},
@@ -649,6 +1442,8 @@ class MainWindow(QMainWindow):
             elif kind == "antigravity_activate":
                 message = (payload or {}).get("error_message") if isinstance(payload, dict) else None
                 self.settings_view.set_antigravity_error(message or str(error or "Activation failed"))
+            elif isinstance(kind, tuple) and kind[0] == "doctor":
+                self.settings_view.set_doctor_error(kind[1], str(error or "Deep doctor failed"))
             elif isinstance(kind, tuple) and kind[0] == "full_access":
                 self.settings_view.set_full_access_state(kind[1], bool(kind[2]))
                 message = (payload or {}).get("message") if isinstance(payload, dict) else None
@@ -657,21 +1452,70 @@ class MainWindow(QMainWindow):
             elif isinstance(kind, tuple) and kind[0] == "progress_check":
                 if self.progress_check_job_id == kind[1]:
                     self.progress_check_job_id = None
-                if self.selected_job_id == kind[1] and self.detail_view_mode == "job":
+                if self.selected_job_id == kind[1] and self._runs_detail_is_active():
                     self.job_detail_view.set_check_pending(False)
                     self.job_detail_view.select_check_results()
                     self.job_detail_view.set_content(
                         "Logs",
                         f"<pre>{escape('Check failed: ' + str(error or 'Progress diagnosis failed'))}</pre>",
                     )
-            elif isinstance(kind, tuple) and kind[0] == "job_input":
-                self._record_job_input_response(kind, payload if isinstance(payload, dict) else None, error or True)
+            elif isinstance(kind, tuple) and kind[0] == "task_run_files":
+                self._record_task_run_files(kind, payload if isinstance(payload, dict) else None, error or True)
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_node_detail":
+                project_run_id = str(kind[1] or "")
+                task_run_id = str(kind[2] or "")
+                if project_run_id == self.selected_project_run_id and task_run_id:
+                    self.project_runs_view.detail.cache_task_run_error(
+                        task_run_id, str(error or "Task Run detail is unavailable.")
+                    )
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_node_artifacts":
+                project_run_id = str(kind[1] or "")
+                node_id = str(kind[2] or "")
+                if project_run_id == self.selected_project_run_id and node_id:
+                    self.project_runs_view.detail.cache_node_artifact_error(
+                        node_id, str(error or "Artifact list is unavailable.")
+                    )
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_orchestrator":
+                project_run_id = str(kind[1] or "")
+                if project_run_id == self.selected_project_run_id:
+                    self.project_runs_view.detail.cache_orchestrator_error(
+                        str(error or "Orchestrator data is unavailable.")
+                    )
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_reviews":
+                project_run_id = str(kind[1] or "")
+                if project_run_id == self.selected_project_run_id:
+                    self.project_runs_view.set_run_reviews(project_run_id, [])
+            elif isinstance(kind, tuple) and kind[0] in {
+                "project_run_artifact_detail",
+                "project_run_artifact_content",
+            }:
+                project_run_id = str(kind[1] or "")
+                artifact_uid = str(kind[2] or "")
+                if project_run_id == self.selected_project_run_id and artifact_uid:
+                    self.project_runs_view.detail.artifacts_view.cache_artifact_error(
+                        artifact_uid, str(error or "Artifact preview is unavailable.")
+                    )
+            elif kind == "project_create" or (isinstance(kind, tuple) and kind[0] == "project_update"):
+                # The daemon returns a structured {"error_code", "error_message"} body
+                # even on a 4xx (see RelayDaemon.do_POST's except RelayError), so
+                # the real reason (e.g. "Task not found: <id>") is sitting in
+                # payload, not in Qt's generic reply.errorString(). Report it back
+                # into the still-open dialog rather than a one-line banner that
+                # loses every row the user typed.
+                message = (
+                    (payload or {}).get("error_message")
+                    or (payload or {}).get("error")
+                    or str(error)
+                    or ("Relay could not save this Project.")
+                )
+                if self.projects_view.editor is not None:
+                    self.projects_view.editor.report_save_error(str(message))
+                else:
+                    self.banner.setText(str(message))
+                    self.banner.show()
             else:
                 self.banner.setText("Relay could not complete that action. Please try again.")
                 self.banner.show()
-            return
-        if isinstance(kind, tuple) and kind[0] == "job_input":
-            self._record_job_input_response(kind, payload)
             return
         if kind == "health":
             self.health_check_request_id = None
@@ -684,17 +1528,22 @@ class MainWindow(QMainWindow):
                 supported_schema_revision=5,
             )
             self._set_connection(decision.mode, decision.reason, health=payload)
+            self.settings_view.set_worker_health(payload.get("worker_health"))
             if decision.mode == "normal":
                 self._request("agents", "/v1/agents")
                 self._request("autostart", "/v1/autostart")
                 self._request("agent_apps", "/v1/agent-apps")
                 self._refresh_active()
                 self._refresh_finished()
+                if self.active_section == "project_runs":
+                    self._refresh_project_runs(force=True)
             return
         if kind == "agents":
             self.agent_definitions = payload.get("agents", [])
-            self._update_agent_choices(self.agent_definitions)
             self._render_agent_apps()
+            self.tasks_view.set_available_workers(
+                [str(agent.get("agent_id")) for agent in self.agent_definitions if agent.get("agent_id")]
+            )
             return
         if kind in {"autostart", "autostart_prompt", "autostart_toggle"}:
             self.autostart_status = payload.get("autostart") or {}
@@ -733,6 +1582,18 @@ class MainWindow(QMainWindow):
             self.banner.setText("Antigravity was verified and enabled.")
             self.banner.show()
             return
+        if isinstance(kind, tuple) and kind[0] == "doctor":
+            worker = kind[1]
+            report = payload.get("doctor") or {}
+            self.settings_view.set_doctor_result(worker, report)
+            self._refresh_health()
+            self.banner.setText(
+                f"{worker.title()} deep doctor passed."
+                if report.get("ok")
+                else f"{worker.title()} deep doctor failed; inspect Settings for details."
+            )
+            self.banner.show()
+            return
         if kind == "agent_apps":
             self.custom_agent_apps = payload.get("agent_apps", [])
             self._render_agent_apps()
@@ -746,11 +1607,11 @@ class MainWindow(QMainWindow):
             self._open_agent_app_wizard(wizard)
             return
         if isinstance(kind, tuple) and kind[0] == "detail":
-            if self.detail_view_mode == "job" and self.selected_job_id == kind[1]:
+            if self._runs_detail_is_active() and self.selected_job_id == kind[1]:
                 self._show_detail(payload)
             return
         if isinstance(kind, tuple) and kind[0] == "result":
-            if self.detail_view_mode == "job" and self.selected_job_id == kind[1]:
+            if self._runs_detail_is_active() and self.selected_job_id == kind[1]:
                 self.job_detail_view.set_content("Result", self._format_payload(payload))
                 data = payload.get("data")
                 self.job_detail_view.set_answer(data.get("answer") if isinstance(data, dict) else None)
@@ -758,13 +1619,16 @@ class MainWindow(QMainWindow):
         if isinstance(kind, tuple) and kind[0] == "progress_check":
             if self.progress_check_job_id == kind[1]:
                 self.progress_check_job_id = None
-            if self.selected_job_id == kind[1] and self.detail_view_mode == "job":
+            if self.selected_job_id == kind[1] and self._runs_detail_is_active():
                 self.job_detail_view.set_check_pending(False)
                 self.job_detail_view.select_check_results()
                 self._request(("check_events", kind[1]), f"/v1/jobs/{kind[1]}/events")
             return
+        if kind == "lineage":
+            self.job_detail_view.set_content("Inputs", self._format_payload(payload.get("inputs", [])))
+            return
         if isinstance(kind, tuple) and kind[0] == "check_events":
-            if self.selected_job_id == kind[1] and self.detail_view_mode == "job":
+            if self.selected_job_id == kind[1] and self._runs_detail_is_active():
                 self._show_check_events(
                     payload.get("events", []),
                     pending=self.progress_check_job_id == kind[1],
@@ -791,13 +1655,13 @@ class MainWindow(QMainWindow):
         if kind == "schedule_detail":
             schedule = payload.get("schedule") or {}
             schedule_id = schedule.get("schedule_id")
-            if schedule_id and self.detail_view_mode == "schedule":
+            if schedule_id and self.selected_schedule_id == schedule_id:
                 self.schedules[schedule_id] = schedule
                 self._show_schedule_detail(schedule_id)
             return
         if kind == "schedule_runs":
             schedule_id = payload.get("schedule_id")
-            if schedule_id and self.detail_view_mode == "schedule":
+            if schedule_id and self.selected_schedule_id == schedule_id:
                 self.schedule_runs[schedule_id] = payload.get("runs", [])
                 self._show_schedule_detail(schedule_id)
             return
@@ -882,16 +1746,394 @@ class MainWindow(QMainWindow):
             self._render_schedules()
             self._refresh_schedule(schedule_id if action != "schedule_copy" else None)
             return
-        if kind in {"create", "cancel", "rerun"}:
-            job_id = payload.get("job_id")
+        if kind == "reviews":
+            reviews = [
+                item
+                for item in (payload.get("reviews") or [])
+                if str(item.get("status") or "") in {"pending_human", "needs_human", "delivery_failed"}
+            ]
+            self.reviews_index = {str(item.get("review_id")): item for item in reviews if item.get("review_id")}
+            self.reviews_view.set_reviews(reviews)
+            self.reviews_button.setText(f"Reviews ({len(reviews)})" if reviews else "Reviews")
+            return
+        if isinstance(kind, tuple) and kind[0] == "review_detail":
+            self.reviews_view.set_review(payload)
+            return
+        if isinstance(kind, tuple) and kind[0] == "review_action":
+            self.banner.setText(
+                "Review action completed." if payload.get("ok", True) else "Review action needs attention."
+            )
+            self.banner.show()
+            self._refresh_reviews()
+            return
+        if kind == "tasks":
+            tasks = payload.get("tasks", [])
+            self.tasks_index = {str(t.get("task_id")): t for t in tasks if t.get("task_id")}
+            self.tasks_view.set_tasks(tasks)
+            if self.selected_task_id and self.selected_task_id not in self.tasks_index:
+                self.selected_task_id = None
+            if self.selected_task_id and self.selected_task_id in self.tasks_index:
+                self.tasks_view.set_task(self.tasks_index[self.selected_task_id])
+            if self._pending_task_edit_id:
+                pending_id, self._pending_task_edit_id = self._pending_task_edit_id, None
+                if pending_id in self.tasks_index:
+                    self.selected_task_id = pending_id
+                    self.tasks_view.set_task(self.tasks_index[pending_id])
+                    self.tasks_view.show_edit_editor(pending_id)
+                else:
+                    self.banner.setText(f"Task {pending_id} was not found (it may have been deleted).")
+                    self.banner.show()
+                return
+            self.banner.setText(f"Registered Tasks refreshed · {len(tasks)} entries.")
+            self.banner.show()
+            return
+        if kind == "profiles":
+            self.profiles = list((payload or {}).get("profiles") or [])
+            self.profiles_view.set_profiles(self.profiles)
+            self.tasks_view.set_profiles(self.profiles)
+            return
+        if kind == "profile_create" or (isinstance(kind, tuple) and kind[0] in {"profile_update", "profile_delete"}):
+            self._request("profiles", "/v1/profiles")
+            return
+        if isinstance(kind, tuple) and kind[0] == "task_detail":
+            task = (payload or {}).get("task") or {}
+            task_id = str(task.get("task_id") or kind[1] or "")
+            if task_id and self.selected_task_id == task_id:
+                self.tasks_index[task_id] = task
+                self.tasks_view.set_task(task)
+            return
+        if isinstance(kind, tuple) and kind[0] == "task_runs":
+            task_id = str(kind[1] or "")
+            runs = (payload or {}).get("runs", [])
+            if task_id and self.selected_task_id == task_id:
+                self.tasks_view.set_runs(task_id, runs)
+            return
+        if kind == "task_create":
+            new_task = (payload or {}).get("task") or {}
+            task_id = str(new_task.get("task_id") or "")
+            if task_id:
+                self.selected_task_id = task_id
+                self.tasks_index[task_id] = new_task
+                self._request("tasks", "/v1/tasks")
+            return
+        if isinstance(kind, tuple) and kind[0] == "task_update":
+            task_id = str(kind[1] or "")
+            if task_id:
+                self.selected_task_id = task_id
+                updated_task = (payload or {}).get("task") or {}
+                if updated_task:
+                    self.tasks_index[task_id] = updated_task
+                self._request(("task_detail", task_id), f"/v1/tasks/{task_id}")
+            return
+        if isinstance(kind, tuple) and kind[0] == "task_delete":
+            task_id = str(kind[1] or "")
+            if task_id:
+                self.tasks_index.pop(task_id, None)
+                self.selected_task_id = None
+                self.tasks_view.detail.clear()
+                self._request("tasks", "/v1/tasks")
+            return
+        if isinstance(kind, tuple) and kind[0] == "task_run":
+            new_run = (payload or {}).get("run") or {}
+            job_id = new_run.get("task_run_id") or new_run.get("job_id") or new_run.get("run_id")
             if job_id:
+                job_id = str(job_id)
+                visible_run = dict(new_run)
+                visible_run.setdefault("job_id", job_id)
+                visible_run.setdefault("status", "QUEUED")
+                self.jobs[job_id] = visible_run
                 self.selected_job_id = job_id
-                self.detail_view_mode = "job"
+                self._render_jobs()
+                self._show_runs()
+            self._refresh_active()
+            self._refresh_finished()
+            self.banner.setText("Registered Task Run submitted.")
+            self.banner.show()
+            return
+        if kind == "projects":
+            projects = payload.get("projects", [])
+            self.projects_index = {str(p.get("project_id")): p for p in projects if p.get("project_id")}
+            self.projects_view.set_projects(projects)
+            if self.selected_project_id and self.selected_project_id not in self.projects_index:
+                self.selected_project_id = None
+            if self.selected_project_id and self.selected_project_id in self.projects_index:
+                self.projects_view.set_project(self.projects_index[self.selected_project_id])
+            self.banner.setText(f"Projects refreshed - {len(projects)} entries.")
+            self.banner.show()
+            return
+        if kind == "project_tasks":
+            tasks = (payload or {}).get("tasks", [])
+            self.tasks_index = {str(t.get("task_id")): t for t in tasks if t.get("task_id")}
+            self.projects_view.set_tasks(list(self.tasks_index.values()))
+            self.banner.setText(f"Project Tasks refreshed - {len(tasks)} entries.")
+            self.banner.show()
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_detail":
+            project = (payload or {}).get("project") or {}
+            project_id = str(project.get("project_id") or kind[1] or "")
+            if project_id and self.selected_project_id == project_id:
+                self.projects_index[project_id] = project
+                self.projects_view.set_project(project)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_runs":
+            project_id = str(kind[1] or "")
+            runs = (payload or {}).get("project_runs", [])
+            if project_id and self.selected_project_id == project_id:
+                self.projects_view.set_runs(project_id, runs)
+            return
+        if kind == "project_create":
+            new_project = (payload or {}).get("project") or {}
+            project_id = str(new_project.get("project_id") or "")
+            if project_id:
+                self.selected_project_id = project_id
+                self.projects_index[project_id] = new_project
+                self._request("projects", "/v1/projects")
+            if self.projects_view.editor is not None:
+                self.projects_view.editor.close_after_save()
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_update":
+            project_id = str(kind[1] or "")
+            updated = (payload or {}).get("project") or {}
+            if project_id and updated:
+                self.projects_index[project_id] = updated
+                self.selected_project_id = project_id
+            self._request("projects", "/v1/projects")
+            if self.projects_view.editor is not None:
+                self.projects_view.editor.close_after_save()
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_delete":
+            project_id = str(kind[1] or "")
+            if project_id:
+                self.projects_index.pop(project_id, None)
+                if self.selected_project_id == project_id:
+                    self.selected_project_id = None
+                    self.projects_view.detail.clear()
+                self._request("projects", "/v1/projects")
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_create":
+            run_payload = (payload or {}).get("project_run") or {}
+            project_run_id = (payload or {}).get("project_run_id") or str(run_payload.get("project_run_id") or "")
+            if project_run_id:
+                self.banner.setText(f"Project Run {project_run_id[:8]} accepted.")
+                self.banner.show()
+                self._request("projects", "/v1/projects")
+            return
+        if kind == "routines":
+            routines = payload.get("routines", [])
+            self.routines_index = {str(r.get("routine_id")): r for r in routines if r.get("routine_id")}
+            self.routines_view.set_routines(routines)
+            if self.selected_routine_id and self.selected_routine_id in self.routines_index:
+                self.routines_view.set_routine(self.routines_index[self.selected_routine_id])
+            elif self.selected_routine_id:
+                self.selected_routine_id = None
+                self.routines_view.detail.clear()
+            self.banner.setText(f"Routines refreshed · {len(routines)} entries.")
+            self.banner.show()
+            return
+        if kind == "routine_tasks":
+            tasks = payload.get("tasks", [])
+            self.routines_view.set_tasks(tasks)
+            return
+        if kind == "routine_projects":
+            self.routines_view.set_projects(payload.get("projects", []))
+            return
+        if isinstance(kind, tuple) and kind[0] == "routine_detail":
+            routine = (payload or {}).get("routine") or {}
+            routine_id = str(routine.get("routine_id") or kind[1] or "")
+            if routine_id and self.selected_routine_id == routine_id:
+                self.routines_index[routine_id] = routine
+                self.routines_view.set_routine(routine)
+            return
+        if isinstance(kind, tuple) and kind[0] == "routine_runs":
+            routine_id = str(kind[1] or "")
+            if routine_id and self.selected_routine_id == routine_id:
+                self.routines_view.set_runs(routine_id, (payload or {}).get("runs", []))
+            return
+        if isinstance(kind, tuple) and kind[0] == "routine_receipt":
+            routine_id = str(kind[1] or "")
+            if routine_id and self.selected_routine_id == routine_id:
+                self.routines_view.detail.set_receipt((payload or {}).get("receipt"))
+            return
+        if isinstance(kind, tuple) and kind[0] == "routine_preview":
+            kind[1].set_preview((payload or {}).get("items", []))
+            return
+        if kind == "routine_create":
+            routine = (payload or {}).get("routine") or {}
+            routine_id = str(routine.get("routine_id") or "")
+            if routine_id:
+                self.selected_routine_id = routine_id
+                self.routines_index[routine_id] = routine
+                self.routines_view.set_routine(routine)
+                self._refresh_routines()
+            return
+        if isinstance(kind, tuple) and kind[0] == "routine_update":
+            routine_id = str(kind[1] or "")
+            routine = (payload or {}).get("routine") or {}
+            if routine_id and routine:
+                self.routines_index[routine_id] = routine
+                self.selected_routine_id = routine_id
+                self.routines_view.set_routine(routine)
+            self._refresh_routines()
+            return
+        if isinstance(kind, tuple) and kind[0] == "routine_delete":
+            routine_id = str(kind[1] or "")
+            self.routines_index.pop(routine_id, None)
+            if self.selected_routine_id == routine_id:
+                self.selected_routine_id = None
+                self.routines_view.detail.clear()
+            self._refresh_routines()
+            return
+        if isinstance(kind, tuple) and kind[0] == "routine_run":
+            self.banner.setText("Routine run accepted.")
+            self.banner.show()
+            if self.selected_routine_id == str(kind[1]):
+                self._select_routine(str(kind[1]))
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_detail":
+            if self.project_run_dialog and self.project_run_dialog.project_run_id == str(kind[1]):
+                self.project_run_dialog.set_project_run((payload or {}).get("project_run") or {})
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_steps":
+            if self.project_run_dialog and self.project_run_dialog.project_run_id == str(kind[1]):
+                self.project_run_dialog.set_steps((payload or {}).get("steps", []))
+            return
+        if kind == "project_runs_list":
+            items = (payload or {}).get("items") or (payload or {}).get("project_runs") or []
+            self.project_run_cursor = (payload or {}).get("next_cursor")
+            self.project_runs_index = {
+                str(item.get("project_run_id")): dict(item) for item in items if item.get("project_run_id")
+            }
+            self.project_runs_view.set_runs(self.project_runs_index, selected_run_id=self.selected_project_run_id)
+            if self.selected_project_run_id and self.selected_project_run_id in self.project_runs_index:
+                self.project_runs_view.set_run_detail(
+                    self.selected_project_run_id,
+                    {
+                        "snapshot": (self.project_runs_index[self.selected_project_run_id] or {}).get("snapshot"),
+                        "steps": (self.project_runs_index[self.selected_project_run_id] or {}).get("steps"),
+                    },
+                )
+            self.project_run_last_tick_at = __import__("time").monotonic()
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_detail":
+            project_run_id = str(kind[1] or "")
+            run = (payload or {}).get("project_run") or {}
+            if project_run_id and project_run_id == self.selected_project_run_id:
+                stored = self.project_runs_index.setdefault(project_run_id, {})
+                stored.update(run)
+                self.project_runs_view.set_run_detail(
+                    project_run_id,
+                    {"snapshot": run.get("snapshot"), "steps": self.project_runs_index[project_run_id].get("steps")},
+                )
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_steps":
+            project_run_id = str(kind[1] or "")
+            steps = (payload or {}).get("steps") or []
+            if project_run_id and project_run_id == self.selected_project_run_id:
+                self.project_runs_view.set_run_steps(project_run_id, steps)
+                # Resolve inspector inputs/artifacts lazily once the steps row knows
+                # its active_task_run_id; receipts (delivered next) may amend these.
+                self._request_node_artifacts(project_run_id, steps)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_approvals":
+            project_run_id = str(kind[1] or "")
+            approvals = (payload or {}).get("approvals") or (payload or {}).get("items") or []
+            if project_run_id and project_run_id == self.selected_project_run_id:
+                self.project_runs_view.set_run_approvals(project_run_id, approvals)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_reviews":
+            project_run_id = str(kind[1] or "")
+            reviews = (payload or {}).get("reviews") or []
+            if project_run_id and project_run_id == self.selected_project_run_id:
+                self.project_runs_view.set_run_reviews(project_run_id, reviews)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_receipt":
+            project_run_id = str(kind[1] or "")
+            receipt = (payload or {}).get("receipt") or {}
+            if project_run_id and project_run_id == self.selected_project_run_id and receipt:
+                self.project_runs_view.detail.cache_receipt(receipt)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_orchestrator":
+            project_run_id = str(kind[1] or "")
+            if project_run_id and project_run_id == self.selected_project_run_id and isinstance(payload, dict):
+                self.project_runs_view.detail.cache_orchestrator(payload)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_node_detail":
+            project_run_id = str(kind[1] or "")
+            task_run_id = str(kind[2] or "")
+            response = payload if isinstance(payload, dict) else {}
+            detail = response.get("job") or response.get("task_run") or response
+            if project_run_id and task_run_id and project_run_id == self.selected_project_run_id:
+                self.project_runs_view.detail.cache_task_run_detail(task_run_id, detail)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_node_artifacts":
+            project_run_id = str(kind[1] or "")
+            node_id = str(kind[2] or "")
+            artifacts = (payload or {}).get("artifacts") or []
+            if project_run_id and node_id and project_run_id == self.selected_project_run_id:
+                self.project_runs_view.detail.cache_node_artifacts(node_id, artifacts)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_artifact_detail":
+            project_run_id = str(kind[1] or "")
+            artifact_uid = str(kind[2] or "")
+            artifact = (payload or {}).get("artifact") or payload or {}
+            if project_run_id == self.selected_project_run_id and artifact_uid and isinstance(artifact, dict):
+                view = self.project_runs_view.detail.artifacts_view
+                view.cache_artifact_detail(artifact_uid, artifact)
+                if _artifact_kind(artifact) not in {"image", "pdf", "unsupported"}:
+                    encoded_uid = quote(artifact_uid, safe="")
+                    self._request(
+                        ("project_run_artifact_content", project_run_id, artifact_uid),
+                        f"/v1/artifacts/{encoded_uid}/content?max_bytes=262144",
+                    )
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_artifact_content":
+            project_run_id = str(kind[1] or "")
+            artifact_uid = str(kind[2] or "")
+            if project_run_id == self.selected_project_run_id and artifact_uid:
+                self.project_runs_view.detail.artifacts_view.cache_artifact_content(
+                    artifact_uid, payload if isinstance(payload, dict) else {}
+                )
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_artifact":
+            artifact = (payload or {}).get("artifact") or {}
+            self._open_path(artifact.get("final_path") or artifact.get("artifact_path"), file_only=True)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_action":
+            subkind = kind[1][0] if isinstance(kind[1], tuple) else None
+            banner_msg = {
+                "project_run_cancel": "Project Run cancel requested.",
+                "project_run_retry": "Project Run retry requested.",
+                "project_run_reexec": "Partial re-execute requested.",
+                "project_run_approve": "Checkpoint approved.",
+                "project_run_reject": "Checkpoint rejected.",
+            }.get(subkind, "Project Run action queued.")
+            self.banner.setText(banner_msg)
+            self.banner.show()
+            if subkind in {
+                "project_run_cancel",
+                "project_run_retry",
+                "project_run_reexec",
+                "project_run_approve",
+                "project_run_reject",
+            }:
+                target_id = str(kind[1][1] if isinstance(kind[1], tuple) and len(kind[1]) > 1 else "")
+                if target_id and self.selected_project_run_id == target_id:
+                    self._refresh_project_runs()
+                    self._select_project_run(target_id)
+            return
+
+        if kind in {"cancel", "rerun"}:
+            job_id = payload.get("task_run_id") or payload.get("job_id")
+            if job_id:
+                job_id = str(job_id)
+                self.selected_job_id = job_id
+                self._show_runs()
                 self._request(("detail", job_id), f"/v1/jobs/{job_id}")
             self._refresh_active()
             self._refresh_finished()
-            if kind == "create":
-                self.new_task_view.clear()
+            return
+        if isinstance(kind, tuple) and kind[0] == "task_run_files":
+            self._record_task_run_files(kind, payload)
             return
         if kind == "finished":
             self._remove_statuses({"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"})
@@ -909,12 +2151,13 @@ class MainWindow(QMainWindow):
                     "CANCEL_REQUESTED",
                 }
             )
-        for job in payload.get("jobs", []):
-            if job.get("job_id"):
-                self.jobs[job["job_id"]] = job
+        for job in payload.get("jobs", payload.get("items", [])):
+            if job.get("task_run_id") or job.get("job_id") or job.get("run_id"):
+                job_id = job.get("task_run_id") or job.get("job_id") or job.get("run_id")
+                self.jobs[job_id] = job
         if kind in {"finished", "finished_more"}:
             self.finished_cursor = payload.get("next_cursor")
-            self.load_more.setEnabled(bool(payload.get("has_more")))
+            self.runs_view.load_more_button.setEnabled(bool(payload.get("has_more")))
         self._render_jobs()
         if kind in {"active", "finished"} and self.selected_job_id:
             self._request(
@@ -929,7 +2172,7 @@ class MainWindow(QMainWindow):
     def _set_connection(self, mode: str, reason: str | None = None, *, health: dict | None = None) -> None:
         self.current_mode = mode if mode in {"normal", "read-only"} else "disconnected"
         if mode == "checking":
-            self._set_health_badge("Health: Checking…", "#FEF3C7", "#92400E", reason)
+            self._set_health_badge("Health: Checking…", "checking", "", reason)
         elif mode == "normal":
             warning = self._health_warning(health)
             worker_health = (health or {}).get("worker_health") or {}
@@ -943,17 +2186,15 @@ class MainWindow(QMainWindow):
             badge_text = label if worker_health.get("status") == "unhealthy" or not warning else "Health: Attention"
             self._set_health_badge(
                 badge_text,
-                "#FEE2E2" if worker_health.get("status") == "unhealthy" else "#FEF3C7" if warning else "#DCFCE7",
-                "#991B1B" if worker_health.get("status") == "unhealthy" else "#92400E" if warning else "#166534",
+                "unhealthy" if worker_health.get("status") == "unhealthy" else "attention" if warning else "healthy",
+                "",
                 warning or self._health_tooltip(health),
             )
         elif mode == "read-only":
-            self._set_health_badge("Health: Compatibility warning", "#FEF3C7", "#92400E", reason)
+            self._set_health_badge("Health: Compatibility warning", "attention", "", reason)
         else:
-            self._set_health_badge("Health: Disconnected", "#FEE2E2", "#991B1B", reason)
-        self.new_task_button.setEnabled(mode == "normal")
-        self.new_task_view.create_button.setEnabled(mode == "normal")
-        self.new_task_view.set_job_file_lookup_enabled(mode == "normal")
+            self._set_health_badge("Health: Disconnected", "disconnected", "", reason)
+        self.register_task_button.setEnabled(mode == "normal")
         self.schedule_list.setEnabled(mode == "normal")
         self.settings_button.setEnabled(mode == "normal")
         if mode == "normal":
@@ -964,12 +2205,11 @@ class MainWindow(QMainWindow):
 
     def _set_health_badge(self, text: str, background: str, foreground: str, tooltip: str | None) -> None:
         self.daemon_label.setText(text)
-        self.daemon_label.setStyleSheet(
-            f"QLabel {{ background: {background}; color: {foreground}; "
-            "border: 1px solid rgba(0,0,0,0.12); border-radius: 10px; padding: 5px 11px; "
-            "font-size: 12px; font-weight: 800; }"
-        )
-        self.daemon_label.setToolTip(tooltip or text)
+        for widget in (self.daemon_label, self.health_dot):
+            widget.setProperty("tone", background)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.setToolTip(tooltip or text)
 
     @staticmethod
     def _health_warning(health: dict | None) -> str | None:
@@ -1006,96 +2246,12 @@ class MainWindow(QMainWindow):
         }
         self.settings_view.set_agent_apps(list(combined.values()))
 
-    def _update_agent_choices(self, agents: list[dict]) -> None:
-        current = self.new_task_view.worker_combo.currentText()
-        choices = [str(agent.get("agent_id")) for agent in agents if agent.get("agent_id")]
-        self.new_task_view.worker_combo.blockSignals(True)
-        self.new_task_view.worker_combo.clear()
-        self.new_task_view.worker_combo.addItem("auto")
-        self.new_task_view.worker_combo.addItems(choices)
-        self.new_task_view.worker_combo.setCurrentText(current if current in {"auto", *choices} else "auto")
-        self.new_task_view.worker_combo.blockSignals(False)
-
     def _render_jobs(self) -> None:
-        selected = self.job_list.currentItem().data(0, Qt.UserRole) if self.job_list.currentItem() else None
-        expanded = dict(self.job_tree_expanded)
-        for index in range(self.job_list.topLevelItemCount()):
-            group = self.job_list.topLevelItem(index)
-            state_key = group.data(0, Qt.UserRole + 1)
-            if state_key:
-                expanded[str(state_key)] = group.isExpanded()
-            for child_index in range(group.childCount()):
-                child = group.child(child_index)
-                state_key = child.data(0, Qt.UserRole + 1)
-                if state_key:
-                    expanded[str(state_key)] = child.isExpanded()
-        self.job_tree_expanded = expanded
-        self.job_list.clear()
-        groups = (
-            ("Waiting", {"CREATED", "QUEUED"}, "created_at"),
-            ("Running", {"PREPARING", "RUNNING", "VALIDATING", "DELIVERING", "CANCEL_REQUESTED"}, "started_at"),
-            ("Finished", {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}, "completed_at"),
+        self.runs_view.set_runs(
+            self.jobs,
+            selected_run_id=self.selected_job_id,
+            has_more=bool(self.finished_cursor),
         )
-        for group_name, statuses, date_key in groups:
-            rows = [job for job in self.jobs.values() if job.get("status") in statuses]
-            if group_name == "Finished":
-                rows = [job for job in rows if self._matches_finished_filters(job)]
-            rows.sort(key=lambda job: job.get(date_key) or job.get("created_at") or "", reverse=True)
-            if not rows:
-                continue
-            group_key = f"group:{group_name}"
-            header = QTreeWidgetItem([f"{group_name} · {len(rows)}", ""])
-            header.setData(0, Qt.UserRole + 1, group_key)
-            header.setFlags(Qt.ItemIsEnabled)
-            self.job_list.addTopLevelItem(header)
-            date_groups = {"All": rows}
-            if group_name == "Finished":
-                date_groups = {}
-                for job in rows:
-                    date_groups.setdefault(self._local_date(job.get(date_key) or job.get("created_at")), []).append(job)
-            for date_name, date_rows in date_groups.items():
-                if group_name == "Finished":
-                    date_key = f"date:{group_name}:{date_name}"
-                    date_item = QTreeWidgetItem([f"{date_name} · {len(date_rows)}", ""])
-                    date_item.setData(0, Qt.UserRole + 1, date_key)
-                    date_item.setFlags(Qt.ItemIsEnabled)
-                    header.addChild(date_item)
-                for job in date_rows:
-                    title = job.get("title") or job.get("job_id", "Job")[:8]
-                    status = str(job.get("status") or "UNKNOWN")
-                    status_text = {
-                        "COMPLETED": "Okay",
-                        "PARTIAL": "Partial",
-                        "FAILED": "Fail",
-                        "CANCELLED": "Cancelled",
-                        "QUEUED": "Queued",
-                    }.get(status, status.title())
-                    item = QTreeWidgetItem([str(title), status_text])
-                    item.setData(0, Qt.UserRole, job.get("job_id"))
-                    item.setToolTip(0, job.get("task_preview") or job.get("job_id", ""))
-                    item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-                    colors = {
-                        "COMPLETED": ("#166534", "#F0FDF4"),
-                        "PARTIAL": ("#92400E", "#FFFBEB"),
-                        "FAILED": ("#991B1B", "#FEF2F2"),
-                        "CANCELLED": ("#475569", "#F8FAFC"),
-                    }
-                    if status in colors:
-                        foreground, background = colors[status]
-                        for column in range(2):
-                            item.setForeground(column, QColor(foreground))
-                            item.setBackground(column, QColor(background))
-                    (date_item if group_name == "Finished" else header).addChild(item)
-                    if job.get("job_id") == selected:
-                        self.job_list.setCurrentItem(item)
-                if group_name == "Finished":
-                    date_item.setExpanded(expanded.get(date_key, True))
-            header.setExpanded(expanded.get(group_key, True))
-
-    def _remember_job_tree_state(self, item: QTreeWidgetItem, expanded: bool) -> None:
-        state_key = item.data(0, Qt.UserRole + 1)
-        if state_key:
-            self.job_tree_expanded[str(state_key)] = expanded
 
     def _render_schedules(self) -> None:
         selected = self.schedule_list.currentItem().data(Qt.UserRole) if self.schedule_list.currentItem() else None
@@ -1116,12 +2272,15 @@ class MainWindow(QMainWindow):
             self.schedule_list.addItem(item)
             if schedule.get("schedule_id") == selected:
                 self.schedule_list.setCurrentItem(item)
+        has_schedules = bool(rows)
+        self.schedules_header.setVisible(has_schedules)
+        self.schedule_list.setVisible(has_schedules)
 
     def _select_schedule(self, item: QListWidgetItem) -> None:
         schedule_id = item.data(Qt.UserRole)
         if schedule_id:
             self.selected_schedule_id = str(schedule_id)
-            self.detail_view_mode = "schedule"
+            self._activate_navigation("runs")
             self._refresh_schedule(self.selected_schedule_id)
 
     def _refresh_schedule(self, schedule_id: str | None) -> None:
@@ -1135,70 +2294,30 @@ class MainWindow(QMainWindow):
         if not schedule:
             return
         self.selected_schedule_id = schedule_id
-        self.detail_view_mode = "schedule"
+        self._activate_navigation("runs")
         self.schedule_detail_view.set_schedule(schedule, self.schedule_runs.get(schedule_id, []))
         self.detail_stack.setCurrentWidget(self.schedule_detail_view)
 
-    @staticmethod
-    def _local_date(value: str | None) -> str:
-        if not value:
-            return "Unknown date"
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%b %d, %Y")
-        except ValueError:
-            return value[:10]
-
-    def _matches_finished_filters(self, job: dict) -> bool:
-        query = self.search.text().strip().casefold()
-        haystack = " ".join(
-            str(job.get(key) or "") for key in ("title", "task_preview", "job_id", "requested_worker", "actual_worker")
-        )
-        if query and job.get("task_preview") and query not in haystack.casefold():
-            return False
-        result = self.result_filter.currentText()
-        if result != "All" and job.get("status", "").casefold() != result.casefold():
-            return False
-        agent = self.agent_filter.currentText()
-        if agent != "All" and agent.casefold() not in {
-            str(job.get("requested_worker") or "").casefold(),
-            str(job.get("actual_worker") or "").casefold(),
-        }:
-            return False
-        source = self.source_filter.currentText()
-        source_value = {"Command line": "cli", "GUI": "gui", "Hermes": "hermes", "Schedule": "schedule"}.get(
-            source, source.casefold()
-        )
-        if source != "All" and job.get("submitted_via", "").casefold() != source_value:
-            return False
-        return True
-
-    @staticmethod
-    def _status_icon(status: str | None) -> str:
-        return {"COMPLETED": "✓", "PARTIAL": "◐", "FAILED": "×", "CANCELLED": "—"}.get(status or "", "●")
-
-    def _select_item(self, item: QTreeWidgetItem, _column: int = 0) -> None:
-        job_id = item.data(0, Qt.UserRole)
-        if not job_id:
-            return
+    def _select_run(self, job_id: str) -> None:
         self.selected_job_id = job_id
-        self.detail_view_mode = "job"
+        self.runs_view.select_run(job_id)
         self._show_detail(self.jobs.get(job_id, {}))
         if self.current_mode == "normal":
             self._request(("detail", job_id), f"/v1/jobs/{job_id}")
 
     def _show_detail(self, job: dict) -> None:
         if not job or not job.get("job_id"):
-            self.detail_view_mode = "empty"
-            self.detail_stack.setCurrentWidget(self.empty_detail)
             return
+        self.selected_job_id = str(job["job_id"])
         if self.progress_check_job_id and self.progress_check_job_id != job.get("job_id"):
             self.progress_check_job_id = None
-        self.detail_view_mode = "job"
+        self._activate_navigation("runs")
         self.current_detail = job
         self.log_attempt_id = None
         self.log_offset = None
         self.job_detail_view.set_job(job)
-        self.detail_stack.setCurrentWidget(self.job_detail_view)
+        self.runs_view.select_run(self.selected_job_id)
+        self.detail_stack.setCurrentWidget(self.runs_view)
 
     def _detail_tab_requested(self, tab_name: str) -> None:
         if self.current_mode != "normal" or not self.current_detail:
@@ -1209,7 +2328,11 @@ class MainWindow(QMainWindow):
         if tab_name in {"Answer", "Result"}:
             self._request(("result", job_id), f"/v1/jobs/{job_id}/result")
             return
-        paths = {"Files": ("artifacts", "artifacts"), "Events": ("events", "events")}
+        paths = {
+            "Files": ("artifacts", "artifacts"),
+            "Events": ("events", "events"),
+            "Inputs": ("lineage", "lineage"),
+        }
         if tab_name in paths:
             kind, path = paths[tab_name]
             self._request(kind, f"/v1/jobs/{job_id}/{path}")
@@ -1304,7 +2427,7 @@ class MainWindow(QMainWindow):
             records.append("\n".join(line for line in lines if line))
         if pending:
             records.append("[Checking…] Relay is inspecting the current process, activity, and logs.")
-        text = "\n\n".join(records) if records else "No progress checks have been recorded for this Job."
+        text = "\n\n".join(records) if records else "No progress checks have been recorded for this Task Run."
         self.job_detail_view.set_content("Logs", f"<pre>{escape(text)}</pre>")
 
     @staticmethod

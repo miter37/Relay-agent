@@ -7,6 +7,7 @@
 - Keep CLI, daemon API, GUI, and Schedules on one Agent registry and compatibility contract.
 - Require deep capability verification before an Agent can execute enabled work.
 - Behave consistently on Windows, Linux, and macOS.
+- Make optional result review feel like a natural final stage: inspect the current candidate, confirm publication, or give feedback for a bounded rerun.
 
 ## Constraints
 
@@ -14,6 +15,7 @@
 - Relay workspaces reduce collisions but are not an OS security sandbox.
 - Unattended execution requires operator-managed account isolation and explicit acknowledgement.
 - Real built-in provider CLIs are field-validated on Windows; Linux/macOS CI uses mocks.
+- Unconfirmed result candidates stay outside general Catalog/Search/Artifact reuse until a human or configured Project Orchestrator confirms them.
 
 ## Non-goals
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from typing import Any
 
 from .adapters import get_adapter
@@ -148,17 +149,46 @@ Do not ask questions. Do not wait for user input.
                 raise RelayError(outcome.failure_code, f"Probe ended with {outcome.failure_code}")
             if outcome.exit_code != 0:
                 stderr = outcome.stderr_path.read_text(encoding="utf-8", errors="replace")
-                code, _ = adapter.classify_failure(outcome.exit_code, stderr)
+                stdout = outcome.stdout_path.read_text(encoding="utf-8", errors="replace")
+                code, _ = adapter.classify_failure(outcome.exit_code, f"{stdout}\n{stderr}")
                 raise RelayError(code, f"Probe exited with code {outcome.exit_code}")
             adapter.normalize_output(ctx, outcome.stdout_path, outcome.stderr_path)
             value = validate_json_result(result_file, 5 * 1024 * 1024)
             materialize_artifact_payloads(value, artifact_dir, 10, 10 * 1024 * 1024)
             artifacts = scan_artifacts(artifact_dir, 10, 10 * 1024 * 1024)
+
+            def _artifact_text(item: dict[str, Any]) -> str | None:
+                rel = str(item.get("relative_path") or "").replace("\\", "/").lstrip("./")
+                candidates = [
+                    artifact_dir / rel,
+                    artifact_dir / Path(rel).name,
+                    artifact_dir / "probe-artifact.txt",
+                ]
+                for path in candidates:
+                    try:
+                        if path.is_file():
+                            return path.read_text(encoding="utf-8").strip()
+                    except OSError:
+                        continue
+                return None
+
             artifact_ok = any(
-                item["relative_path"] == "probe-artifact.txt"
-                and (artifact_dir / item["relative_path"]).read_text(encoding="utf-8").strip() == "RELAY_ARTIFACT_OK"
+                (
+                    str(item.get("relative_path") or "").replace("\\", "/").endswith("probe-artifact.txt")
+                    or Path(str(item.get("relative_path") or "")).name == "probe-artifact.txt"
+                )
+                and _artifact_text(item) == "RELAY_ARTIFACT_OK"
                 for item in artifacts
             )
+            if not artifact_ok:
+                # Accept a materialised probe artifact even when the JSON relative_path was nested.
+                probe_path = artifact_dir / "probe-artifact.txt"
+                try:
+                    artifact_ok = (
+                        probe_path.is_file() and probe_path.read_text(encoding="utf-8").strip() == "RELAY_ARTIFACT_OK"
+                    )
+                except OSError:
+                    artifact_ok = False
             output_ok = value.get("answer") == "RELAY_UNATTENDED_OK"
             unattended_ok = not outcome.interactive_prompt_detected and not outcome.stalled
             deep_ok = output_ok and artifact_ok and unattended_ok

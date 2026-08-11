@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from . import __version__
 from .adapters.generic import (
@@ -22,9 +23,39 @@ from .doctor import Doctor
 from .engine import RelayEngine
 from .errors import RelayError
 from .models import JobRequest
+from .profiles import BUILTIN_PROFILES
 from .rpc import RPCClient
 from .security import security_posture, set_full_access_mode
 from .util import entrypoint_command, utc_now
+
+_PROFILE_HELP = (
+    "Execution profile. Built-in: " + ", ".join(p["profile_id"] for p in BUILTIN_PROFILES) + ". "
+    "Custom profiles registered in this installation are also accepted; "
+    "run 'relay config show --machine' to list them."
+)
+_INPUT_SCHEMA_HELP = (
+    "JSON Schema (object) describing the values this Task accepts at run time, "
+    "supplied later through 'relay task run --inputs-json'."
+)
+
+
+def _read_input_schema(inline: str | None, path: str | None) -> str | None:
+    """Return a validated JSON Schema string from --input-schema/--input-schema-file."""
+    from .task_inputs import parse_schema
+
+    if inline and path:
+        raise RelayError("INVALID_REQUEST", "Use either --input-schema or --input-schema-file, not both.")
+    raw = inline
+    if path:
+        raw = Path(path).read_text(encoding="utf-8")
+    if raw is None:
+        return None
+    try:
+        parsed = parse_schema(raw)
+    except ValueError as exc:
+        raise RelayError("INPUT_SCHEMA_INVALID", str(exc)) from exc
+    return json.dumps(parsed, ensure_ascii=False)
+
 
 COMMANDS = {
     "run",
@@ -49,12 +80,35 @@ COMMANDS = {
     "add-agent",
     "agent-app",
     "schedule",
+    "search",
+    "artifact",
+    "run-lineage",
+    "task",
+    "approval",
+    "review",
+    "compare",
+    "project",
+    "project-run",
+    "routine",
+    "quality",
+    "search-semantic",
+    "attention",
+    "operations",
+    "notify",
+    "export",
+    "import",
+    "receipt-schema",
+    "catalog",
 }
 
 
 def _preprocess(argv: list[str]) -> list[str]:
     if not argv:
         return argv
+    if len(argv) >= 2 and argv[0] == "run" and argv[1] == "save-as-task":
+        return ["task", "save-as-task", *argv[2:]]
+    if len(argv) >= 2 and argv[0] == "search" and argv[1] == "semantic":
+        return ["search-semantic", *argv[2:]]
     if argv[0] not in COMMANDS and not argv[0].startswith("-"):
         return ["run", *argv]
     return argv
@@ -62,7 +116,7 @@ def _preprocess(argv: list[str]) -> list[str]:
 
 def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = False) -> None:
     parser.add_argument("task", nargs=None if task_required else "?", default="")
-    parser.add_argument("--title", help="Optional short title shown in job history")
+    parser.add_argument("--title", help="Optional short title shown in Task Run history")
     parser.add_argument("--task-file")
     parser.add_argument("--worker", default="auto", help="Agent ID from the built-in or custom Agent registry")
     parser.add_argument("--fallback", action="store_true", default=None)
@@ -71,11 +125,23 @@ def _add_request_args(parser: argparse.ArgumentParser, task_required: bool = Fal
     parser.add_argument("--format", dest="result_format", choices=["json", "txt"])
     parser.add_argument("--out", dest="output_path")
     parser.add_argument("--artifacts", dest="artifact_path")
-    parser.add_argument("--profile")
+    parser.add_argument("--profile", help=_PROFILE_HELP)
     parser.add_argument("--timeout", dest="timeout_seconds", type=int)
     parser.add_argument("--caller", default="human")
     parser.add_argument("--request-id")
+    parser.add_argument(
+        "--inputs-json",
+        help="Optional JSON object passed to a registered Task Run",
+    )
     parser.add_argument("--attach", action="append", default=[], dest="attachments")
+    parser.add_argument(
+        "--input-artifact",
+        action="append",
+        default=[],
+        dest="artifact_inputs",
+        metavar="UID[=ALIAS]",
+        help="Use a delivered Artifact by UID, optionally assigning an alias such as A1.",
+    )
     parser.add_argument("--workspace")
     parser.add_argument(
         "--target",
@@ -126,12 +192,12 @@ def _add_schedule_parsers(sub: argparse._SubParsersAction) -> None:
         "schedule",
         help="Create and control daemon-managed schedules",
         description=(
-            "Register a replayable completed Job as a timezone-aware Schedule, preview occurrences, "
+            "Register a replayable completed Task Run as a timezone-aware Schedule, preview occurrences, "
             "and control its lifecycle. Schedule execution is performed by the local daemon."
         ),
         epilog=(
             "Examples:\n"
-            "  relay schedule create --from-job JOB_ID --name report --type daily --time 09:00 --timezone Asia/Seoul\n"
+            "  relay schedule create --from-task-run TASK_RUN_ID --name report --type daily --time 09:00 --timezone Asia/Seoul\n"
             "  relay schedule preview --type weekly --weekday 1 --time 09:00 --timezone Asia/Seoul\n"
             "  relay schedule run-now SCHEDULE_ID"
         ),
@@ -139,8 +205,10 @@ def _add_schedule_parsers(sub: argparse._SubParsersAction) -> None:
     )
     schedule_sub = schedule.add_subparsers(dest="schedule_command", required=True)
 
-    create = schedule_sub.add_parser("create", help="Create a Schedule from a completed replayable Job")
-    create.add_argument("--from-job", dest="source_job_id", required=True)
+    create = schedule_sub.add_parser("create", help="Create a Schedule from a completed replayable Task Run")
+    source = create.add_mutually_exclusive_group(required=True)
+    source.add_argument("--from-task-run", dest="source_job_id", metavar="TASK_RUN_ID")
+    source.add_argument("--from-job", dest="source_job_id", metavar="JOB_ID", help=argparse.SUPPRESS)
     create.add_argument("--name", required=True)
     _add_schedule_rule_args(create)
     _add_schedule_policy_args(create)
@@ -166,6 +234,992 @@ def _add_schedule_parsers(sub: argparse._SubParsersAction) -> None:
         action = schedule_sub.add_parser(name, help=help_text)
         action.add_argument("schedule_id")
         _add_schedule_machine_arg(action)
+
+
+def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
+    task = sub.add_parser(
+        "task",
+        help="Create and manage reusable Tasks",
+        description="Define reusable Tasks, list registered Tasks, update Task definitions, and run stored Tasks.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+
+    create = task_sub.add_parser("create", help="Create a reusable Task")
+    create.add_argument("--name", required=True)
+    create.add_argument("--instructions", default="")
+    create.add_argument("--task-file")
+    create.add_argument("--worker", default="auto")
+    create.add_argument("--model", help="Model pinned for this Task's dispatches; omit to use the worker's own default")
+    fallback = create.add_mutually_exclusive_group()
+    fallback.add_argument("--fallback", action="store_true", default=None)
+    fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
+    create.add_argument("--timeout", type=int)
+    create.add_argument("--profile", default="evidence-research", help=_PROFILE_HELP)
+    create.add_argument("--format", default="json", choices=["json", "txt"])
+    create.add_argument("--description")
+    create.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
+    create.add_argument("--input-schema", help=_INPUT_SCHEMA_HELP)
+    create.add_argument("--input-schema-file", help="Path to a UTF-8 file containing the input JSON Schema")
+    create.add_argument("--machine", action="store_true")
+
+    list_p = task_sub.add_parser("list", help="List registered Tasks")
+    list_p.add_argument("--name")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = task_sub.add_parser("show", help="Show a Task definition")
+    show_p.add_argument("task_id")
+    show_p.add_argument("--machine", action="store_true")
+
+    update = task_sub.add_parser("update", help="Update a Task definition")
+    update.add_argument("task_id")
+    update.add_argument("--name")
+    update.add_argument("--instructions")
+    update.add_argument("--task-file")
+    update.add_argument("--worker")
+    update.add_argument("--model")
+    up_fallback = update.add_mutually_exclusive_group()
+    up_fallback.add_argument("--fallback", action="store_true", default=None)
+    up_fallback.add_argument("--no-fallback", action="store_false", dest="fallback")
+    update.add_argument("--timeout", type=int)
+    update.add_argument("--profile", help=_PROFILE_HELP)
+    update.add_argument("--format", choices=["json", "txt"])
+    update.add_argument("--description")
+    update.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
+    update.add_argument("--input-schema", help=_INPUT_SCHEMA_HELP)
+    update.add_argument("--input-schema-file", help="Path to a UTF-8 file containing the input JSON Schema")
+    update.add_argument("--machine", action="store_true")
+
+    delete_p = task_sub.add_parser("delete", help="Delete a Task definition")
+    delete_p.add_argument("task_id")
+    delete_p.add_argument("--machine", action="store_true")
+
+    run_p = task_sub.add_parser("run", help="Run a stored Task")
+    run_p.add_argument("task_id")
+    _add_request_args(run_p, task_required=False)
+
+    runs_p = task_sub.add_parser("runs", help="List Task Run history for a Task")
+    runs_p.add_argument("task_id")
+    runs_p.add_argument("--limit", type=int, default=50)
+    runs_p.add_argument("--machine", action="store_true")
+
+    sat = task_sub.add_parser("save-as-task", help="Promote a Task Run into a stored Task")
+    sat.add_argument("job_id", metavar="TASK_RUN_ID")
+    sat.add_argument("--name", required=True)
+    sat.add_argument("--description")
+    sat.add_argument("--machine", action="store_true")
+
+
+def _task_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.task_command
+    if cmd == "create":
+        instructions = args.instructions
+        if args.task_file:
+            instructions = Path(args.task_file).read_text(encoding="utf-8")
+        payload = {
+            "name": args.name,
+            "instructions": instructions,
+            "description": args.description,
+            "task_summary": args.task_summary,
+            "worker": args.worker,
+            "model": args.model,
+            "fallback_enabled": args.fallback if args.fallback is not None else True,
+            "timeout_seconds": args.timeout,
+            "profile": args.profile,
+            "result_format": args.format,
+        }
+        input_schema = _read_input_schema(args.input_schema, args.input_schema_file)
+        if input_schema is not None:
+            payload["input_schema"] = input_schema
+        return client.request("POST", "/v1/tasks", payload)
+    if cmd == "list":
+        path = "/v1/tasks"
+        if args.name:
+            path += f"?name={args.name}"
+        return client.request("GET", path)
+    if cmd == "show":
+        return client.request("GET", f"/v1/tasks/{args.task_id}")
+    if cmd == "update":
+        instructions = args.instructions
+        if args.task_file:
+            instructions = Path(args.task_file).read_text(encoding="utf-8")
+        payload = {}
+        if args.name:
+            payload["name"] = args.name
+        if instructions:
+            payload["instructions"] = instructions
+        if args.description is not None:
+            payload["description"] = args.description
+        if args.task_summary is not None:
+            payload["task_summary"] = args.task_summary
+        if args.worker:
+            payload["default_worker"] = args.worker
+        if args.model:
+            payload["default_model"] = args.model
+        if args.fallback is not None:
+            payload["fallback_enabled"] = args.fallback
+        if args.timeout is not None:
+            payload["timeout_seconds"] = args.timeout
+        if args.profile:
+            payload["profile"] = args.profile
+        if args.format:
+            payload["result_format"] = args.format
+        input_schema = _read_input_schema(args.input_schema, args.input_schema_file)
+        if input_schema is not None:
+            payload["input_schema"] = input_schema
+        return client.request("POST", f"/v1/tasks/{args.task_id}", payload)
+    if cmd == "delete":
+        return client.request("DELETE", f"/v1/tasks/{args.task_id}")
+    if cmd == "run":
+        request = _request_from_args(args, config)
+        payload = {"queued": False, "submitted_via": "cli", "request": request.to_dict()}
+        return client.request("POST", f"/v1/tasks/{args.task_id}/run", payload)
+    if cmd == "runs":
+        return client.request("GET", f"/v1/tasks/{args.task_id}/runs?limit={args.limit}")
+    if cmd == "save-as-task":
+        payload = {"run_id": args.job_id, "name": args.name, "description": args.description}
+        return client.request("POST", "/v1/runs/save-as-task", payload)
+    raise RelayError("INVALID_REQUEST", f"Unknown task command: {cmd}")
+
+
+def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
+    project = sub.add_parser(
+        "project",
+        help="Create and manage Projects that connect multiple Tasks",
+        description="Define Projects that link Task definitions through explicit Artifact bindings.",
+    )
+    proj_sub = project.add_subparsers(dest="project_command", required=True)
+
+    create = proj_sub.add_parser(
+        "create",
+        help="Create a Project from a definition file or inline JSON",
+        description=(
+            "Create a Project. Run 'relay project schema --machine' for the definition "
+            "schema and the binding rules the definition must satisfy."
+        ),
+    )
+    create.add_argument("--file", help="Path to a UTF-8 JSON file with the Project definition")
+    create.add_argument("--name", help="Name used when --file is omitted")
+    create.add_argument("--json", help="Inline JSON string (alternative to --file)")
+    create.add_argument("--machine", action="store_true")
+
+    schema_p = proj_sub.add_parser(
+        "schema",
+        help="Print the Project definition schema and binding rules",
+        description="Emit the JSON Schema for a Project definition plus the rules the engine enforces at run time.",
+    )
+    schema_p.add_argument("--machine", action="store_true")
+
+    list_p = proj_sub.add_parser("list", help="List registered Projects")
+    list_p.add_argument("--name")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = proj_sub.add_parser("show", help="Show a Project definition")
+    show_p.add_argument("project_id")
+    show_p.add_argument("--machine", action="store_true")
+
+    update = proj_sub.add_parser("update", help="Update a Project definition")
+    update.add_argument("project_id")
+    update.add_argument("--file")
+    update.add_argument("--json")
+    update.add_argument("--machine", action="store_true")
+
+    review_config = proj_sub.add_parser(
+        "review-config",
+        help="Configure or disable result review for one Project node",
+        description=(
+            "Update one node's optional result review gate without rewriting the full Project JSON. "
+            "Use --reviewer orchestrator with --guidelines to let the Orchestrator evaluate the result."
+        ),
+    )
+    review_config.add_argument("project_id")
+    review_config.add_argument("--node", required=True, help="Project node_id whose result should be reviewed")
+    review_config.add_argument("--disable", action="store_true", help="Disable the review gate and keep its settings")
+    review_config.add_argument("--reviewer", choices=["human", "orchestrator"])
+    review_config.add_argument("--guidelines", help="Orchestrator review criteria and evaluation instructions")
+    review_config.add_argument("--guidelines-file", help="Read Orchestrator review criteria from a UTF-8 text file")
+    review_config.add_argument("--max-reruns", type=int, help="Maximum automatic reruns for Orchestrator review (0-20)")
+    review_config.add_argument("--machine", action="store_true")
+
+    delete_p = proj_sub.add_parser("delete", help="Soft-delete a Project")
+    delete_p.add_argument("project_id")
+    delete_p.add_argument("--machine", action="store_true")
+
+    run_p = proj_sub.add_parser("run", help="Execute a Project")
+    run_p.add_argument("project_id")
+    run_p.add_argument(
+        "--input", action="append", default=[], help="External input binding node:alias=ARTIFACT_UID (repeatable)"
+    )
+    run_p.add_argument("--machine", action="store_true")
+
+    runs_p = proj_sub.add_parser("runs", help="List Project Runs")
+    runs_p.add_argument("project_id")
+    runs_p.add_argument("--limit", type=int, default=50)
+    runs_p.add_argument("--machine", action="store_true")
+
+    orch_show = proj_sub.add_parser("orchestrator-show", help="Show a Project's Orchestrator configuration")
+    orch_show.add_argument("project_id")
+    orch_show.add_argument("--machine", action="store_true")
+
+    orch_set = proj_sub.add_parser(
+        "orchestrator-set",
+        help="Enable/configure or disable a Project's Orchestrator",
+        description=(
+            "Attaches an optional Orchestrator to the Project: on failure it narrates progress, repairs "
+            "within a bounded budget (retry, worker swap, connection/output role rebind, an append-only "
+            "instruction addendum), and reports the cause when it cannot. Its authority is a strict subset "
+            "of what a human already does through this CLI/GUI and never leaves the Run; the registered "
+            "Project/Task definitions are never mutated."
+        ),
+    )
+    orch_set.add_argument("project_id")
+    orch_set.add_argument("--enabled", choices=["true", "false"], required=True)
+    orch_set.add_argument("--worker", help="Worker used for the Orchestrator's own reasoning Task Runs")
+    orch_set.add_argument("--model", help="Model for the Orchestrator's own reasoning Task Runs")
+    orch_set.add_argument("--profile")
+    orch_set.add_argument("--max-repair-attempts-per-node", type=int)
+    orch_set.add_argument("--max-repair-attempts-per-run", type=int)
+    orch_set.add_argument("--max-llm-calls-per-run", type=int)
+    orch_set.add_argument("--machine", action="store_true")
+
+
+def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
+    reexec = run_sub.add_parser("reexecute", help="Partially re-execute from a node")
+    reexec.add_argument("project_run_id")
+    reexec.add_argument("--from-node", required=True)
+    reexec.add_argument("--no-cascade", action="store_false", dest="cascade")
+    reexec.add_argument("--worker")
+    reexec.add_argument(
+        "--comment",
+        help=(
+            "Free-text note appended to this node's Task instructions for this attempt only; "
+            "the registered Task definition is never modified."
+        ),
+    )
+    reexec.add_argument("--machine", action="store_true")
+    show = run_sub.add_parser("show", help="Show a Project Run")
+    show.add_argument("project_run_id")
+    show.add_argument("--machine", action="store_true")
+
+    steps = run_sub.add_parser("steps", help="List Project Run steps")
+    steps.add_argument("project_run_id")
+    steps.add_argument("--machine", action="store_true")
+
+    reviews = run_sub.add_parser("reviews", help="List result reviews for a Project Run")
+    reviews.add_argument("project_run_id")
+    reviews.add_argument("--machine", action="store_true")
+
+    receipt = run_sub.add_parser("receipt", help="Show the Project Run receipt")
+    receipt.add_argument("project_run_id")
+    receipt.add_argument("--machine", action="store_true")
+
+    retry = run_sub.add_parser("retry", help="Retry a failed Project step or from a node")
+    retry.add_argument("project_run_id")
+    retry.add_argument("--from-node")
+    retry.add_argument("--worker")
+    retry.add_argument("--machine", action="store_true")
+
+    cancel = run_sub.add_parser("cancel", help="Cancel a running Project Run")
+    cancel.add_argument("project_run_id")
+    cancel.add_argument("--machine", action="store_true")
+
+    orchestrator = run_sub.add_parser(
+        "orchestrator", help="Show this Project Run's Orchestrator event stream and budget"
+    )
+    orchestrator.add_argument("project_run_id")
+    orchestrator.add_argument("--machine", action="store_true")
+
+
+def _project_cli_request(args, config: Config) -> Any:
+    cmd = args.project_command
+    if cmd == "schema":
+        # Static contract: answerable without a daemon so a caller can read it
+        # before anything is running.
+        from .projects.models import PROJECT_DEFINITION_RULES, PROJECT_DEFINITION_SCHEMA
+
+        return {"ok": True, "schema": PROJECT_DEFINITION_SCHEMA, "rules": PROJECT_DEFINITION_RULES}
+    client = _ensure_daemon(config)
+    if cmd == "create":
+        payload = _load_project_payload(args)
+        if "name" not in payload:
+            raise RelayError("INVALID_REQUEST", "Project definition must include a name.")
+        return client.request("POST", "/v1/projects", payload)
+    if cmd == "list":
+        path = "/v1/projects"
+        if args.name:
+            path += f"?name={args.name}&limit={args.limit}"
+        elif args.limit:
+            path += f"?limit={args.limit}"
+        return client.request("GET", path)
+    if cmd == "show":
+        return client.request("GET", f"/v1/projects/{args.project_id}")
+    if cmd == "update":
+        payload = _load_project_payload(args)
+        return client.request("POST", f"/v1/projects/{args.project_id}", payload)
+    if cmd == "review-config":
+        if args.guidelines is not None and args.guidelines_file:
+            raise RelayError("INVALID_REQUEST", "Use only one of --guidelines and --guidelines-file.")
+        if args.disable and any((args.reviewer, args.guidelines, args.guidelines_file, args.max_reruns is not None)):
+            raise RelayError("INVALID_REQUEST", "--disable cannot be combined with review configuration options.")
+        if args.max_reruns is not None and not 0 <= args.max_reruns <= 20:
+            raise RelayError("INVALID_REQUEST", "--max-reruns must be between 0 and 20.")
+        project = client.request("GET", f"/v1/projects/{args.project_id}")
+        project_row = project.get("project") or {}
+        try:
+            definition = json.loads(project_row.get("definition_json") or "{}")
+        except (TypeError, ValueError) as exc:
+            raise RelayError("PROJECT_INVALID", "Stored Project definition is not valid JSON.") from exc
+        nodes = definition.get("nodes") or []
+        node = next((item for item in nodes if item.get("node_id") == args.node), None)
+        if node is None:
+            raise RelayError("PROJECT_INVALID", f"Project node not found: {args.node}")
+        checkpoint = dict(node.get("checkpoint") or {})
+        if args.disable:
+            checkpoint["enabled"] = False
+        else:
+            checkpoint["enabled"] = True
+            checkpoint["reviewer"] = args.reviewer or checkpoint.get("reviewer") or "human"
+            if args.guidelines_file:
+                checkpoint["guidelines"] = Path(args.guidelines_file).read_text(encoding="utf-8")
+            elif args.guidelines is not None:
+                checkpoint["guidelines"] = args.guidelines
+            if args.max_reruns is not None:
+                checkpoint["max_reruns"] = args.max_reruns
+            elif "max_reruns" not in checkpoint:
+                checkpoint["max_reruns"] = 2
+        node["checkpoint"] = checkpoint
+        return client.request("POST", f"/v1/projects/{args.project_id}", definition)
+    if cmd == "delete":
+        return client.request("DELETE", f"/v1/projects/{args.project_id}")
+    if cmd == "run":
+        inputs = []
+        for value in args.input or []:
+            spec_part, sep, artifact_uid = value.partition("=")
+            if not sep or not artifact_uid:
+                raise RelayError("INVALID_REQUEST", f"Invalid --input: {value}")
+            node, _, alias = spec_part.partition(":")
+            if not node or not alias:
+                raise RelayError("INVALID_REQUEST", f"--input must be node:alias=ARTIFACT_UID: {value}")
+            inputs.append({"node_id": node, "to_alias": alias, "artifact_uid": artifact_uid})
+        return client.request("POST", f"/v1/projects/{args.project_id}/run", {"inputs": inputs})
+    if cmd == "runs":
+        path = f"/v1/projects/{args.project_id}/runs?limit={args.limit}"
+        return client.request("GET", path)
+    if cmd == "orchestrator-show":
+        project = client.request("GET", f"/v1/projects/{args.project_id}")
+        definition = json.loads((project.get("project") or {}).get("definition_json") or "{}")
+        return {"ok": True, "project_id": args.project_id, "orchestrator": definition.get("orchestrator")}
+    if cmd == "orchestrator-set":
+        project = client.request("GET", f"/v1/projects/{args.project_id}")
+        definition = json.loads((project.get("project") or {}).get("definition_json") or "{}")
+        orchestrator: dict[str, Any] = dict(definition.get("orchestrator") or {})
+        orchestrator["enabled"] = args.enabled == "true"
+        for key, value in (
+            ("worker", args.worker),
+            ("model", args.model),
+            ("profile", args.profile),
+            ("max_repair_attempts_per_node", args.max_repair_attempts_per_node),
+            ("max_repair_attempts_per_run", args.max_repair_attempts_per_run),
+            ("max_llm_calls_per_run", args.max_llm_calls_per_run),
+        ):
+            if value is not None:
+                orchestrator[key] = value
+        definition["orchestrator"] = orchestrator
+        return client.request("POST", f"/v1/projects/{args.project_id}", definition)
+    raise RelayError("INVALID_REQUEST", f"Unknown project command: {cmd}")
+
+
+def _project_run_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.project_run_command
+    prid = args.project_run_id
+    if cmd == "show":
+        return client.request("GET", f"/v1/project-runs/{prid}")
+    if cmd == "steps":
+        return client.request("GET", f"/v1/project-runs/{prid}/steps")
+    if cmd == "reviews":
+        return client.request("GET", f"/v1/project-runs/{prid}/reviews")
+    if cmd == "receipt":
+        return client.request("GET", f"/v1/project-runs/{prid}/receipt")
+    if cmd == "reexecute":
+        payload = {"from_node": args.from_node, "cascade": args.cascade}
+        if args.worker:
+            payload["worker"] = args.worker
+        if args.comment:
+            payload["instruction_addendum"] = args.comment
+        return client.request("POST", f"/v1/project-runs/{prid}/partial-reexecute", payload)
+    if cmd == "retry":
+        payload: dict[str, Any] = {}
+        if args.from_node:
+            payload["from_node"] = args.from_node
+        if args.worker:
+            payload["worker"] = args.worker
+        return client.request("POST", f"/v1/project-runs/{prid}/retry", payload)
+    if cmd == "cancel":
+        return client.request("POST", f"/v1/project-runs/{prid}/cancel")
+    if cmd == "orchestrator":
+        return client.request("GET", f"/v1/project-runs/{prid}/orchestrator")
+    raise RelayError("INVALID_REQUEST", f"Unknown project-run command: {cmd}")
+
+
+def _load_project_payload(args) -> dict[str, Any]:
+    if args.file:
+        return json.loads(Path(args.file).read_text(encoding="utf-8"))
+    if args.json:
+        return json.loads(args.json)
+    payload = {}
+    if args.name:
+        payload["name"] = args.name
+    return payload
+
+
+def _add_routine_parsers(sub):
+    routine = sub.add_parser(
+        "routine",
+        help="Create and manage Routines that run Tasks or Projects on a schedule",
+        description="Schedule Tasks or Projects to run automatically on a deterministic timezone-aware rule.",
+    )
+    rsub = routine.add_subparsers(dest="routine_command", required=True)
+
+    create = rsub.add_parser("create", help="Create a Routine")
+    create.add_argument("--name", required=True)
+    create.add_argument("--target-type", choices=["task", "project"], required=True)
+    create.add_argument("--target-id", required=True)
+    create.add_argument("--type", choices=["daily", "weekly", "monthly", "once", "ndays"], required=True)
+    create.add_argument("--time", action="append", default=[])
+    create.add_argument("--weekday", type=int, action="append", default=[])
+    create.add_argument("--month-day", type=int, action="append", default=[])
+    create.add_argument("--n-days", type=int)
+    create.add_argument("--timezone", default="UTC")
+    create.add_argument("--overlap", choices=["skip", "queue", "cancel_previous", "allow_parallel"], default="skip")
+    create.add_argument("--missed", choices=["skip", "run_once_on_recovery", "replay_all"], default="skip")
+    create.add_argument("--missed-grace-seconds", type=int, default=43200)
+    create.add_argument("--version-policy", choices=["latest", "pinned"], default="latest")
+    create.add_argument("--pinned-version", type=int)
+    create.add_argument("--starts-at")
+    create.add_argument("--ends-at")
+    create.add_argument("--machine", action="store_true")
+
+    list_p = rsub.add_parser("list", help="List Routines")
+    list_p.add_argument("--name")
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = rsub.add_parser("show", help="Show a Routine")
+    show_p.add_argument("routine_id")
+    show_p.add_argument("--machine", action="store_true")
+
+    update = rsub.add_parser("update", help="Update a Routine")
+    update.add_argument("routine_id")
+    update.add_argument("--name")
+    update.add_argument("--timezone")
+    update.add_argument("--overlap", choices=["skip", "queue", "cancel_previous", "allow_parallel"])
+    update.add_argument("--missed", choices=["skip", "run_once_on_recovery", "replay_all"])
+    update.add_argument("--missed-grace-seconds", type=int)
+    update.add_argument("--enabled", choices=["true", "false"])
+    update.add_argument("--machine", action="store_true")
+
+    delete_p = rsub.add_parser("delete", help="Soft-delete a Routine")
+    delete_p.add_argument("routine_id")
+    delete_p.add_argument("--machine", action="store_true")
+
+    run_now = rsub.add_parser("run-now", help="Trigger a Routine immediately")
+    run_now.add_argument("routine_id")
+    run_now.add_argument("--machine", action="store_true")
+
+    runs_p = rsub.add_parser("runs", help="List Routine Runs")
+    runs_p.add_argument("routine_id")
+    runs_p.add_argument("--limit", type=int, default=50)
+    runs_p.add_argument("--machine", action="store_true")
+
+    receipt = rsub.add_parser("receipt", help="Show a Routine receipt")
+    receipt.add_argument("routine_id")
+    receipt.add_argument("--machine", action="store_true")
+
+    preview = rsub.add_parser("preview", help="Preview occurrences without persisting")
+    preview.add_argument("--type", choices=["daily", "weekly", "monthly", "once", "ndays"], required=True)
+    preview.add_argument("--time", action="append", default=[])
+    preview.add_argument("--weekday", type=int, action="append", default=[])
+    preview.add_argument("--month-day", type=int, action="append", default=[])
+    preview.add_argument("--n-days", type=int)
+    preview.add_argument("--timezone", default="UTC")
+    preview.add_argument("--limit", type=int, default=5)
+    preview.add_argument("--machine", action="store_true")
+
+
+def _routine_cli_request(args, config):
+    client = _ensure_daemon(config)
+    cmd = args.routine_command
+    if cmd == "create":
+        rule: dict[str, Any] = {"type": args.type}
+        if args.time:
+            rule["times"] = list(args.time)
+        if args.weekday:
+            rule["weekdays"] = sorted(args.weekday)
+        if args.month_day:
+            rule["month_days"] = sorted(args.month_day)
+        if args.n_days:
+            rule["n_days"] = args.n_days
+        payload = {
+            "name": args.name,
+            "target_type": args.target_type,
+            "target_id": args.target_id,
+            "rule": rule,
+            "timezone": args.timezone,
+            "overlap_policy": args.overlap,
+            "missed_policy": args.missed,
+            "missed_grace_seconds": args.missed_grace_seconds,
+            "version_policy": args.version_policy,
+            "pinned_version": args.pinned_version,
+            "starts_at_utc": args.starts_at,
+            "ends_at_utc": args.ends_at,
+        }
+        return client.request("POST", "/v1/routines", payload)
+    if cmd == "list":
+        path = "/v1/routines"
+        if args.name:
+            path += f"?name={args.name}&limit={args.limit}"
+        elif args.limit:
+            path += f"?limit={args.limit}"
+        return client.request("GET", path)
+    if cmd == "show":
+        return client.request("GET", f"/v1/routines/{args.routine_id}")
+    if cmd == "update":
+        payload = {}
+        if args.name is not None:
+            payload["name"] = args.name
+        if args.timezone is not None:
+            payload["timezone"] = args.timezone
+        if args.overlap is not None:
+            payload["overlap_policy"] = args.overlap
+        if args.missed is not None:
+            payload["missed_policy"] = args.missed
+        if args.missed_grace_seconds is not None:
+            payload["missed_grace_seconds"] = args.missed_grace_seconds
+        if args.enabled is not None:
+            payload["enabled"] = args.enabled == "true"
+        return client.request("POST", f"/v1/routines/{args.routine_id}", payload)
+    if cmd == "delete":
+        return client.request("DELETE", f"/v1/routines/{args.routine_id}")
+    if cmd == "run-now":
+        return client.request("POST", f"/v1/routines/{args.routine_id}/run-now", {})
+    if cmd == "runs":
+        return client.request("GET", f"/v1/routines/{args.routine_id}/runs?limit={args.limit}")
+    if cmd == "receipt":
+        return client.request("GET", f"/v1/routines/{args.routine_id}/receipt")
+    if cmd == "preview":
+        rule = {"type": args.type}
+        if args.time:
+            rule["times"] = list(args.time)
+        if args.weekday:
+            rule["weekdays"] = sorted(args.weekday)
+        if args.month_day:
+            rule["month_days"] = sorted(args.month_day)
+        if args.n_days:
+            rule["n_days"] = args.n_days
+        payload = {"rule": rule, "timezone": args.timezone, "limit": args.limit}
+        return client.request("POST", "/v1/routines/preview", payload)
+    raise RelayError("INVALID_REQUEST", f"Unknown routine command: {cmd}")
+
+
+def _add_approval_parsers(sub: argparse._SubParsersAction) -> None:
+    approval = sub.add_parser(
+        "approval",
+        help="List and decide checkpoint approvals",
+        description="Inspect pending checkpoint approvals and approve, reject, or edit them.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    app_sub = approval.add_subparsers(dest="approval_command", required=True)
+
+    list_p = app_sub.add_parser("list", help="List approvals for a Project Run")
+    list_p.add_argument("project_run_id")
+    list_p.add_argument("--machine", action="store_true")
+
+    show_p = app_sub.add_parser("show", help="Show an approval by token")
+    show_p.add_argument("token")
+    show_p.add_argument("--machine", action="store_true")
+
+    approve_p = app_sub.add_parser("approve", help="Approve a checkpoint step")
+    approve_p.add_argument("project_run_id")
+    approve_p.add_argument("token")
+    approve_p.add_argument("--reviewer", default="human")
+    approve_p.add_argument("--machine", action="store_true")
+
+    reject_p = app_sub.add_parser("reject", help="Reject a checkpoint step")
+    reject_p.add_argument("project_run_id")
+    reject_p.add_argument("token")
+    reject_p.add_argument("--reviewer", default="human")
+    reject_p.add_argument("--reason", default="")
+    reject_p.add_argument("--machine", action="store_true")
+
+    edit_p = app_sub.add_parser("edit", help="Approve a checkpoint step with an edited file")
+    edit_p.add_argument("project_run_id")
+    edit_p.add_argument("token")
+    edit_p.add_argument("--file", required=True)
+    edit_p.add_argument("--role", default="output")
+    edit_p.add_argument("--reviewer", default="human")
+    edit_p.add_argument("--machine", action="store_true")
+
+
+def _approval_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.approval_command
+    if cmd == "list":
+        return client.request("GET", f"/v1/project-runs/{args.project_run_id}/approvals")
+    if cmd == "show":
+        return client.request("GET", f"/v1/approvals/{args.token}")
+    if cmd == "approve":
+        return client.request(
+            "POST",
+            f"/v1/project-runs/{args.project_run_id}/approvals/{args.token}/approve",
+            {"reviewer": args.reviewer},
+        )
+    if cmd == "reject":
+        return client.request(
+            "POST",
+            f"/v1/project-runs/{args.project_run_id}/approvals/{args.token}/reject",
+            {"reviewer": args.reviewer, "reason": args.reason},
+        )
+    if cmd == "edit":
+        return client.request(
+            "POST",
+            f"/v1/project-runs/{args.project_run_id}/approvals/{args.token}/edit",
+            {"reviewer": args.reviewer, "file": args.file, "role": args.role},
+        )
+    raise RelayError("INVALID_REQUEST", f"Unknown approval command: {cmd}")
+
+
+def _add_review_parsers(sub: argparse._SubParsersAction) -> None:
+    review = sub.add_parser("review", help="Inspect and decide result reviews")
+    review_sub = review.add_subparsers(dest="review_command", required=True)
+    list_p = review_sub.add_parser("list", help="List pending or completed reviews")
+    list_p.add_argument("--status")
+    list_p.add_argument("--limit", type=int, default=100)
+    list_p.add_argument("--machine", action="store_true")
+    show_p = review_sub.add_parser("show", help="Show a review and its current result")
+    show_p.add_argument("review_id")
+    show_p.add_argument("--machine", action="store_true")
+    for name, help_text in (("confirm", "Confirm the current result"), ("retry-delivery", "Retry a failed delivery")):
+        action = review_sub.add_parser(name, help=help_text)
+        action.add_argument("review_id")
+        action.add_argument("--machine", action="store_true")
+    rerun = review_sub.add_parser("rerun", help="Add review feedback and rerun")
+    rerun.add_argument("review_id")
+    rerun.add_argument("--comment", required=True)
+    rerun.add_argument("--machine", action="store_true")
+    reject = review_sub.add_parser("reject", help="Reject the current result")
+    reject.add_argument("review_id")
+    reject.add_argument("--reason", required=True)
+    reject.add_argument("--machine", action="store_true")
+
+
+def _review_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.review_command
+    if cmd == "list":
+        query = f"?limit={args.limit}"
+        if args.status:
+            query += f"&status={args.status}"
+        return client.request("GET", f"/v1/reviews{query}")
+    if cmd == "show":
+        return client.request("GET", f"/v1/reviews/{args.review_id}")
+    if cmd == "confirm":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/confirm", {})
+    if cmd == "retry-delivery":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/retry-delivery", {})
+    if cmd == "rerun":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/rerun", {"comment": args.comment})
+    if cmd == "reject":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/reject", {"reason": args.reason})
+    raise RelayError("INVALID_REQUEST", f"Unknown review command: {cmd}")
+
+
+def _add_compare_parsers(sub: argparse._SubParsersAction) -> None:
+    compare = sub.add_parser(
+        "compare",
+        help="Compare Task/Project Runs or diff Artifacts",
+        description="Compare two Task/Project Runs or inspect diffs between two Artifacts.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    comp_sub = compare.add_subparsers(dest="compare_command", required=True)
+
+    runs = comp_sub.add_parser("runs", help="Compare two Runs")
+    runs.add_argument("a_run_id")
+    runs.add_argument("b_run_id")
+    runs.add_argument("--machine", action="store_true")
+
+    artifacts = comp_sub.add_parser("artifacts", help="Diff two Artifacts")
+    artifacts.add_argument("a_uid")
+    artifacts.add_argument("b_uid")
+    artifacts.add_argument("--max-bytes", type=int, default=262144)
+    artifacts.add_argument("--machine", action="store_true")
+
+
+def _compare_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.compare_command
+    if cmd == "runs":
+        return client.request("GET", f"/v1/runs/compare?a={args.a_run_id}&b={args.b_run_id}")
+    if cmd == "artifacts":
+        return client.request("GET", f"/v1/artifacts/diff?a={args.a_uid}&b={args.b_uid}&max_bytes={args.max_bytes}")
+    raise RelayError("INVALID_REQUEST", f"Unknown compare command: {cmd}")
+
+
+def _add_quality_parsers(sub: argparse._SubParsersAction) -> None:
+    quality = sub.add_parser(
+        "quality",
+        help="Inspect Task/Project Run quality scores and attention items",
+        description="Score Task/Project Run quality or list items requiring attention.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    qsub = quality.add_subparsers(dest="quality_command", required=True)
+
+    run_q = qsub.add_parser("run", help="Score a single Run")
+    run_q.add_argument("run_id")
+    run_q.add_argument("--machine", action="store_true")
+
+    att_q = qsub.add_parser("attention", help="List Task/Project Runs needing attention")
+    att_q.add_argument("--status", default="low", choices=["low", "medium", "high", "all"])
+    att_q.add_argument("--limit", type=int, default=50)
+    att_q.add_argument("--machine", action="store_true")
+
+
+def _add_search_semantic_parsers(sub: argparse._SubParsersAction) -> None:
+    sem = sub.add_parser(
+        "search-semantic",
+        help="Semantic search across Task Runs or Artifacts",
+        description="Search Task Runs or Artifacts using vector similarity embeddings.",
+    )
+    sem.add_argument("query")
+    sem.add_argument("--kind", choices=["runs", "artifacts"], default="runs")
+    sem.add_argument("--limit", type=int, default=20)
+    sem.add_argument("--machine", action="store_true")
+
+
+def _quality_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.quality_command
+    if cmd == "run":
+        return client.request("GET", f"/v1/runs/{args.run_id}/quality")
+    if cmd == "attention":
+        return client.request("GET", f"/v1/quality/attention?status={args.status}&limit={args.limit}")
+    raise RelayError("INVALID_REQUEST", f"Unknown quality command: {cmd}")
+
+
+def _search_semantic_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    payload = {"query": args.query, "kind": args.kind, "limit": args.limit}
+    return client.request("POST", "/v1/search/semantic", payload)
+
+
+def _add_attention_parsers(sub: argparse._SubParsersAction) -> None:
+    att = sub.add_parser(
+        "attention",
+        help="Inspect items needing operator attention",
+        description="List failed Task Runs, checkpoint approvals, and low quality Task Runs needing attention.",
+    )
+    asub = att.add_subparsers(dest="attention_command", required=True)
+    list_p = asub.add_parser("list", help="List attention items")
+    list_p.add_argument("--kind", choices=["failed_job", "approval", "low_quality"])
+    list_p.add_argument("--limit", type=int, default=50)
+    list_p.add_argument("--machine", action="store_true")
+
+
+def _add_operations_parsers(sub: argparse._SubParsersAction) -> None:
+    ops = sub.add_parser(
+        "operations",
+        help="Operational dashboards for Routines and Projects",
+        description="View operational success rates and metrics for Routines and Projects.",
+    )
+    osub = ops.add_subparsers(dest="operations_command", required=True)
+    osub.add_parser("routines", help="Show Routine dashboard").add_argument("--machine", action="store_true")
+    osub.add_parser("projects", help="Show Project dashboard").add_argument("--machine", action="store_true")
+
+
+def _add_notify_parsers(sub: argparse._SubParsersAction) -> None:
+    notif = sub.add_parser(
+        "notify",
+        help="Test notification webhooks",
+        description="Test delivery of a webhook notification payload.",
+    )
+    nsub = notif.add_subparsers(dest="notify_command", required=True)
+    test_p = nsub.add_parser("test", help="Test a webhook sink")
+    test_p.add_argument("--url", required=True)
+    test_p.add_argument("--secret")
+    test_p.add_argument("--machine", action="store_true")
+
+
+def _attention_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    path = "/v1/attention"
+    if args.kind:
+        path += f"?kind={args.kind}"
+    return client.request("GET", path)
+
+
+def _operations_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.operations_command
+    if cmd == "routines":
+        return client.request("GET", "/v1/operations/routines")
+    if cmd == "projects":
+        return client.request("GET", "/v1/operations/projects")
+    raise RelayError("INVALID_REQUEST", f"Unknown operations command: {cmd}")
+
+
+def _notify_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.notify_command
+    if cmd == "test":
+        payload = {"url": args.url}
+        if args.secret:
+            payload["secret"] = args.secret
+        return client.request("POST", "/v1/notifications/test", payload)
+    raise RelayError("INVALID_REQUEST", f"Unknown notify command: {cmd}")
+
+
+def _add_export_parsers(sub: argparse._SubParsersAction) -> None:
+    exp = sub.add_parser(
+        "export",
+        help="Export Relay definitions and optional Task Runs to an archive",
+        description="Serialize Tasks, Projects, Routines, and Task Runs to a deterministic ZIP archive.",
+    )
+    exp.add_argument("--include-runs", action="store_true")
+    exp.add_argument("--out")
+    exp.add_argument("--machine", action="store_true")
+
+
+def _add_import_parsers(sub: argparse._SubParsersAction) -> None:
+    imp = sub.add_parser(
+        "import",
+        help="Import Relay definitions from an archive",
+        description="Restore Tasks, Projects, and Routines from a ZIP archive.",
+    )
+    imp.add_argument("archive")
+    imp.add_argument("--conflict", choices=["skip", "overwrite", "rename"], default="skip")
+    imp.add_argument("--include-runs", action="store_true")
+    imp.add_argument("--machine", action="store_true")
+
+
+def _add_receipt_schema_parsers(sub: argparse._SubParsersAction) -> None:
+    rs = sub.add_parser(
+        "receipt-schema",
+        help="Print current receipt schema version",
+        description="Print current receipt schema version information.",
+    )
+    rs.add_argument("--machine", action="store_true")
+
+
+def _export_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    payload = {"include_runs": args.include_runs}
+    if args.out:
+        payload["out_path"] = args.out
+    return client.request("POST", "/v1/export", payload)
+
+
+def _import_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    payload = {"archive_path": args.archive, "conflict": args.conflict, "include_runs": args.include_runs}
+    return client.request("POST", "/v1/import", payload)
+
+
+def _receipt_schema_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    return client.request("GET", "/v1/receipt-schema")
+
+
+def _add_catalog_parsers(sub: argparse._SubParsersAction) -> None:
+    catalog = sub.add_parser(
+        "catalog",
+        help="Read bounded Task, Project, Task Run, and Project Run catalogs for Agent selection",
+        description="Read stable catalog metadata. Relay does not rank or search candidates for the caller.",
+    )
+    catalog.add_argument("--machine", action="store_true")
+    catalog_sub = catalog.add_subparsers(dest="catalog_command")
+
+    tasks = catalog_sub.add_parser("tasks", help="List registered Tasks")
+    tasks.add_argument("--limit", type=int, default=100)
+    tasks.add_argument("--cursor")
+    tasks.add_argument("--updated-since", dest="updated_since")
+    tasks.add_argument("--machine", action="store_true")
+
+    runs = catalog_sub.add_parser("task-runs", help="List Task Run catalog entries")
+    runs.add_argument("--limit", type=int, default=100)
+    runs.add_argument("--cursor")
+    runs.add_argument("--status")
+    runs.add_argument("--task-id")
+    runs.add_argument("--from", dest="date_from")
+    runs.add_argument("--to", dest="date_to")
+    runs.add_argument("--machine", action="store_true")
+
+    projects = catalog_sub.add_parser("projects", help="List registered Projects")
+    projects.add_argument("--limit", type=int, default=100)
+    projects.add_argument("--cursor")
+    projects.add_argument("--updated-since", dest="updated_since")
+    projects.add_argument("--machine", action="store_true")
+
+    project_runs = catalog_sub.add_parser("project-runs", help="List Project Run catalog entries")
+    project_runs.add_argument("--limit", type=int, default=100)
+    project_runs.add_argument("--cursor")
+    project_runs.add_argument("--status")
+    project_runs.add_argument("--project-id")
+    project_runs.add_argument("--from", dest="date_from")
+    project_runs.add_argument("--to", dest="date_to")
+    project_runs.add_argument("--machine", action="store_true")
+
+
+def _catalog_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    command = getattr(args, "catalog_command", None)
+    if command is None:
+        return client.request("GET", "/v1/catalog")
+    if command == "tasks":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "updated_since": args.updated_since,
+        }
+        return client.request(
+            "GET", "/v1/catalog/tasks?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
+    if command == "task-runs":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "status": args.status,
+            "task_id": args.task_id,
+            "from": args.date_from,
+            "to": args.date_to,
+        }
+        return client.request(
+            "GET", "/v1/catalog/task-runs?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
+    if command == "projects":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "updated_since": args.updated_since,
+        }
+        return client.request(
+            "GET", "/v1/catalog/projects?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
+    if command == "project-runs":
+        values = {
+            "limit": args.limit,
+            "cursor": args.cursor,
+            "status": args.status,
+            "project_id": args.project_id,
+            "from": args.date_from,
+            "to": args.date_to,
+        }
+        return client.request(
+            "GET", "/v1/catalog/project-runs?" + urlencode({k: v for k, v in values.items() if v is not None})
+        )
+    raise RelayError("INVALID_REQUEST", f"Unknown catalog command: {command}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,7 +1257,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Run a task synchronously and return the final receipt as JSON. "
             "Use this for one-off queries where you need the result inline. "
-            "For background jobs that should survive shell exit, use 'relay submit'. "
+            "For Task Runs that should survive shell exit, use 'relay submit'. "
             "The selected worker (claude, codex, antigravity, or any registered agent) "
             "executes the task in a sandbox under RELAY_HOME; fallback workers run if enabled."
         ),
@@ -224,8 +1278,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Submit a task to the daemon and queue it for background execution. "
             "The daemon is started automatically if it is not running. "
-            "Use 'relay wait <job_id>' or 'relay status <job_id>' to monitor progress, "
-            "and 'relay result <job_id>' to retrieve the final receipt."
+            "Use 'relay wait <task_run_id>' or 'relay status <task_run_id>' to monitor progress, "
+            "and 'relay result <task_run_id>' to retrieve the final receipt."
         ),
         epilog=(
             "Examples:\n"
@@ -242,46 +1296,46 @@ def build_parser() -> argparse.ArgumentParser:
             name,
             description=(
                 {
-                    "status": "Return the current status of a job. Uses the daemon when available, otherwise reads the local database.",
-                    "result": "Return the final receipt and result/artifact paths of a completed job.",
-                    "show": "Return detailed local job data including attempts, events, and artifacts.",
+                    "status": "Return the current status of a Task Run. Uses the daemon when available, otherwise reads the local database.",
+                    "result": "Return the final receipt and result/artifact paths of a completed Task Run.",
+                    "show": "Return detailed Task Run data including Attempts, events, and Artifacts.",
                     "logs": "Return attempt metadata and the tail of stdout/stderr logs (last 8,000 characters each).",
-                    "cancel": "Request cancellation of a queued or running job. Submitted to the daemon when available.",
-                    "rerun": "Reconstruct the saved request and execute it again as a new job.",
+                    "cancel": "Request cancellation of a queued or running Task Run. Submitted to the daemon when available.",
+                    "rerun": "Reconstruct the saved request and execute it again as a new Task Run.",
                 }[name]
             ),
-            epilog=f"Examples:\n  relay {name} <job_id> --machine",
+            epilog=f"Examples:\n  relay {name} <task_run_id> --machine",
             formatter_class=argparse.RawDescriptionHelpFormatter,
         )
-        p.add_argument("job_id")
+        p.add_argument("job_id", metavar="TASK_RUN_ID")
         p.add_argument("--machine", action="store_true")
 
     wait = sub.add_parser(
         "wait",
-        help="Block until a job completes",
+        help="Block until a Task Run completes",
         description=(
-            "Poll a job until it reaches a terminal state (completed, partial, failed, or cancelled) "
+            "Poll a Task Run until it reaches a terminal state (completed, partial, failed, or cancelled) "
             "or until the timeout expires. Returns the final receipt. "
-            "Use this from scripts that need to chain work after the job is done."
+            "Use this from scripts that need to chain work after the Task Run is done."
         ),
         epilog=(
             "Examples:\n"
-            "  relay wait <job_id> --timeout 1800\n"
-            "  relay wait <job_id> --timeout 60 --interval 0.5 --machine"
+            "  relay wait <task_run_id> --timeout 1800\n"
+            "  relay wait <task_run_id> --timeout 60 --interval 0.5 --machine"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    wait.add_argument("job_id")
+    wait.add_argument("job_id", metavar="TASK_RUN_ID")
     wait.add_argument("--timeout", type=int, default=0)
     wait.add_argument("--interval", type=float, default=2.0)
     wait.add_argument("--machine", action="store_true")
 
     history = sub.add_parser(
         "history",
-        help="List recent jobs",
+        help="List recent Task Runs",
         description=(
-            "List recent jobs from the local database, optionally filtered by status. "
-            "Use 'relay status <job_id>' or 'relay show <job_id>' for details on a specific job."
+            "List recent Task Runs from the local database, optionally filtered by status. "
+            "Use 'relay status <task_run_id>' or 'relay show <task_run_id>' for details on a specific Task Run."
         ),
         epilog=("Examples:\n  relay history --limit 20\n  relay history --status failed --machine"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -536,11 +1590,74 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("agent_id")
 
     _add_schedule_parsers(sub)
+    _add_task_parsers(sub)
+    _add_project_parsers(sub)
+    _add_routine_parsers(sub)
+    _add_approval_parsers(sub)
+    _add_review_parsers(sub)
+    _add_compare_parsers(sub)
+    _add_quality_parsers(sub)
+    _add_search_semantic_parsers(sub)
+    _add_attention_parsers(sub)
+    _add_operations_parsers(sub)
+    _add_notify_parsers(sub)
+    _add_export_parsers(sub)
+    _add_import_parsers(sub)
+    _add_receipt_schema_parsers(sub)
+    _add_catalog_parsers(sub)
+    project_run_sub = sub.add_parser("project-run").add_subparsers(dest="project_run_command", required=True)
+    _add_project_run_parsers(project_run_sub)
+    search = sub.add_parser("search", help="Search previous Runs or Artifacts")
+    search.add_argument("query", nargs="?", default="")
+    search.add_argument("--kind", choices=["runs", "artifacts"], default="runs")
+    search.add_argument("--status")
+    search.add_argument("--worker")
+    search.add_argument("--source")
+    search.add_argument("--trigger-type")
+    search.add_argument("--role")
+    search.add_argument("--mime-type")
+    search.add_argument("--from", dest="date_from")
+    search.add_argument("--to", dest="date_to")
+    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--offset", type=int, default=0)
+    search.add_argument("--machine", action="store_true")
+
+    artifact = sub.add_parser("artifact", help="Inspect an Artifact")
+    artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
+    for name in ("show", "read", "lineage"):
+        command_parser = artifact_sub.add_parser(name)
+        command_parser.add_argument("artifact_uid")
+        if name == "read":
+            command_parser.add_argument("--max-bytes", type=int, default=65536)
+        command_parser.add_argument("--machine", action="store_true")
+
+    run_lineage = sub.add_parser("run-lineage", help="Inspect Run Artifact lineage")
+    run_lineage.add_argument("run_id")
+    run_lineage.add_argument("--machine", action="store_true")
     sub.add_parser("version", help="Print the local Relay version")
     return parser
 
 
+def _artifact_inputs_from_args(values: list[str]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    for index, value in enumerate(values, start=1):
+        raw = str(value).strip()
+        if not raw:
+            continue
+        uid, separator, alias = raw.partition("=")
+        result.append({"artifact_uid": uid.strip(), "alias": alias.strip() if separator else f"A{index}"})
+    return result
+
+
 def _request_from_args(args, config: Config) -> JobRequest:
+    inputs: dict[str, Any] = {}
+    if args.inputs_json:
+        try:
+            inputs = json.loads(args.inputs_json)
+        except json.JSONDecodeError as exc:
+            raise RelayError("INVALID_REQUEST", f"--inputs-json must be valid JSON: {exc}") from exc
+        if not isinstance(inputs, dict):
+            raise RelayError("INVALID_REQUEST", "--inputs-json must contain a JSON object.")
     return JobRequest(
         task=args.task or "",
         title=args.title,
@@ -556,12 +1673,14 @@ def _request_from_args(args, config: Config) -> JobRequest:
         caller=args.caller,
         request_id=args.request_id,
         attachments=args.attachments,
+        artifact_inputs=_artifact_inputs_from_args(args.artifact_inputs),
         workspace=args.workspace,
         target_path=args.target_path,
         overwrite=args.overwrite,
         machine=args.machine,
         force_new=args.force_new,
         model=args.model,
+        inputs=inputs,
     )
 
 
@@ -749,7 +1868,7 @@ def _run_add_agent_wizard(
     display_name = prompt_fn("Display name", default=worker_id.capitalize())
     command = prompt_fn("Executable path or name on PATH", default=worker_id)
     template = prompt_fn(
-        "Command template (placeholders substituted per job)",
+        "Command template (placeholders substituted per Task Run)",
         default=_DEFAULT_AGENT_COMMAND_TEMPLATE,
     )
     default_model = prompt_fn("Default model (blank for none)", default="")
@@ -897,7 +2016,7 @@ def _emit(value: Any, machine: bool = False) -> None:
     if isinstance(value, dict):
         if value.get("ok") and value.get("status") in {"completed", "partial"}:
             print(f"Status: {value.get('status')}")
-            print(f"Job: {value.get('job_id')}")
+            print(f"Task Run: {value.get('job_id')}")
             if value.get("worker"):
                 print(f"Worker: {value.get('worker')}")
             if value.get("result_path"):
@@ -909,7 +2028,7 @@ def _emit(value: Any, machine: bool = False) -> None:
             return
         if value.get("status") in {"queued", "running", "created", "reused"}:
             print(f"Status: {value.get('status')}")
-            print(f"Job: {value.get('job_id')}")
+            print(f"Task Run: {value.get('job_id')}")
             return
     _print_json(value, compact=False)
 
@@ -987,7 +2106,7 @@ def _ensure_daemon(config: Config) -> RPCClient:
 def _logs(engine: RelayEngine, job_id: str) -> dict:
     job = engine.db.get_job(job_id)
     if not job:
-        raise RelayError("JOB_NOT_FOUND", f"Job not found: {job_id}")
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     attempts = engine.db.attempts_for_job(job_id)
     result = []
     for attempt in attempts:
@@ -1000,7 +2119,7 @@ def _logs(engine: RelayEngine, job_id: str) -> dict:
                 text = Path(path).read_text(encoding="utf-8", errors="replace")
                 item[key.replace("_path", "_tail")] = text[-8000:]
         result.append(item)
-    return {"ok": True, "job_id": job_id, "attempts": result}
+    return {"ok": True, "job_id": job_id, "task_run_id": job_id, "attempts": result}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1083,7 +2202,52 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "logs":
             _emit(_logs(engine, args.job_id), machine)
         elif args.command == "history":
-            _emit({"ok": True, "jobs": db.list_jobs(args.status, args.limit)}, machine)
+            runs = db.list_jobs(args.status, args.limit)
+            _emit({"ok": True, "task_runs": runs, "jobs": runs}, machine)
+        elif args.command == "search":
+            from .api import search_artifacts, search_runs
+
+            options = {
+                "query": args.query,
+                "status": args.status,
+                "worker": args.worker,
+                "submitted_via": args.source,
+                "trigger_type": args.trigger_type,
+                "role": args.role,
+                "mime_type": args.mime_type,
+                "date_from": args.date_from,
+                "date_to": args.date_to,
+                "limit": args.limit,
+                "offset": args.offset,
+            }
+            if args.kind == "runs":
+                value = search_runs(
+                    db, **{key: item for key, item in options.items() if item is not None and key != "mime_type"}
+                )
+            else:
+                value = search_artifacts(
+                    db,
+                    **{
+                        key: item
+                        for key, item in options.items()
+                        if item is not None and key not in {"status", "worker", "submitted_via", "trigger_type"}
+                    },
+                )
+            _emit(value, machine)
+        elif args.command == "artifact":
+            from .api import artifact_content, artifact_detail, artifact_lineage
+
+            if args.artifact_command == "show":
+                value = artifact_detail(db, args.artifact_uid)
+            elif args.artifact_command == "read":
+                value = artifact_content(db, args.artifact_uid, max_bytes=args.max_bytes)
+            else:
+                value = artifact_lineage(db, args.artifact_uid)
+            _emit(value, machine)
+        elif args.command == "run-lineage":
+            from .api import run_lineage
+
+            _emit(run_lineage(db, args.run_id), machine)
         elif args.command == "rerun":
             _emit(engine.rerun(args.job_id), machine)
         elif args.command == "doctor":
@@ -1121,6 +2285,38 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(manager.run(override_days=args.days, dry_run=args.dry_run), machine)
         elif args.command == "schedule":
             _emit(_schedule_cli_request(args, config), machine)
+        elif args.command == "task":
+            _emit(_task_cli_request(args, config), machine)
+        elif args.command == "project":
+            _emit(_project_cli_request(args, config), machine)
+        elif args.command == "routine":
+            _emit(_routine_cli_request(args, config), machine)
+        elif args.command == "approval":
+            _emit(_approval_cli_request(args, config), machine)
+        elif args.command == "review":
+            _emit(_review_cli_request(args, config), machine)
+        elif args.command == "compare":
+            _emit(_compare_cli_request(args, config), machine)
+        elif args.command == "quality":
+            _emit(_quality_cli_request(args, config), machine)
+        elif args.command == "search-semantic":
+            _emit(_search_semantic_cli_request(args, config), machine)
+        elif args.command == "attention":
+            _emit(_attention_cli_request(args, config), machine)
+        elif args.command == "operations":
+            _emit(_operations_cli_request(args, config), machine)
+        elif args.command == "notify":
+            _emit(_notify_cli_request(args, config), machine)
+        elif args.command == "export":
+            _emit(_export_cli_request(args, config), machine)
+        elif args.command == "import":
+            _emit(_import_cli_request(args, config), machine)
+        elif args.command == "receipt-schema":
+            _emit(_receipt_schema_cli_request(args, config), machine)
+        elif args.command == "catalog":
+            _emit(_catalog_cli_request(args, config), machine)
+        elif args.command == "project-run":
+            _emit(_project_run_cli_request(args, config), machine)
         elif args.command == "daemon":
             if args.daemon_command == "serve":
                 RelayDaemon(config).serve()

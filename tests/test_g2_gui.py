@@ -16,55 +16,16 @@ except ModuleNotFoundError as exc:  # GUI extra is installed by the GUI smoke jo
 from relay.config import Config
 from relay.gui.job_detail import JobDetailView
 from relay.gui.main_window import MainWindow
-from relay.gui.new_task import JobFilePickerDialog, NewTaskView
+from relay.gui.tasks import TaskRunDialog, TaskRunFilePickerDialog
 
 
-class G2NewTaskGuiTests(unittest.TestCase):
+class G2TaskRunGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_new_task_payload_preserves_cli_equivalent_options(self):
-        view = NewTaskView()
-        view.title_edit.setText("G2 title")
-        view.task_edit.setPlainText("Research the G2 API")
-        view.worker_combo.setCurrentText("codex")
-        view.model_edit.setText("gpt-test")
-        view.profile_combo.setCurrentText("analysis-only")
-        view.fallback_check.setChecked(True)
-        view.timeout_spin.setValue(90)
-        view.format_combo.setCurrentText("txt")
-        view.output_edit.setText("/tmp/result.txt")
-        view.artifact_edit.setText("/tmp/artifacts")
-        view.force_new_check.setChecked(True)
-        view.overwrite_check.setChecked(True)
-
-        payload = view.payload()
-
-        self.assertEqual(payload["title"], "G2 title")
-        self.assertEqual(payload["task"], "Research the G2 API")
-        self.assertEqual(payload["worker"], "codex")
-        self.assertEqual(payload["model"], "gpt-test")
-        self.assertEqual(payload["profile"], "analysis-only")
-        self.assertTrue(payload["fallback"])
-        self.assertEqual(payload["timeout_seconds"], 90)
-        self.assertEqual(payload["result_format"], "txt")
-        self.assertTrue(payload["force_new"])
-        self.assertTrue(payload["overwrite"])
-
-    def test_new_task_defaults_enable_fallback_and_advanced_execution_options(self):
-        view = NewTaskView()
-
-        payload = view.payload()
-
-        self.assertTrue(payload["fallback"])
-        self.assertTrue(payload["force_new"])
-        self.assertTrue(payload["overwrite"])
-        self.assertTrue(view.advanced_toggle.isChecked())
-
-    def test_new_task_adds_job_files_without_duplicate_attachments(self):
-        view = NewTaskView()
-
+    def test_registered_task_run_adds_files_without_duplicates(self):
+        view = TaskRunDialog(task={"task_id": "weather", "name": "Weather"})
         view.add_attachments(["C:/relay/result.json", "C:/relay/report.md"])
         view.add_attachments(["C:/relay/result.json"])
 
@@ -72,11 +33,10 @@ class G2NewTaskGuiTests(unittest.TestCase):
             [view.attachment_list.item(index).text() for index in range(view.attachment_list.count())],
             ["C:/relay/result.json", "C:/relay/report.md"],
         )
-        self.assertEqual(view.payload()["attachments"], ["C:/relay/result.json", "C:/relay/report.md"])
+        self.assertEqual(view.overrides()["attachments"], ["C:/relay/result.json", "C:/relay/report.md"])
 
     def test_job_file_picker_returns_checked_files(self):
-        dialog = JobFilePickerDialog(
-            "job-123",
+        dialog = TaskRunFilePickerDialog(
             [
                 {"kind": "Result", "name": "result.json", "path": "C:/relay/result.json", "size": 42},
                 {"kind": "Artifact", "name": "report.md", "path": "C:/relay/report.md", "size": 2048},
@@ -85,8 +45,8 @@ class G2NewTaskGuiTests(unittest.TestCase):
 
         dialog.file_list.item(1).setCheckState(Qt.Checked)
 
-        self.assertEqual(dialog.selected_paths(), ["C:/relay/report.md"])
-        self.assertIn("2.0 KB", dialog.file_list.item(1).text())
+        self.assertEqual(dialog.selected_files()[0]["path"], "C:/relay/report.md")
+        self.assertEqual(dialog.windowTitle(), "Add files from Task Run")
 
     def test_job_input_candidates_keep_existing_unique_files_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -123,11 +83,26 @@ class G2NewTaskGuiTests(unittest.TestCase):
 
         labels = [view.tabs.tabText(index) for index in range(view.tabs.count())]
 
-        self.assertEqual(labels, ["Overview", "Task", "Progress", "Answer", "Result", "Files", "Logs", "Events"])
+        self.assertEqual(
+            labels, ["Overview", "Task", "Inputs", "Progress", "Answer", "Result", "Files", "Logs", "Events"]
+        )
         self.assertFalse(view.cancel_button.isEnabled())
+        self.assertTrue(view.cancel_button.isHidden())
+        self.assertTrue(view.check_button.isHidden())
         self.assertTrue(view.rerun_button.isEnabled())
-        self.assertFalse(view.copy_task_button.isEnabled())
+        self.assertFalse(view.rerun_button.isHidden())
+        self.assertFalse(hasattr(view, "copy_task_button"))
+        self.assertFalse(hasattr(view, "save_as_task_button"))
         self.assertFalse(view.open_folder_button.isEnabled())
+        self.assertTrue(view.open_folder_button.isHidden())
+        self.assertEqual(view.title_label.text(), "Completed task")
+
+    def test_public_gui_labels_use_task_run_terminology(self):
+        view = TaskRunDialog(task={"task_id": "weather", "name": "Weather"})
+        self.assertEqual(view.add_from_run_button.text(), "Add from Task Run")
+
+        detail = JobDetailView()
+        self.assertEqual(detail.title_label.text(), "Task Run")
 
     def test_answer_tab_renders_markdown_and_copies_plain_text(self):
         view = JobDetailView()
@@ -158,7 +133,7 @@ class G2NewTaskGuiTests(unittest.TestCase):
             {
                 "job_id": "job-2",
                 "status": "RUNNING",
-                "actions": {"can_cancel": True, "can_copy": True, "can_open_folder": True},
+                "actions": {"can_cancel": True, "can_check_progress": True, "can_copy": True, "can_open_folder": True},
                 "output_path": "/tmp/result.json",
                 "artifact_path": "/tmp/artifacts",
                 "request": {"task": "Copy this task"},
@@ -173,7 +148,9 @@ class G2NewTaskGuiTests(unittest.TestCase):
             }
         )
 
-        self.assertTrue(view.copy_task_button.isEnabled())
+        self.assertFalse(view.cancel_button.isHidden())
+        self.assertFalse(view.check_button.isHidden())
+        self.assertTrue(view.rerun_button.isHidden())
         self.assertTrue(view.open_folder_button.isEnabled())
         self.assertEqual(view.attempt_combo.currentData(), 7)
         self.assertEqual(view.stream_combo.currentText(), "stdout")
@@ -202,15 +179,15 @@ class G2NewTaskGuiTests(unittest.TestCase):
         self.assertFalse(view.attempt_combo.isEnabled())
         self.assertFalse(view.open_log_button.isEnabled())
 
-    def test_main_window_contains_new_task_and_job_detail_views(self):
+    def test_main_window_contains_task_registration_and_job_detail_views(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Config(Path(directory) / "relay-home")
             config.init()
             window = MainWindow(config, gui_version="0.8.0", expected_home_id="home")
 
-            self.assertTrue(hasattr(window, "new_task_view"))
+            self.assertTrue(hasattr(window, "runs_view"))
             self.assertTrue(hasattr(window, "job_detail_view"))
-            self.assertFalse(window.new_task_button.isEnabled())
+            self.assertFalse(window.register_task_button.isEnabled())
             window.close()
 
     def test_compatibility_mode_disables_write_actions(self):
@@ -221,8 +198,7 @@ class G2NewTaskGuiTests(unittest.TestCase):
 
             window._set_connection("read-only", "daemon is older")
 
-            self.assertFalse(window.new_task_button.isEnabled())
-            self.assertFalse(window.new_task_view.create_button.isEnabled())
+            self.assertFalse(window.register_task_button.isEnabled())
             window.close()
 
 
