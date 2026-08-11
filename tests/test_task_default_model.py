@@ -114,7 +114,9 @@ class RunTaskFromSnapshotModelThreadingTests(_EngineHarness):
 
     def test_snapshot_default_model_reaches_the_dispatched_request(self):
         task = self.engine.create_task(
-            TaskSpec(name="A", instructions="do A", default_worker="antigravity", default_model="gemini-3.6-flash-medium")
+            TaskSpec(
+                name="A", instructions="do A", default_worker="antigravity", default_model="gemini-3.6-flash-medium"
+            )
         )
         snapshot = self.engine.load_task_for_snapshot(task["task_id"])
         self.assertEqual(snapshot["default_model"], "gemini-3.6-flash-medium")
@@ -163,13 +165,20 @@ class ProjectRuntimeDispatchModelTests(_EngineHarness):
         from relay.projects.service import ProjectService
 
         task = self.engine.create_task(
-            TaskSpec(name="A", instructions="do A", default_worker="antigravity", default_model="gemini-3.6-flash-medium")
+            TaskSpec(
+                name="A", instructions="do A", default_worker="antigravity", default_model="gemini-3.6-flash-medium"
+            )
         )
         service = ProjectService(self.db, self.engine)
         runtime = ProjectRuntime(self.db, self.engine, service)
         self.addCleanup(runtime.stop)
         project = service.create_project(
-            {"name": "Solo", "nodes": [{"node_id": "a", "task_id": task["task_id"]}], "connections": [], "output_selection": []}
+            {
+                "name": "Solo",
+                "nodes": [{"node_id": "a", "task_id": task["task_id"]}],
+                "connections": [],
+                "output_selection": [],
+            }
         )
         run = service.create_project_run(project["project_id"])
         project_run_id = run["project_run_id"]

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .design_typography import TYPE_SCALE
+
 COLORS: dict[str, str] = {
     # Surfaces (4-tier neutral dark)
     "bg.canvas": "#131313",
@@ -31,6 +33,10 @@ COLORS: dict[str, str] = {
     # Accent (selection, focus, progress, active indicators)
     "accent.primary": "#4C8DFF",
     "accent.onPrimary": "#0B0B0B",
+    # Reserved for Orchestrator-authored moments only (live repair, hand-off
+    # narration) - never used for ordinary interactive/selection chrome, so it
+    # keeps meaning "the Orchestrator did something here" wherever it appears.
+    "accent.relay": "#F0A857",
     # Primary action button (neutral bright, Codex/Linear style)
     "action.primaryBg": "#EDEDED",
     "action.primaryFg": "#131313",
@@ -41,15 +47,26 @@ COLORS: dict[str, str] = {
     "state.info": "#79A9FF",
 }
 
-SPACING = {"xxs": 2, "xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24, "xxl": 32}
+SPACING = {"xxs": 2, "xs": 4, "sm": 8, "md": 12, "ml": 14, "lg": 16, "xl": 24, "xxl": 32}
 RADIUS = {"badge": 4, "control": 5, "panel": 8}
+
+# controlHeight/rowHeight below used to be hand-picked pixel constants chosen by
+# eye against the body type size - as fonts render slightly differently per
+# platform/DPI, a box sized independently of the text it holds drifts out of
+# alignment with that text. Deriving them from TYPE_SCALE["body"]'s own declared
+# size keeps them provably in sync with it instead. This is a static formula
+# (not a live QFontMetrics query) so design_tokens stays importable before any
+# QApplication exists, exactly like before - only the arithmetic changed, not
+# the import-time safety.
+_BODY_LINE_HEIGHT = round(TYPE_SCALE["body"].size * 1.4)
+
 METRICS = {
-    "controlHeight": 28,
+    "controlHeight": _BODY_LINE_HEIGHT + 2 * (SPACING["xs"] + 1),
     "iconButton": 28,
     "iconSize": 16,
     "navIconSize": 18,
-    "rowHeight": 26,
-    "rowPadding": 5,
+    "rowHeight": _BODY_LINE_HEIGHT + 2 * SPACING["xs"],
+    "rowPadding": SPACING["xs"] + 1,
     "topBarHeight": 48,
     "sidebarWidth": 200,
 }

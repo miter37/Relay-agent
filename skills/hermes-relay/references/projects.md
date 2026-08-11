@@ -46,7 +46,16 @@ relay project schema --machine
   "nodes": [
     { "node_id": "pick",  "task_id": "01K..." },
     { "node_id": "image", "task_id": "01K..." },
-    { "node_id": "page",  "task_id": "01K..." }
+    {
+      "node_id": "page",
+      "task_id": "01K...",
+      "checkpoint": {
+        "enabled": true,
+        "reviewer": "human",
+        "guidelines": "Check factual accuracy, required sections, and readability.",
+        "max_reruns": 2
+      }
+    }
   ],
   "connections": [
     { "from_node": "pick",  "from_role": "result", "to_node": "image", "to_alias": "A1" },
@@ -198,13 +207,53 @@ relay project-run cancel <PROJECT_RUN_ID> --machine
 
 ---
 
-## 6. 체크포인트(사람 승인)
+## 6. 체크포인트와 결과 검수
 
-노드에 checkpoint를 걸면 그 단계 완료 후 `awaiting_approval`로 멈춘다.
+`checkpoint.enabled`만 켜면 기존의 사람 승인 체크포인트로 동작하고, 단계 완료 후
+`awaiting_approval`로 멈춘다. `reviewer`를 명시하면 결과 검수 게이트가 된다. 검수 게이트는
+결과를 먼저 후보로 보관하고, 확인 전에는 Artifact 검색·재사용이나 Working-folder 배달에
+노출하지 않는다.
 
 ```json
-{ "node_id": "publish", "task_id": "01K...", "checkpoint": { "enabled": true } }
+{
+  "node_id": "publish",
+  "task_id": "01K...",
+  "checkpoint": {
+    "enabled": true,
+    "reviewer": "human",
+    "guidelines": "최종 보고서의 사실성, 필수 섹션, 문체를 확인한다.",
+    "max_reruns": 2
+  }
+}
 ```
+
+`reviewer`는 `human` 또는 `orchestrator`다. `orchestrator`인 경우 `guidelines`가 필수이고,
+`max_reruns`는 자동 재실행 상한(0–20)이다. Orchestrator가 판단할 수 없거나 상한에 도달하면
+자동으로 사람 검수로 넘긴다. 사람 검수의 피드백 재실행은 제한하지 않는다.
+
+등록·수정 시 definition JSON에 직접 넣거나, 기존 Project의 특정 노드만 CLI로 바꿀 수 있다.
+
+```sh
+relay project review-config <PROJECT_ID> --node publish --reviewer human --machine
+relay project review-config <PROJECT_ID> --node publish \
+  --reviewer orchestrator --guidelines "필수 섹션과 수치의 근거를 확인하고 누락 시 재실행" \
+  --max-reruns 2 --machine
+relay project review-config <PROJECT_ID> --node publish --disable --machine
+```
+
+현재 결과 검수는 전용 Inbox를 쓰며, CLI에서도 같은 세션을 조회·결정할 수 있다.
+
+```sh
+relay review list --status pending_human --machine
+relay review show <REVIEW_ID> --machine
+relay review confirm <REVIEW_ID> --machine
+relay review rerun <REVIEW_ID> --comment "표의 근거 링크를 보강해줘" --machine
+relay review reject <REVIEW_ID> --reason "필수 산출물이 없음" --machine
+relay project-run reviews <PROJECT_RUN_ID> --machine
+```
+
+`project-run show`의 `workflow_status`와 `reviews`, `project-run steps`의 `awaiting_review`를
+함께 보면 파이프라인이 검수에서 멈췄는지 확인할 수 있다.
 
 ```sh
 relay approval list --project-run <PROJECT_RUN_ID> --machine

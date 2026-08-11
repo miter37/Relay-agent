@@ -59,6 +59,19 @@ from .validation import (
     validate_text_result,
 )
 
+
+def _decode_json_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 logger = logging.getLogger(__name__)
 
 TECHNICAL_FALLBACK_CODES = {
@@ -257,6 +270,7 @@ class RelayEngine:
             "timeout_seconds": request.timeout_seconds,
             "model": request.model,
             "trigger_type": trigger_type,
+            "review_policy": task_definition.get("review_policy") if task_definition else None,
         }
         if task_definition:
             snapshot["task_id"] = task_definition.get("task_id")
@@ -377,9 +391,7 @@ class RelayEngine:
         # appear in task text Relay generated itself (e.g. the Orchestrator's own
         # prompt, which embeds raw worker log/error text that can contain paths).
         is_service_caller = request.caller.lower() in {"hermes", "service", "daemon", "schedule"}
-        requested_target = request.target_path or (
-            None if is_service_caller else infer_target_path(request.task)
-        )
+        requested_target = request.target_path or (None if is_service_caller else infer_target_path(request.task))
         target = resolve_target_path(requested_target) if requested_target else None
         request.target_path = str(target) if target else None
         if schedule_id and request.caller.lower() != "schedule":
@@ -473,6 +485,9 @@ class RelayEngine:
             "task_id": task_id,
             "task_summary": task_summary,
             "receipt_schema_version": RECEIPT_SCHEMA_VERSION,
+            "review_status": "not_started",
+            "review_id": request.review_id,
+            "review_policy_json": self._effective_review_policy(request, task_definition),
             "task_snapshot_json": self._task_snapshot(
                 request, trigger_type=resolved_trigger, artifact_inputs=resolved_inputs, task_definition=task_definition
             ),
@@ -551,6 +566,20 @@ class RelayEngine:
             )
         self.db.add_event(job_id, "JOB_CREATED", {"queued": queued, "request_id": request.request_id})
         return self.db.get_job(job_id) or row, False
+
+    @staticmethod
+    def _effective_review_policy(request: JobRequest, task_definition: dict[str, Any] | None) -> str | None:
+        mode = str(request.review_mode or "inherit").casefold()
+        if mode not in {"inherit", "human", "off"}:
+            raise RelayError("INVALID_REQUEST", "review_mode must be inherit, human, or off.")
+        if mode == "off" or request.caller.lower() in {"service", "schedule", "daemon"}:
+            return None
+        if mode == "human":
+            return json.dumps({"enabled": True, "reviewer": "human"}, ensure_ascii=False)
+        policy = (task_definition or {}).get("review_policy") if task_definition else None
+        if not policy:
+            return None
+        return policy if isinstance(policy, str) else json.dumps(policy, ensure_ascii=False)
 
     def _worker_chain(self, job: dict[str, Any], request: JobRequest) -> list[str]:
         requested = request.worker
@@ -673,6 +702,8 @@ class RelayEngine:
             raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         request = JobRequest.from_dict(json.loads(job["request_json"]))
         self._resolve_request_task(request)
+        review_policy = _decode_json_object(job.get("review_policy_json"))
+        review_enabled = bool(review_policy and review_policy.get("enabled"))
         input_manifest = json.loads(job.get("input_manifest_json") or "[]")
         if not isinstance(input_manifest, list):
             input_manifest = []
@@ -888,37 +919,64 @@ class RelayEngine:
                 self._set_progress(job_id, stage="delivering", process_alive=False)
                 output_path = safe_resolve(Path(job["output_path"]))
                 artifact_path = safe_resolve(Path(job["artifact_path"]))
+                candidate_root = self.config.home / "review-candidates" / job_id if review_enabled else None
+                delivery_output = candidate_root / output_path.name if candidate_root else output_path
+                delivery_artifacts = candidate_root / "artifacts" if candidate_root else artifact_path
+                if candidate_root:
+                    ensure_dir(delivery_artifacts)
                 atomic_deliver_pair(
                     ctx.result_file,
-                    output_path,
+                    delivery_output,
                     ctx.artifact_dir,
-                    artifact_path,
+                    delivery_artifacts,
                     overwrite=request.overwrite,
                 )
-                if target_workspace and target_delta and (target_delta.changed or target_delta.deleted):
+                target_manifest = None
+                if target_workspace and target_delta:
+                    target_manifest = {
+                        "target": str(target_workspace.target),
+                        "existed": target_workspace.existed,
+                        "baseline": target_workspace.baseline,
+                        "delta": target_delta.to_dict(),
+                    }
+                    if candidate_root and (target_delta.changed or target_delta.deleted):
+                        delta_root = candidate_root / "target-delta"
+                        for relative in target_delta.changed:
+                            source = ctx.artifact_dir / Path(relative)
+                            destination = delta_root / Path(relative)
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(source, destination)
+                if (
+                    not review_enabled
+                    and target_workspace
+                    and target_delta
+                    and (target_delta.changed or target_delta.deleted)
+                ):
                     apply_delta(target_workspace, target_delta)
                 self.db.add_artifact(
                     job_id,
                     relative_path=output_path.name,
-                    final_path=str(output_path),
+                    final_path=str(delivery_output),
                     mime_type="application/json" if request.result_format == "json" else "text/plain",
-                    size=output_path.stat().st_size,
-                    sha256=sha256_file(output_path),
+                    size=delivery_output.stat().st_size,
+                    sha256=sha256_file(delivery_output),
                     artifact_uid=new_artifact_uid(),
                     role="result",
                     producer_attempt_id=attempt_id,
+                    publication_status="candidate" if review_enabled else "published",
                 )
                 for item in artifact_records:
                     self.db.add_artifact(
                         job_id,
                         relative_path=item["relative_path"],
-                        final_path=str(artifact_path / item["relative_path"]),
+                        final_path=str(delivery_artifacts / item["relative_path"]),
                         mime_type=item["mime_type"],
                         size=item["size"],
                         sha256=item["sha256"],
                         artifact_uid=new_artifact_uid(),
                         role=item.get("role") or "output",
                         producer_attempt_id=attempt_id,
+                        publication_status="candidate" if review_enabled else "published",
                     )
                 receipt = {
                     "ok": True,
@@ -934,12 +992,12 @@ class RelayEngine:
                     "task_snapshot": json.loads(job["task_snapshot_json"]) if job.get("task_snapshot_json") else None,
                     "task_inputs": dict(request.inputs or {}),
                     "worker": worker,
-                    "result_path": str(output_path),
-                    "artifact_path": str(artifact_path),
+                    "result_path": str(delivery_output),
+                    "artifact_path": str(delivery_artifacts),
                     "result_status": result_status,
                     "uncertainties_count": len(value.get("uncertainties", [])) if value else None,
                     "missing_items_count": len(value.get("missing_items", [])) if value else None,
-                    "result_sha256": sha256_file(output_path),
+                    "result_sha256": sha256_file(delivery_output),
                     "artifacts_count": len(artifact_records),
                     "materialized_artifacts_count": len(materialized_artifacts),
                     "target_path": str(target_workspace.target) if target_workspace else None,
@@ -947,6 +1005,8 @@ class RelayEngine:
                     "attempted_workers": [e["worker"] for e in errors] + [worker],
                     "content_verified": False,
                     "content_verification_note": "Relay verifies delivery and format, not factual accuracy.",
+                    "review_status": "pending_human" if review_enabled else "not_required",
+                    "delivery_status": "deferred" if review_enabled else "delivered",
                 }
                 final_job_status = "PARTIAL" if result_status == "partial" else "COMPLETED"
                 self.db.update_job(
@@ -959,6 +1019,11 @@ class RelayEngine:
                     completed_at=utc_now(),
                     error_code=None,
                     error_message=None,
+                    review_status="pending_human" if review_enabled else "not_required",
+                    review_candidate_root=str(candidate_root) if candidate_root else None,
+                    review_target_delta_json=json.dumps(target_manifest, ensure_ascii=False)
+                    if target_manifest
+                    else None,
                 )
                 self.db.update_attempt(
                     attempt_id,
@@ -967,9 +1032,9 @@ class RelayEngine:
                     exit_code=outcome.exit_code,
                 )
                 self.db.add_event(job_id, "JOB_COMPLETED", receipt)
-                json_dump(output_path.parent / "relay-receipt.json", receipt)
+                json_dump(delivery_output.parent / "relay-receipt.json", receipt)
                 json_dump(
-                    artifact_path / "manifest.json",
+                    delivery_artifacts / "manifest.json",
                     {
                         "job_id": job_id,
                         "run_id": job_id,
@@ -986,7 +1051,17 @@ class RelayEngine:
                     },
                 )
                 self.db.scrub_non_replayable(job_id)
-                self._refresh_search_index(job_id)
+                if not review_enabled:
+                    self._refresh_search_index(job_id)
+                else:
+                    from .reviews.service import ReviewService
+
+                    ReviewService(self.db, self, self.config).create_task_review(
+                        job_id,
+                        reviewer="human",
+                        max_reruns=0,
+                        review_id=request.review_id,
+                    )
                 self._clear_progress(job_id)
                 return receipt
             except RelayError as err:
@@ -1300,6 +1375,7 @@ class RelayEngine:
             "output_contract": task.get("output_contract"),
             "validation_policy": task.get("validation_policy"),
             "task_summary": task.get("task_summary"),
+            "review_policy": _decode_json_object(task.get("review_policy_json")),
         }
         job, reused = self.create_job(
             base,
@@ -1388,6 +1464,7 @@ class RelayEngine:
             "output_contract": task_snapshot.get("output_contract"),
             "validation_policy": task_snapshot.get("validation_policy"),
             "task_summary": task_snapshot.get("task_summary"),
+            "review_policy": task_snapshot.get("review_policy"),
         }
         return self.create_job(
             base,

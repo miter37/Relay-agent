@@ -11,8 +11,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-from relay.cli import _read_input_schema, build_parser
+from relay.cli import _project_cli_request, _read_input_schema, build_parser
+from relay.config import Config
 from relay.errors import RelayError
 from relay.profiles import BUILTIN_PROFILES
 from relay.projects.models import (
@@ -96,6 +98,90 @@ class ProjectSchemaCommandTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["project", "schema", "--machine"])
         self.assertEqual(args.project_command, "schema")
+
+    def test_review_config_subcommand_exposes_node_review_controls(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "project",
+                "review-config",
+                "project-1",
+                "--node",
+                "publish",
+                "--reviewer",
+                "orchestrator",
+                "--guidelines",
+                "Check factual accuracy and required output sections.",
+                "--max-reruns",
+                "3",
+                "--machine",
+            ]
+        )
+        self.assertEqual(args.project_command, "review-config")
+        self.assertEqual(args.node, "publish")
+        self.assertEqual(args.reviewer, "orchestrator")
+        self.assertEqual(args.max_reruns, 3)
+
+    def test_review_config_updates_only_the_selected_node(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "project",
+                "review-config",
+                "project-1",
+                "--node",
+                "publish",
+                "--reviewer",
+                "orchestrator",
+                "--guidelines",
+                "Check the final report.",
+                "--max-reruns",
+                "1",
+            ]
+        )
+        client = Mock()
+        client.request.side_effect = [
+            {
+                "project": {
+                    "definition_json": json.dumps(
+                        {
+                            "name": "P",
+                            "nodes": [
+                                {"node_id": "prepare", "task_id": "t1"},
+                                {"node_id": "publish", "task_id": "t2", "checkpoint": {"deliver_to": []}},
+                            ],
+                        }
+                    )
+                }
+            },
+            {"ok": True},
+        ]
+        with patch("relay.cli._ensure_daemon", return_value=client):
+            _project_cli_request(args, Config())
+        payload = client.request.call_args_list[1].args[2]
+        self.assertEqual(payload["nodes"][0], {"node_id": "prepare", "task_id": "t1"})
+        self.assertEqual(
+            payload["nodes"][1]["checkpoint"],
+            {
+                "deliver_to": [],
+                "enabled": True,
+                "reviewer": "orchestrator",
+                "guidelines": "Check the final report.",
+                "max_reruns": 1,
+            },
+        )
+
+    def test_project_run_reviews_route_is_available(self):
+        parser = build_parser()
+        args = parser.parse_args(["project-run", "reviews", "run-1", "--machine"])
+        self.assertEqual(args.project_run_command, "reviews")
+        client = Mock()
+        client.request.return_value = {"ok": True, "reviews": []}
+        with patch("relay.cli._ensure_daemon", return_value=client):
+            from relay.cli import _project_run_cli_request
+
+            _project_run_cli_request(args, Config())
+        client.request.assert_called_once_with("GET", "/v1/project-runs/run-1/reviews")
 
     def test_schema_describes_the_fields_the_validator_enforces(self):
         properties = PROJECT_DEFINITION_SCHEMA["properties"]

@@ -19,8 +19,18 @@ NODES = [
 CONNECTIONS = [
     {"from_node": "official_research", "from_role": "result", "to_node": "verify_merge_select", "to_alias": "A1"},
     {"from_node": "media_research", "from_role": "result", "to_node": "verify_merge_select", "to_alias": "A2"},
-    {"from_node": "verify_merge_select", "from_role": "result", "to_node": "analysis_translation_script", "to_alias": "A1"},
-    {"from_node": "analysis_translation_script", "from_role": "result", "to_node": "image_collection", "to_alias": "A1"},
+    {
+        "from_node": "verify_merge_select",
+        "from_role": "result",
+        "to_node": "analysis_translation_script",
+        "to_alias": "A1",
+    },
+    {
+        "from_node": "analysis_translation_script",
+        "from_role": "result",
+        "to_node": "image_collection",
+        "to_alias": "A1",
+    },
     {"from_node": "analysis_translation_script", "from_role": "result", "to_node": "render_and_qa", "to_alias": "A1"},
     {"from_node": "image_collection", "from_role": "image_bundle", "to_node": "render_and_qa", "to_alias": "A2"},
 ]
@@ -102,7 +112,9 @@ def _receipt(steps: list[dict], *, retry_node: str | None = None) -> dict:
     return {"project_run_id": "project-run-case", "status": "completed", "steps": receipt_steps}
 
 
-def _base_case(status: str, *, completed: int, failed: int, blocked: int, failed_node_id: str | None, error_code: str | None) -> dict:
+def _base_case(
+    status: str, *, completed: int, failed: int, blocked: int, failed_node_id: str | None, error_code: str | None
+) -> dict:
     return {
         "catalog_item": {
             "project_run_id": "project-run-case",

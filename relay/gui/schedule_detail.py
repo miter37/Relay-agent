@@ -13,8 +13,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .design_html import kv_row
 from .design_typography import apply_type
-from .design_widgets import IconButton
+from .design_widgets import IconButton, LabeledButton
 
 
 class ScheduleDetailView(QWidget):
@@ -38,9 +39,6 @@ class ScheduleDetailView(QWidget):
         header.addWidget(self.title_label, 1)
         self.status_label = QLabel()
         header.addWidget(self.status_label)
-        self.run_now_button = IconButton("play", "Run this Schedule now", tone="accent")
-        self.run_now_button.clicked.connect(self._run_now)
-        header.addWidget(self.run_now_button)
         self.pause_button = IconButton("pause", "Pause this Schedule")
         self.pause_button.clicked.connect(self._pause)
         header.addWidget(self.pause_button)
@@ -59,6 +57,11 @@ class ScheduleDetailView(QWidget):
         self.open_output_button = IconButton("folder-open", "Open the last output folder")
         self.open_output_button.clicked.connect(self._open_output)
         header.addWidget(self.open_output_button)
+        # Same primary-action promotion as the other detail screens; placed
+        # last so it still reads as the one action that outweighs the rest.
+        self.run_now_button = LabeledButton("play", "Run now", tone="primary")
+        self.run_now_button.clicked.connect(self._run_now)
+        header.addWidget(self.run_now_button)
         root.addLayout(header)
 
         self.tabs = QTabWidget()
@@ -90,14 +93,7 @@ class ScheduleDetailView(QWidget):
             ("Output folder", schedule.get("output_root")),
             ("Attention", schedule.get("attention_code")),
         )
-        self.overview.setHtml(
-            "<table>{}</table>".format(
-                "".join(
-                    f"<tr><td><b>{escape(str(key))}</b></td><td>{escape(str(value or '—'))}</td></tr>"
-                    for key, value in fields
-                )
-            )
-        )
+        self.overview.setHtml(f"<table>{''.join(kv_row(key, value or '—') for key, value in fields)}</table>")
         self.task_settings.setHtml(self._format(schedule.get("task_settings") or schedule.get("rule") or {}))
         self.run_history.setHtml(self._format(runs))
 

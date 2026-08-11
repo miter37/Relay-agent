@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QScrollArea,
@@ -55,7 +56,7 @@ from PySide6.QtWidgets import (
 from .design_icons import icon
 from .design_tokens import COLORS
 from .design_typography import apply_type
-from .design_widgets import EmptyState, LabeledButton, StatusBadge
+from .design_widgets import EmptyState, LabeledButton, StatusBadge, style_data_table_item
 
 _ERROR_HUMANIZATION: dict[str, str] = {
     "ALL_WORKERS_FAILED": "All configured workers failed for this step.",
@@ -212,6 +213,8 @@ def _step_attempts(step: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _verdict(run: dict[str, Any]) -> str:
     status = str(run.get("status") or "").casefold()
+    if str(run.get("workflow_status") or "").casefold() == "needs_review":
+        return "Awaiting review · results are ready to inspect"
     if status == "completed":
         step_count = int(run.get("step_count") or 0)
         artifact_count = int(run.get("final_artifact_count") or 0)
@@ -230,6 +233,10 @@ def _verdict(run: dict[str, Any]) -> str:
         blocked = int(run.get("blocked_step_count") or 0)
         suffix = f" · {blocked} step{'s' if blocked != 1 else ''} waiting downstream" if blocked else ""
         return f"Awaiting approval{suffix}"
+    if status == "awaiting_review":
+        blocked = int(run.get("blocked_step_count") or 0)
+        suffix = f" · {blocked} step{'s' if blocked != 1 else ''} waiting downstream" if blocked else ""
+        return f"Awaiting review{suffix}"
     if status in {"running", "queued", "accepted"}:
         step_count = int(run.get("step_count") or 0)
         completed = int(run.get("completed_step_count") or 0)
@@ -254,6 +261,8 @@ class ProjectRunsView(QWidget):
     open_run_logs_requested = Signal(str)
     open_run_answer_requested = Signal(str)
     reexecute_from_node_requested = Signal(str)
+    reexecute_with_comment_requested = Signal(str, str)
+    edit_task_requested = Signal(str)
     artifact_preview_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -305,6 +314,8 @@ class ProjectRunsView(QWidget):
         self.detail.open_run_logs_requested.connect(self.open_run_logs_requested.emit)
         self.detail.open_run_answer_requested.connect(self.open_run_answer_requested.emit)
         self.detail.reexecute_from_node_requested.connect(self.reexecute_from_node_requested.emit)
+        self.detail.reexecute_with_comment_requested.connect(self.reexecute_with_comment_requested.emit)
+        self.detail.edit_task_requested.connect(self.edit_task_requested.emit)
         self.detail.artifact_preview_requested.connect(self.artifact_preview_requested.emit)
         body.addWidget(self.detail, 1)
         root.addLayout(body, 1)
@@ -359,6 +370,8 @@ class ProjectRunsView(QWidget):
             run["steps"] = detail_payload["steps"]
         if isinstance(detail_payload.get("approvals"), list):
             run["approvals"] = detail_payload["approvals"]
+        if isinstance(detail_payload.get("reviews"), list):
+            run["reviews"] = detail_payload["reviews"]
         self.runs[run_id] = run
         self.detail.set_run(run)
 
@@ -377,6 +390,12 @@ class ProjectRunsView(QWidget):
         run = self.runs.setdefault(str(project_run_id), {})
         run.setdefault("project_run_id", str(project_run_id))
         run["approvals"] = list(approvals)
+        self.detail.set_run(self.runs.get(str(project_run_id), {}))
+
+    def set_run_reviews(self, project_run_id: str, reviews: list[dict[str, Any]]) -> None:
+        run = self.runs.setdefault(str(project_run_id), {})
+        run.setdefault("project_run_id", str(project_run_id))
+        run["reviews"] = list(reviews)
         self.detail.set_run(self.runs.get(str(project_run_id), {}))
 
     def clear_selection(self) -> None:
@@ -551,6 +570,7 @@ class ProjectRunsView(QWidget):
             "queued": (COLORS["state.warning"], COLORS["bg.surface"]),
             "accepted": (COLORS["state.warning"], COLORS["bg.surface"]),
             "awaiting_approval": (COLORS["state.warning"], COLORS["bg.surface"]),
+            "awaiting_review": (COLORS["state.warning"], COLORS["bg.surface"]),
             "failed": (COLORS["state.danger"], COLORS["bg.surface"]),
             "cancelled": (COLORS["text.muted"], COLORS["bg.surface"]),
         }
@@ -573,6 +593,8 @@ class ProjectRunDetailView(QWidget):
     open_run_logs_requested = Signal(str)
     open_run_answer_requested = Signal(str)
     reexecute_from_node_requested = Signal(str)
+    reexecute_with_comment_requested = Signal(str, str)
+    edit_task_requested = Signal(str)
     artifact_preview_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -583,6 +605,11 @@ class ProjectRunDetailView(QWidget):
         self._node_artifacts: dict[str, list[dict[str, Any]]] = {}
         self._pipeline_inspector_open = False
         self._pipeline_inspector_node_id: str | None = None
+        # Nodes the Orchestrator made a repair decision on for this run, kept as
+        # a plain instance attribute (not part of self._run) so it survives the
+        # polling refreshes that replace self._run wholesale and is only reset
+        # when the selected run itself changes, mirroring how receipt caching works.
+        self._repaired_node_ids: set[str] = set()
 
         layout = QVBoxLayout(self)
 
@@ -682,6 +709,8 @@ class ProjectRunDetailView(QWidget):
         self.inspector.open_run_answer_requested.connect(self.open_run_answer_requested.emit)
         self.inspector.open_artifact_requested.connect(self.open_output_requested.emit)
         self.inspector.reexecute_from_node_requested.connect(self.reexecute_from_node_requested.emit)
+        self.inspector.reexecute_with_comment_requested.connect(self.reexecute_with_comment_requested.emit)
+        self.inspector.edit_task_requested.connect(self.edit_task_requested.emit)
         self.inspector.close_requested.connect(self._close_pipeline_inspector)
 
         self.artifact_strip = QHBoxLayout()
@@ -711,6 +740,7 @@ class ProjectRunDetailView(QWidget):
         if current_run_id != previous_run_id:
             self._pipeline_inspector_open = False
             self._pipeline_inspector_node_id = None
+            self._repaired_node_ids = set()
         self._steps = list(self._run.get("steps") or []) if isinstance(self._run.get("steps"), list) else []
 
         if not self._run.get("project_run_id"):
@@ -739,7 +769,8 @@ class ProjectRunDetailView(QWidget):
         self.artifact_label.setVisible(True)
 
         status = str(self._run.get("status") or "unavailable").casefold()
-        self.status_badge.set_status(status)
+        display_status = "awaiting_review" if self._run.get("workflow_status") == "needs_review" else status
+        self.status_badge.set_status(display_status)
         self.verdict_label.setText(_verdict(self._run))
 
         is_failed = status == "failed"
@@ -767,7 +798,9 @@ class ProjectRunDetailView(QWidget):
             status = str(step.get("status") or "unavailable").casefold()
             attempt_count = int(step.get("attempt_count") or len(_step_attempts(step)))
             duration = _format_duration(step.get("started_at"), step.get("completed_at"))
-            started = str(step.get("started_at") or "")[:19] or ("Not started" if status in {"blocked", "pending"} else "—")
+            started = str(step.get("started_at") or "")[:19] or (
+                "Not started" if status in {"blocked", "pending"} else "—"
+            )
             requested_worker = self._requested_worker_for_step(step)
             actual_worker = self._actual_worker_for_step(step)
             error_code = str(step.get("error_code") or "").strip()
@@ -791,6 +824,8 @@ class ProjectRunDetailView(QWidget):
                 if column == 8 and value:
                     item.setData(Qt.UserRole, value)
                     item.setForeground(QColor(COLORS["accent.primary"]))
+                elif column in (5, 9):  # Duration, Task Run (id)
+                    style_data_table_item(item)
                 item.setToolTip(value)
                 self.steps_table.setItem(row, column, item)
 
@@ -875,9 +910,7 @@ class ProjectRunDetailView(QWidget):
     def _render_pipeline(self) -> None:
         snapshot = self._run.get("snapshot")
         node_artifacts = {
-            node_id: list(items)
-            for node_id, items in self._node_artifacts.items()
-            if isinstance(items, list)
+            node_id: list(items) for node_id, items in self._node_artifacts.items() if isinstance(items, list)
         }
         for final_artifact in self._run.get("final_artifact_ids") or []:
             if not isinstance(final_artifact, dict):
@@ -895,6 +928,7 @@ class ProjectRunDetailView(QWidget):
             self._steps,
             self._run.get("receipt_steps") or [],
             node_artifacts,
+            repaired_node_ids=self._repaired_node_ids,
         )
 
     def _render_artifacts_tab(self) -> None:
@@ -1054,6 +1088,13 @@ class ProjectRunDetailView(QWidget):
     def cache_orchestrator(self, data: dict[str, Any]) -> None:
         if isinstance(data, dict):
             self.orchestrator_view.set_orchestrator(data)
+            events = data.get("events") or []
+            self._repaired_node_ids = {
+                str(event["node_id"])
+                for event in events
+                if isinstance(event, dict) and event.get("kind") == "decision" and event.get("node_id")
+            }
+            self._render_pipeline()
 
     def cache_orchestrator_error(self, message: str) -> None:
         self.orchestrator_view.set_unavailable(str(message or "Orchestrator data is unavailable."))
@@ -1172,6 +1213,8 @@ class ProjectRunInspectorView(QWidget):
     open_run_answer_requested = Signal(str)
     open_artifact_requested = Signal(str)
     reexecute_from_node_requested = Signal(str)
+    reexecute_with_comment_requested = Signal(str, str)
+    edit_task_requested = Signal(str)
     close_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -1334,9 +1377,20 @@ class ProjectRunInspectorView(QWidget):
         self.open_answer_button.clicked.connect(self._emit_open_answer)
         self.reexec_button = LabeledButton("play", "Re-execute from this node")
         self.reexec_button.clicked.connect(self._emit_reexec)
+        self.comment_reexec_button = LabeledButton("repeat", "Add comment & re-run")
+        self.comment_reexec_button.setToolTip(
+            "Append a one-off note to this node's instructions and re-run from here. "
+            "The registered Task is not changed; use 'Edit Task' for a bigger change."
+        )
+        self.comment_reexec_button.clicked.connect(self._emit_reexec_with_comment)
+        self.edit_task_button = LabeledButton("pencil", "Edit Task")
+        self.edit_task_button.setToolTip("Open this node's Task definition in the Tasks screen.")
+        self.edit_task_button.clicked.connect(self._emit_edit_task)
         actions.addWidget(self.open_logs_button)
         actions.addWidget(self.open_answer_button)
         actions.addWidget(self.reexec_button)
+        actions.addWidget(self.comment_reexec_button)
+        actions.addWidget(self.edit_task_button)
         actions.addStretch(1)
         layout.addLayout(actions)
         return section
@@ -1427,9 +1481,7 @@ class ProjectRunInspectorView(QWidget):
                 self.requested_worker_label.setText("Unavailable")
                 self.actual_worker_label.setText("Unavailable")
                 self.task_run_status_label.setText("Unavailable")
-                self.task_run_error_label.setText(
-                    str(detail.get("error_message") or "Task Run detail is unavailable.")
-                )
+                self.task_run_error_label.setText(str(detail.get("error_message") or "Task Run detail is unavailable."))
                 return
             requested = str(detail.get("requested_worker") or "").strip() or "—"
             actual = str(detail.get("actual_worker") or "").strip()
@@ -1493,6 +1545,8 @@ class ProjectRunInspectorView(QWidget):
                 item.setToolTip(value)
                 if column == 0 and str(artifact.get("artifact_uid") or ""):
                     item.setData(Qt.UserRole, str(artifact.get("artifact_uid")))
+                elif column == 3:  # Sha256
+                    style_data_table_item(item)
                 self.outputs_table.setItem(row, column, item)
 
     def _render_actions(self) -> None:
@@ -1502,6 +1556,8 @@ class ProjectRunInspectorView(QWidget):
         self.open_logs_button.setEnabled(bool(active_task_run_id))
         self.open_answer_button.setEnabled(bool(active_task_run_id) and status in {"completed", "partial", "failed"})
         self.reexec_button.setEnabled(bool(self._project_run_id and self._node_id))
+        self.comment_reexec_button.setEnabled(bool(self._project_run_id and self._node_id))
+        self.edit_task_button.setEnabled(bool(self._step.get("task_id")))
 
     def _emit_open_logs(self) -> None:
         active_task_run_id = str(self._step.get("active_task_run_id") or "")
@@ -1516,6 +1572,24 @@ class ProjectRunInspectorView(QWidget):
     def _emit_reexec(self) -> None:
         if self._project_run_id and self._node_id:
             self.reexecute_from_node_requested.emit(self._node_id)
+
+    def _emit_reexec_with_comment(self) -> None:
+        if not (self._project_run_id and self._node_id):
+            return
+        comment, accepted = QInputDialog.getMultiLineText(
+            self,
+            "Add comment & re-run",
+            f"Note appended to '{self._node_id}'s instructions for this attempt only "
+            "(the registered Task is not changed):",
+        )
+        if not accepted or not comment.strip():
+            return
+        self.reexecute_with_comment_requested.emit(self._node_id, comment.strip())
+
+    def _emit_edit_task(self) -> None:
+        task_id = str(self._step.get("task_id") or "")
+        if task_id:
+            self.edit_task_requested.emit(task_id)
 
 
 class ProjectRunArtifactsView(QWidget):
@@ -1734,8 +1808,10 @@ class ProjectRunArtifactsView(QWidget):
             self.metadata_preview.setText("Loading Artifact preview…")
             self.preview_stack.setCurrentWidget(self.metadata_preview)
             return
-        if kind in {"json", "html", "markdown", "text"} and isinstance(content, dict) and not content.get(
-            "available", True
+        if (
+            kind in {"json", "html", "markdown", "text"}
+            and isinstance(content, dict)
+            and not content.get("available", True)
         ):
             self.metadata_preview.setText("Artifact content is unavailable.")
             self.preview_stack.setCurrentWidget(self.metadata_preview)
@@ -1816,10 +1892,15 @@ class ProjectRunArtifactsView(QWidget):
 
 _PIPELINE_STATUS_COLORS: dict[str, str] = {
     "completed": COLORS["state.success"],
-    "running": COLORS["state.info"],
+    # accent.relay, not the generic state.info blue: a node actively running is
+    # the one moment on this screen that's specifically about an agent (or the
+    # Orchestrator) doing something right now, and the signature accent is
+    # reserved for exactly that (see design_tokens.COLORS["accent.relay"]).
+    "running": COLORS["accent.relay"],
     "queued": COLORS["state.warning"],
     "accepted": COLORS["state.warning"],
     "awaiting_approval": COLORS["state.warning"],
+    "awaiting_review": COLORS["state.warning"],
     "failed": COLORS["state.danger"],
     "blocked": COLORS["text.muted"],
     "cancelled": COLORS["text.muted"],
@@ -1875,6 +1956,7 @@ class ProjectRunPipelineView(QWidget):
         self._steps_by_id: dict[str, dict[str, Any]] = {}
         self._receipt_steps_by_id: dict[str, dict[str, Any]] = {}
         self._node_artifacts_by_id: dict[str, list[dict[str, Any]]] = {}
+        self._repaired_node_ids: set[str] = set()
 
         self._root_layout = QVBoxLayout(self)
         self._root_layout.setContentsMargins(0, 0, 0, 0)
@@ -1911,7 +1993,7 @@ class ProjectRunPipelineView(QWidget):
         legend.setObjectName("mutedText")
         legend_layout = QHBoxLayout(legend)
         legend_layout.setContentsMargins(0, 0, 0, 0)
-        for label in ("Completed", "Running", "Failed", "Blocked", "Awaiting approval", "Cancelled"):
+        for label in ("Completed", "Running", "Failed", "Blocked", "Awaiting review", "Awaiting approval", "Cancelled"):
             chip = QLabel(label)
             chip.setObjectName("statusBadge")
             apply_type(chip, "caption")
@@ -1930,6 +2012,7 @@ class ProjectRunPipelineView(QWidget):
         self._steps_by_id = {}
         self._receipt_steps_by_id = {}
         self._node_artifacts_by_id = {}
+        self._repaired_node_ids = set()
         self._render()
 
     def set_run(
@@ -1939,8 +2022,11 @@ class ProjectRunPipelineView(QWidget):
         steps: list[dict[str, Any]],
         receipt_steps: list[dict[str, Any]] | None = None,
         node_artifacts: dict[str, list[dict[str, Any]]] | None = None,
+        *,
+        repaired_node_ids: set[str] | None = None,
     ) -> None:
         self._project_run_id = project_run_id
+        self._repaired_node_ids = set(repaired_node_ids or ())
         definition: dict[str, Any] = {}
         if isinstance(snapshot, dict):
             inner = snapshot.get("project_definition")
@@ -2041,11 +2127,17 @@ class ProjectRunPipelineView(QWidget):
                 str(from_step.get("status") or "").casefold() == "failed"
                 or str(to_step.get("status") or "").casefold() == "blocked"
             )
+            # A quiet, one-color callout for a connection whose source node the
+            # Orchestrator actually repaired - only when that node went on to
+            # succeed; a still-failed source keeps the dashed/red failure signal,
+            # which matters more than "an attempt was made."
+            repaired = from_node in self._repaired_node_ids and not dashed
             edge_specs.append(
                 {
                     "from_node": from_node,
                     "to_node": to_node,
                     "dashed": dashed,
+                    "repaired": repaired,
                 }
             )
         self.cards_container.set_edge_specs(edge_specs)
@@ -2094,6 +2186,7 @@ class ProjectRunGraphCanvas(QWidget):
                     "from": source_point,
                     "to": target_point,
                     "dashed": bool(spec.get("dashed")),
+                    "repaired": bool(spec.get("repaired")),
                 }
             )
         return segments
@@ -2103,9 +2196,14 @@ class ProjectRunGraphCanvas(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         for segment in self.edge_segments():
-            color = QColor(COLORS["state.danger"] if segment["dashed"] else COLORS["text.muted"])
+            if segment["dashed"]:
+                color = QColor(COLORS["state.danger"])
+            elif segment["repaired"]:
+                color = QColor(COLORS["accent.relay"])
+            else:
+                color = QColor(COLORS["text.muted"])
             pen = QPen(color)
-            pen.setWidth(1)
+            pen.setWidth(2 if segment["repaired"] else 1)
             if segment["dashed"]:
                 pen.setStyle(Qt.DashLine)
             painter.setPen(pen)
@@ -2368,10 +2466,12 @@ class ProjectRunTimelineView(QWidget):
                         "completed_at": attempt.get("completed_at"),
                         "start": start,
                         "end": end,
-                        "not_started": not start and str(attempt.get("status") or status).casefold()
+                        "not_started": not start
+                        and str(attempt.get("status") or status).casefold()
                         in {"blocked", "pending", "queued", "cancelled"},
                         "display_label": "Not started"
-                        if not start and str(attempt.get("status") or status).casefold()
+                        if not start
+                        and str(attempt.get("status") or status).casefold()
                         in {"blocked", "pending", "queued", "cancelled"}
                         else node_id,
                     }
@@ -2545,7 +2645,12 @@ class ProjectRunTimelineCanvas(QWidget):
 _ORCHESTRATOR_EVENT_ICON: dict[str, str] = {
     "decision": "check-circle",
     "repair": "check-circle",
-    "report": "alert-circle",
+    # "alert-circle" is not a registered icon name (relay/gui/design_icons.py's
+    # ICON_PATHS has no such entry) - any real "report" event crashed this tab
+    # with a KeyError before it ever got a chance to render. Never previously
+    # exercised by a test because no existing test fed a "report"-kind event
+    # through set_orchestrator.
+    "report": "file-text",
     "fallback": "alert-triangle",
     "note": "info",
 }

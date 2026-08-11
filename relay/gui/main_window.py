@@ -25,12 +25,14 @@ from PySide6.QtWidgets import (
 
 from ..compatibility import evaluate_compatibility
 from .agent_apps import AgentAppWizard
+from .design_icon_app import app_icon
 from .design_tokens import METRICS, SPACING
 from .design_typography import apply_type
 from .design_widgets import IconButton, NavButton
 from .profiles import ProfilesView
 from .project_runs import ProjectRunsView, _artifact_kind
 from .projects import ProjectRunMonitorDialog, ProjectsView
+from .reviews import ReviewsView
 from .routines import RoutinesView
 from .rpc_client import GuiRpcClient
 from .runs import RunsView
@@ -133,6 +135,7 @@ class MainWindow(QMainWindow):
         self.task_run_file_lookups: dict[tuple[int, str], dict] = {}
         self.tasks_index: dict[str, dict] = {}
         self.profiles: list[dict] = []
+        self._pending_task_edit_id: str | None = None
 
         self.projects_index: dict[str, dict] = {}
         self.project_editor = None
@@ -142,10 +145,12 @@ class MainWindow(QMainWindow):
         self.routine_editor = None
 
         self.project_runs_index: dict[str, dict] = {}
+        self.reviews_index: dict[str, dict] = {}
         self.project_run_cursor: str | None = None
         self.project_run_last_tick_at: float = 0.0
 
         self.setWindowTitle("Relay-agent")
+        self.setWindowIcon(app_icon())
         self.resize(1280, 720)
         self._build_ui()
         self._restore_state()
@@ -177,12 +182,17 @@ class MainWindow(QMainWindow):
         title_row = QFrame()
         title_layout = QHBoxLayout(title_row)
         title_layout.setContentsMargins(0, 0, 0, 0)
-        # The sidebar already names the active section and each view carries its own
-        # heading, so the top bar states the section once and leaves branding to the
-        # window title.
+        # "Relay" is the one piece of text that never changes; the active section
+        # name sits after it, separated and visually secondary, so the brand always
+        # reads first regardless of which screen is open.
+        self.brand_label = QLabel("Relay")
+        self.brand_label.setObjectName("brandMark")
+        apply_type(self.brand_label, "title.page")
+        title_layout.addWidget(self.brand_label)
+        title_layout.addSpacing(SPACING["xl"])
         self.page_title_label = QLabel("Runs")
         self.page_title_label.setObjectName("pageTitle")
-        apply_type(self.page_title_label, "title.page")
+        apply_type(self.page_title_label, "title.detail")
         title_layout.addWidget(self.page_title_label)
         title_layout.addStretch(1)
         self.health_dot = QLabel("●")
@@ -201,6 +211,9 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.health_label)
         title_layout.addWidget(self.health_time_label)
         title_layout.addWidget(self.health_refresh_button)
+        # A visible gap between the passive health readout and the one action in the
+        # global bar keeps them from reading as a single blended control cluster.
+        title_layout.addSpacing(SPACING["lg"])
         self.register_task_button = IconButton("plus", "Register a new Task", tone="accent")
         self.register_task_button.clicked.connect(self._show_task_registration)
         title_layout.addWidget(self.register_task_button)
@@ -224,6 +237,9 @@ class MainWindow(QMainWindow):
         self.project_runs_button = NavButton("folder-tree", "Project Runs")
         self.project_runs_button.clicked.connect(self._show_project_runs)
         sidebar_layout.addWidget(self.project_runs_button)
+        self.reviews_button = NavButton("check-circle", "Reviews")
+        self.reviews_button.clicked.connect(self._show_reviews)
+        sidebar_layout.addWidget(self.reviews_button)
         self.tasks_button = NavButton("checklist", "Tasks")
         self.tasks_button.clicked.connect(self._show_tasks)
         sidebar_layout.addWidget(self.tasks_button)
@@ -288,6 +304,8 @@ class MainWindow(QMainWindow):
         self.project_runs_view.open_run_logs_requested.connect(self._open_project_run_logs)
         self.project_runs_view.open_run_answer_requested.connect(self._open_project_run_answer)
         self.project_runs_view.reexecute_from_node_requested.connect(self._reexecute_project_run_from_node)
+        self.project_runs_view.reexecute_with_comment_requested.connect(self._reexecute_project_run_with_comment)
+        self.project_runs_view.edit_task_requested.connect(self._edit_task_from_project_run_node)
         self.detail_stack.addWidget(self.project_runs_view)
         self.tasks_view = TasksView()
         self.tasks_view.refresh_requested.connect(self._refresh_tasks)
@@ -301,6 +319,13 @@ class MainWindow(QMainWindow):
         self.tasks_view.task_run_submitted.connect(self._submit_run_task)
         self.tasks_view.task_run_files_requested.connect(self._load_task_run_files)
         self.detail_stack.addWidget(self.tasks_view)
+        self.reviews_view = ReviewsView()
+        self.reviews_view.refresh_requested.connect(self._refresh_reviews)
+        self.reviews_view.select_review_requested.connect(self._select_review)
+        self.reviews_view.confirm_requested.connect(self._confirm_review)
+        self.reviews_view.rerun_requested.connect(self._rerun_review)
+        self.reviews_view.reject_requested.connect(self._reject_review)
+        self.detail_stack.addWidget(self.reviews_view)
         self.profiles_view = ProfilesView()
         self.profiles_view.create_requested.connect(
             lambda payload: self._request_post("profile_create", "/v1/profiles", payload)
@@ -581,6 +606,7 @@ class MainWindow(QMainWindow):
         self._request(("project_run_v2_detail", project_run_id), f"/v1/project-runs/{project_run_id}")
         self._request(("project_run_v2_steps", project_run_id), f"/v1/project-runs/{project_run_id}/steps")
         self._request(("project_run_v2_approvals", project_run_id), f"/v1/project-runs/{project_run_id}/approvals")
+        self._request(("project_run_v2_reviews", project_run_id), f"/v1/project-runs/{project_run_id}/reviews")
         self._request(("project_run_v2_receipt", project_run_id), f"/v1/project-runs/{project_run_id}/receipt")
         self._request(
             ("project_run_v2_orchestrator", project_run_id), f"/v1/project-runs/{project_run_id}/orchestrator"
@@ -682,6 +708,24 @@ class MainWindow(QMainWindow):
             {"from_node": node_id, "cascade": True},
         )
 
+    def _reexecute_project_run_with_comment(self, node_id: str, comment: str) -> None:
+        if self.current_mode != "normal":
+            return
+        project_run_id = self.selected_project_run_id
+        if not project_run_id or not node_id or not comment.strip():
+            return
+        self._request_post(
+            ("project_run_action", ("project_run_reexec", project_run_id)),
+            f"/v1/project-runs/{project_run_id}/partial-reexecute",
+            {"from_node": node_id, "cascade": True, "instruction_addendum": comment.strip()},
+        )
+
+    def _edit_task_from_project_run_node(self, task_id: str) -> None:
+        if self.current_mode != "normal" or not task_id:
+            return
+        self._pending_task_edit_id = task_id
+        self._show_tasks()
+
     def _open_project_run_artifact(self, artifact_uid: str) -> None:
         if self.current_mode != "normal":
             return
@@ -746,10 +790,45 @@ class MainWindow(QMainWindow):
             {"reason": ""},
         )
 
+    def _show_reviews(self) -> None:
+        self._activate_navigation("reviews")
+        self.detail_stack.setCurrentWidget(self.reviews_view)
+        if self.current_mode == "normal":
+            self._refresh_reviews()
+
+    def _refresh_reviews(self) -> None:
+        if self.current_mode == "normal":
+            self._request("reviews", "/v1/reviews?limit=100")
+
+    def _select_review(self, review_id: str) -> None:
+        if self.current_mode == "normal" and review_id:
+            self._request(("review_detail", review_id), f"/v1/reviews/{quote(review_id, safe='')}")
+
+    def _confirm_review(self, review_id: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(("review_action", "confirm"), f"/v1/reviews/{quote(review_id, safe='')}/confirm", {})
+
+    def _rerun_review(self, review_id: str, comment: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(
+                ("review_action", "rerun"),
+                f"/v1/reviews/{quote(review_id, safe='')}/rerun",
+                {"comment": comment},
+            )
+
+    def _reject_review(self, review_id: str, reason: str) -> None:
+        if self.current_mode == "normal":
+            self._request_post(
+                ("review_action", "reject"),
+                f"/v1/reviews/{quote(review_id, safe='')}/reject",
+                {"reason": reason},
+            )
+
     def _activate_navigation(self, section: str | None) -> None:
         buttons = {
             "runs": self.runs_button,
             "project_runs": self.project_runs_button,
+            "reviews": self.reviews_button,
             "tasks": self.tasks_button,
             "profiles": self.profiles_button,
             "projects": self.projects_button,
@@ -1281,6 +1360,7 @@ class MainWindow(QMainWindow):
             self.finished_cursor = None
             self._request("finished", self._finished_path())
             self._request("schedules", "/v1/schedules")
+            self._request("reviews", "/v1/reviews?limit=100")
 
     def _project_run_timer_tick(self) -> None:
         if not self._project_runs_is_active() or self.current_mode != "normal":
@@ -1401,6 +1481,10 @@ class MainWindow(QMainWindow):
                     self.project_runs_view.detail.cache_orchestrator_error(
                         str(error or "Orchestrator data is unavailable.")
                     )
+            elif isinstance(kind, tuple) and kind[0] == "project_run_v2_reviews":
+                project_run_id = str(kind[1] or "")
+                if project_run_id == self.selected_project_run_id:
+                    self.project_runs_view.set_run_reviews(project_run_id, [])
             elif isinstance(kind, tuple) and kind[0] in {
                 "project_run_artifact_detail",
                 "project_run_artifact_content",
@@ -1662,6 +1746,26 @@ class MainWindow(QMainWindow):
             self._render_schedules()
             self._refresh_schedule(schedule_id if action != "schedule_copy" else None)
             return
+        if kind == "reviews":
+            reviews = [
+                item
+                for item in (payload.get("reviews") or [])
+                if str(item.get("status") or "") in {"pending_human", "needs_human", "delivery_failed"}
+            ]
+            self.reviews_index = {str(item.get("review_id")): item for item in reviews if item.get("review_id")}
+            self.reviews_view.set_reviews(reviews)
+            self.reviews_button.setText(f"Reviews ({len(reviews)})" if reviews else "Reviews")
+            return
+        if isinstance(kind, tuple) and kind[0] == "review_detail":
+            self.reviews_view.set_review(payload)
+            return
+        if isinstance(kind, tuple) and kind[0] == "review_action":
+            self.banner.setText(
+                "Review action completed." if payload.get("ok", True) else "Review action needs attention."
+            )
+            self.banner.show()
+            self._refresh_reviews()
+            return
         if kind == "tasks":
             tasks = payload.get("tasks", [])
             self.tasks_index = {str(t.get("task_id")): t for t in tasks if t.get("task_id")}
@@ -1670,6 +1774,16 @@ class MainWindow(QMainWindow):
                 self.selected_task_id = None
             if self.selected_task_id and self.selected_task_id in self.tasks_index:
                 self.tasks_view.set_task(self.tasks_index[self.selected_task_id])
+            if self._pending_task_edit_id:
+                pending_id, self._pending_task_edit_id = self._pending_task_edit_id, None
+                if pending_id in self.tasks_index:
+                    self.selected_task_id = pending_id
+                    self.tasks_view.set_task(self.tasks_index[pending_id])
+                    self.tasks_view.show_edit_editor(pending_id)
+                else:
+                    self.banner.setText(f"Task {pending_id} was not found (it may have been deleted).")
+                    self.banner.show()
+                return
             self.banner.setText(f"Registered Tasks refreshed · {len(tasks)} entries.")
             self.banner.show()
             return
@@ -1925,6 +2039,12 @@ class MainWindow(QMainWindow):
             approvals = (payload or {}).get("approvals") or (payload or {}).get("items") or []
             if project_run_id and project_run_id == self.selected_project_run_id:
                 self.project_runs_view.set_run_approvals(project_run_id, approvals)
+            return
+        if isinstance(kind, tuple) and kind[0] == "project_run_v2_reviews":
+            project_run_id = str(kind[1] or "")
+            reviews = (payload or {}).get("reviews") or []
+            if project_run_id and project_run_id == self.selected_project_run_id:
+                self.project_runs_view.set_run_reviews(project_run_id, reviews)
             return
         if isinstance(kind, tuple) and kind[0] == "project_run_v2_receipt":
             project_run_id = str(kind[1] or "")

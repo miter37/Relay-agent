@@ -1,4 +1,5 @@
 import pathlib
+
 p = pathlib.Path("relay/daemon.py")
 t = p.read_text(encoding="utf-8")
 old = (

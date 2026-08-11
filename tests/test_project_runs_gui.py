@@ -25,11 +25,15 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
+    from PySide6.QtWidgets import QApplication, QInputDialog, QLabel, QScrollArea
 except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
+from relay.gui.design_icons import ICON_PATHS
+from relay.gui.design_tokens import COLORS
 from relay.gui.project_runs import (
+    _ORCHESTRATOR_EVENT_ICON,
+    _PIPELINE_STATUS_COLORS,
     ProjectRunArtifactChip,
     ProjectRunArtifactsView,
     ProjectRunDetailView,
@@ -276,9 +280,7 @@ class ProjectRunsWidgetTests(unittest.TestCase):
         detail = view.detail
         self.assertEqual(detail.steps_table.rowCount(), 2)
         # With no Project snapshot, the fallback order follows started_at.
-        rows = {
-            detail.steps_table.item(row, 1).text(): row for row in range(detail.steps_table.rowCount())
-        }
+        rows = {detail.steps_table.item(row, 1).text(): row for row in range(detail.steps_table.rowCount())}
         image_row = rows["image"]
         pick_row = rows["pick"]
         self.assertEqual(detail.steps_table.item(image_row, 3).text(), "2")
@@ -690,22 +692,38 @@ class ProjectRunInspectorWidgetTests(unittest.TestCase):
     def test_inspector_action_signals(self):
         inspector = ProjectRunInspectorView()
         step = _step_row("image", active_task_run_id="tr-2", status="failed", error_code="SCHEMA_MISMATCH")
+        step["task_id"] = "task-image"
         inspector.set_node("pr-x", "image", step, {"node_id": "image", "task_runs": []}, None, [])
 
         logs_calls: list[str] = []
         answer_calls: list[str] = []
         reexec_calls: list[str] = []
+        comment_calls: list[tuple[str, str]] = []
+        edit_task_calls: list[str] = []
         inspector.open_run_logs_requested.connect(logs_calls.append)
         inspector.open_run_answer_requested.connect(answer_calls.append)
         inspector.reexecute_from_node_requested.connect(reexec_calls.append)
+        inspector.reexecute_with_comment_requested.connect(
+            lambda node_id, comment: comment_calls.append((node_id, comment))
+        )
+        inspector.edit_task_requested.connect(edit_task_calls.append)
 
         inspector._emit_open_logs()
         inspector._emit_open_answer()
         inspector._emit_reexec()
+        inspector._emit_edit_task()
+        with unittest.mock.patch.object(QInputDialog, "getMultiLineText", return_value=("please fix the title", True)):
+            inspector._emit_reexec_with_comment()
+        with unittest.mock.patch.object(QInputDialog, "getMultiLineText", return_value=("", False)):
+            inspector._emit_reexec_with_comment()
 
         self.assertEqual(logs_calls, ["tr-2"])
         self.assertEqual(answer_calls, ["tr-2"])
         self.assertEqual(reexec_calls, ["image"])
+        self.assertEqual(edit_task_calls, ["task-image"])
+        self.assertEqual(comment_calls, [("image", "please fix the title")])
+        self.assertTrue(inspector.edit_task_button.isEnabled())
+        self.assertTrue(inspector.comment_reexec_button.isEnabled())
 
 
 class ProjectRunDetailInspectorRoutingTests(unittest.TestCase):
@@ -904,7 +922,13 @@ class ProjectRunInspectorMainWindowRoutingTests(unittest.TestCase):
             window.pending[204] = ("project_run_artifact_detail", "pr-1", "a-json")
             window._handle_response(
                 204,
-                {"artifact": {"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"}},
+                {
+                    "artifact": {
+                        "artifact_uid": "a-json",
+                        "relative_path": "result.json",
+                        "mime_type": "application/json",
+                    }
+                },
                 None,
             )
             self.assertIn(
@@ -991,6 +1015,59 @@ class ProjectRunInspectorMainWindowRoutingTests(unittest.TestCase):
             )
             self.assertEqual(reexec_request[1], "/v1/project-runs/pr-1/partial-reexecute")
             self.assertEqual(reexec_request[2], {"from_node": "image", "cascade": True})
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_reexecute_with_comment_dispatches_instruction_addendum(self):
+        window, tmp = self._build()
+        try:
+            window.selected_project_run_id = "pr-1"
+            window._reexecute_project_run_with_comment("image", "please fix the title")
+            reexec_request = next(
+                r
+                for r in self.requests
+                if isinstance(r[0], tuple) and r[0][0] == "project_run_action" and r[0][1][0] == "project_run_reexec"
+            )
+            self.assertEqual(reexec_request[1], "/v1/project-runs/pr-1/partial-reexecute")
+            self.assertEqual(
+                reexec_request[2],
+                {"from_node": "image", "cascade": True, "instruction_addendum": "please fix the title"},
+            )
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_reexecute_with_comment_ignores_blank_comment(self):
+        window, tmp = self._build()
+        try:
+            window.selected_project_run_id = "pr-1"
+            window._reexecute_project_run_with_comment("image", "   ")
+            self.assertFalse(
+                any(
+                    isinstance(r[0], tuple) and r[0][0] == "project_run_action" and r[0][1][0] == "project_run_reexec"
+                    for r in self.requests
+                )
+            )
+        finally:
+            window.close()
+            tmp.cleanup()
+
+    def test_edit_task_from_node_opens_tasks_screen_with_editor(self):
+        window, tmp = self._build()
+        try:
+            window.selected_project_run_id = "pr-1"
+            window._edit_task_from_project_run_node("task-image")
+            self.assertEqual(window._pending_task_edit_id, "task-image")
+            self.assertEqual(window.active_section, "tasks")
+            window.pending[300] = "tasks"
+            with unittest.mock.patch.object(window.tasks_view, "show_edit_editor") as show_edit:
+                window._handle_response(
+                    300, {"ok": True, "tasks": [{"task_id": "task-image", "name": "Image step"}]}, None
+                )
+                show_edit.assert_called_once_with("task-image")
+            self.assertIsNone(window._pending_task_edit_id)
+            self.assertEqual(window.selected_task_id, "task-image")
         finally:
             window.close()
             tmp.cleanup()
@@ -1097,11 +1174,7 @@ class ProjectRunPipelineWidgetTests(unittest.TestCase):
         for segment in segments:
             self.assertLess(segment["from"].x(), segment["to"].x())
             self.assertGreater(segment["to"].x() - segment["from"].x(), 1)
-        root_rows = {
-            segment["to_node"]: segment["to"].y()
-            for segment in segments
-            if segment["from_node"] == "root"
-        }
+        root_rows = {segment["to_node"]: segment["to"].y() for segment in segments if segment["from_node"] == "root"}
         self.assertNotEqual(root_rows["left"], root_rows["right"])
 
     def test_failed_to_blocked_pipeline_edge_is_dashed(self):
@@ -1116,6 +1189,42 @@ class ProjectRunPipelineWidgetTests(unittest.TestCase):
             [_step_row("failed", status="failed"), _step_row("blocked", status="blocked")],
         )
         self.assertTrue(view.cards_container.edge_segments()[0]["dashed"])
+
+    def test_running_status_uses_the_signature_accent_not_generic_info_blue(self):
+        self.assertEqual(_PIPELINE_STATUS_COLORS["running"], COLORS["accent.relay"])
+        self.assertNotEqual(_PIPELINE_STATUS_COLORS["running"], COLORS["state.info"])
+
+    def test_repaired_edge_is_highlighted_when_the_source_node_recovered(self):
+        view = ProjectRunPipelineView()
+        snapshot = _linear_snapshot(
+            [_node("pick", "t-pick"), _node("image", "t-image")],
+            [_connection("pick", "result", "image")],
+        )
+        view.set_run(
+            "pr-1",
+            snapshot,
+            [_step_row("pick", status="completed"), _step_row("image", status="completed")],
+            repaired_node_ids={"pick"},
+        )
+        segment = view.cards_container.edge_segments()[0]
+        self.assertTrue(segment["repaired"])
+        self.assertFalse(segment["dashed"])
+
+    def test_repaired_flag_yields_to_a_still_failed_edges_dashed_signal(self):
+        view = ProjectRunPipelineView()
+        snapshot = _linear_snapshot(
+            [_node("failed", "t-failed"), _node("blocked", "t-blocked")],
+            [_connection("failed", "out", "blocked")],
+        )
+        view.set_run(
+            "pr-1",
+            snapshot,
+            [_step_row("failed", status="failed"), _step_row("blocked", status="blocked")],
+            repaired_node_ids={"failed"},
+        )
+        segment = view.cards_container.edge_segments()[0]
+        self.assertTrue(segment["dashed"])
+        self.assertFalse(segment["repaired"])
 
     def test_pipeline_card_avoids_steps_execution_metadata(self):
         view = ProjectRunPipelineView()
@@ -1257,7 +1366,9 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
             [],
             {"research": [{"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"}]},
         )
-        view.cache_artifact_detail("a-json", {"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"})
+        view.cache_artifact_detail(
+            "a-json", {"artifact_uid": "a-json", "relative_path": "result.json", "mime_type": "application/json"}
+        )
         view.cache_artifact_content("a-json", {"available": True, "text": '{"headline": "Relay", "items": [1, 2]}'})
         view.select_artifact("a-json")
 
@@ -1512,9 +1623,7 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
     def test_steps_distinguish_requested_and_actual_worker(self):
         view = ProjectRunDetailView()
         run = _catalog_item("pr-1", status="completed", completed=1)
-        run["steps"] = [
-            _step_row("first", status="completed", active_task_run_id="tr-first", worker_override="claude")
-        ]
+        run["steps"] = [_step_row("first", status="completed", active_task_run_id="tr-first", worker_override="claude")]
         view.set_run(run)
         view.cache_task_run_detail(
             "tr-first",
@@ -1548,6 +1657,13 @@ class ProjectRunOrchestratorWidgetTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_every_orchestrator_event_icon_name_is_registered(self):
+        # "report" mapped to the unregistered "alert-circle" and crashed this
+        # tab with a KeyError on any real report event; guard the whole dict so
+        # a future kind added here can't reintroduce that class of bug silently.
+        for kind, icon_name in _ORCHESTRATOR_EVENT_ICON.items():
+            self.assertIn(icon_name, ICON_PATHS, f"kind {kind!r} maps to unregistered icon {icon_name!r}")
+
     def test_no_data_shows_disabled_state(self):
         view = ProjectRunOrchestratorView()
         self.assertFalse(view.disabled_state.isHidden())
@@ -1567,12 +1683,26 @@ class ProjectRunOrchestratorWidgetTests(unittest.TestCase):
                 "ok": True,
                 "enabled": True,
                 "events": [
-                    {"node_id": None, "kind": "note", "actor": "runtime", "summary": "Started.", "created_at": "2026-08-10T00:00:00"},
-                    {"node_id": "a", "kind": "decision", "actor": "orchestrator", "summary": "Fixed a.", "created_at": "2026-08-10T00:00:05"},
+                    {
+                        "node_id": None,
+                        "kind": "note",
+                        "actor": "runtime",
+                        "summary": "Started.",
+                        "created_at": "2026-08-10T00:00:00",
+                    },
+                    {
+                        "node_id": "a",
+                        "kind": "decision",
+                        "actor": "orchestrator",
+                        "summary": "Fixed a.",
+                        "created_at": "2026-08-10T00:00:05",
+                    },
                 ],
                 "budget": {
-                    "llm_calls_used": 1, "max_llm_calls_per_run": 8,
-                    "repair_attempts_used": 1, "max_repair_attempts_per_run": 6,
+                    "llm_calls_used": 1,
+                    "max_llm_calls_per_run": 8,
+                    "repair_attempts_used": 1,
+                    "max_repair_attempts_per_run": 6,
                 },
             }
         )
@@ -1588,7 +1718,13 @@ class ProjectRunOrchestratorWidgetTests(unittest.TestCase):
                 "enabled": True,
                 "events": [
                     {"node_id": None, "kind": "note", "actor": "runtime", "summary": "First.", "created_at": "t1"},
-                    {"node_id": "a", "kind": "decision", "actor": "orchestrator", "summary": "Second.", "created_at": "t2"},
+                    {
+                        "node_id": "a",
+                        "kind": "decision",
+                        "actor": "orchestrator",
+                        "summary": "Second.",
+                        "created_at": "t2",
+                    },
                     {"node_id": None, "kind": "note", "actor": "runtime", "summary": "Third.", "created_at": "t3"},
                 ],
                 "budget": None,
@@ -1627,8 +1763,10 @@ class ProjectRunOrchestratorWidgetTests(unittest.TestCase):
                 "enabled": True,
                 "events": [],
                 "budget": {
-                    "llm_calls_used": 2, "max_llm_calls_per_run": 8,
-                    "repair_attempts_used": 3, "max_repair_attempts_per_run": 6,
+                    "llm_calls_used": 2,
+                    "max_llm_calls_per_run": 8,
+                    "repair_attempts_used": 3,
+                    "max_repair_attempts_per_run": 6,
                 },
             }
         )
@@ -1657,14 +1795,26 @@ class ProjectRunOrchestratorWidgetTests(unittest.TestCase):
         set_orchestrator always rebuilds the tree from the given payload."""
         view = ProjectRunOrchestratorView()
         view.set_orchestrator(
-            {"ok": True, "enabled": True, "events": [{"node_id": "a", "kind": "note", "actor": "runtime", "summary": "One.", "created_at": "t1"}], "budget": None}
+            {
+                "ok": True,
+                "enabled": True,
+                "events": [{"node_id": "a", "kind": "note", "actor": "runtime", "summary": "One.", "created_at": "t1"}],
+                "budget": None,
+            }
         )
         view.set_orchestrator(
             {
-                "ok": True, "enabled": True,
+                "ok": True,
+                "enabled": True,
                 "events": [
                     {"node_id": "a", "kind": "note", "actor": "runtime", "summary": "One.", "created_at": "t1"},
-                    {"node_id": "a", "kind": "decision", "actor": "orchestrator", "summary": "Two.", "created_at": "t2"},
+                    {
+                        "node_id": "a",
+                        "kind": "decision",
+                        "actor": "orchestrator",
+                        "summary": "Two.",
+                        "created_at": "t2",
+                    },
                 ],
                 "budget": None,
             }
@@ -1708,6 +1858,44 @@ class ProjectRunDetailOrchestratorWiringTests(unittest.TestCase):
 
         self.assertFalse(view.orchestrator_view.disabled_state.isHidden())
 
+    def test_cache_orchestrator_marks_only_decision_kind_nodes_as_repaired(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="running")
+        run["steps"] = [_step_row("a"), _step_row("b")]
+        view.set_run(run)
+
+        view.cache_orchestrator(
+            {
+                "ok": True,
+                "enabled": True,
+                "budget": None,
+                "events": [
+                    {"kind": "note", "node_id": "a"},
+                    {"kind": "decision", "node_id": "b"},
+                    {"kind": "report", "node_id": None},
+                ],
+            }
+        )
+
+        self.assertEqual(view._repaired_node_ids, {"b"})
+        self.assertEqual(view.pipeline_view._repaired_node_ids, {"b"})
+
+    def test_switching_to_a_different_run_clears_repaired_node_ids(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-1", status="running")
+        run["steps"] = [_step_row("a")]
+        view.set_run(run)
+        view.cache_orchestrator(
+            {"ok": True, "enabled": True, "budget": None, "events": [{"kind": "decision", "node_id": "a"}]}
+        )
+        self.assertEqual(view._repaired_node_ids, {"a"})
+
+        other_run = _catalog_item("pr-2", status="running")
+        other_run["steps"] = [_step_row("a")]
+        view.set_run(other_run)
+
+        self.assertEqual(view._repaired_node_ids, set())
+
 
 class ProjectRunOrchestratorMainWindowRoutingTests(unittest.TestCase):
     @classmethod
@@ -1744,9 +1932,7 @@ class ProjectRunOrchestratorMainWindowRoutingTests(unittest.TestCase):
         try:
             window._select_project_run("pr-1")
             window.pending[401] = ("project_run_v2_orchestrator", "pr-1")
-            window._handle_response(
-                401, {"ok": True, "enabled": True, "events": [], "budget": None}, None
-            )
+            window._handle_response(401, {"ok": True, "enabled": True, "events": [], "budget": None}, None)
             self.assertTrue(window.project_runs_view.detail.orchestrator_view.disabled_state.isHidden())
         finally:
             window.close()
@@ -1758,9 +1944,7 @@ class ProjectRunOrchestratorMainWindowRoutingTests(unittest.TestCase):
             window._select_project_run("pr-1")
             window.pending[402] = ("project_run_v2_orchestrator", "pr-1")
             window._handle_response(402, None, "network error")
-            self.assertIn(
-                "network error", window.project_runs_view.detail.orchestrator_view.unavailable_label.text()
-            )
+            self.assertIn("network error", window.project_runs_view.detail.orchestrator_view.unavailable_label.text())
         finally:
             window.close()
             tmp.cleanup()
@@ -1771,9 +1955,7 @@ class ProjectRunOrchestratorMainWindowRoutingTests(unittest.TestCase):
             window._select_project_run("pr-1")
             window._select_project_run("pr-2")
             window.pending[403] = ("project_run_v2_orchestrator", "pr-1")
-            window._handle_response(
-                403, {"ok": True, "enabled": True, "events": [], "budget": None}, None
-            )
+            window._handle_response(403, {"ok": True, "enabled": True, "events": [], "budget": None}, None)
             # pr-1's response must not populate the view now showing pr-2.
             self.assertFalse(window.project_runs_view.detail.orchestrator_view.disabled_state.isHidden())
         finally:

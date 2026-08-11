@@ -59,7 +59,7 @@ def _task_instructions(summary: str) -> str:
         "(result.json under the workspace). Do not wrap it in markdown fences.\n"
         "3. If you print anything to stdout, it must be the same pure JSON object only.\n"
         "4. JSON must match this schema exactly:\n"
-        '{\n'
+        "{\n"
         '  "schema_version": "1.0",\n'
         '  "status": "complete",\n'
         f'  "answer": "<short plain text including token {MARKER}>",\n'
@@ -67,14 +67,14 @@ def _task_instructions(summary: str) -> str:
         '  "uncertainties": [],\n'
         '  "missing_items": [],\n'
         '  "artifacts": [\n'
-        '    {\n'
+        "    {\n"
         '      "relative_path": "notes.txt",\n'
         '      "description": "brief notes",\n'
         '      "encoding": "utf-8",\n'
         f'      "content": "notes including {MARKER}"\n'
-        '    }\n'
-        '  ]\n'
-        '}\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
         "5. If input Artifacts are provided (A1/A2/...), read them and base answer/content on them.\n"
         "6. Keep answer under 500 characters. Finish quickly."
     )
@@ -234,8 +234,7 @@ class AgyOrchestrationRunner:
                 "WORKER_FAILED",
             }
             print(
-                f"[agy-orch] task {key} attempt {attempt + 1}/{attempts} "
-                f"status={result['status']} code={code}",
+                f"[agy-orch] task {key} attempt {attempt + 1}/{attempts} status={result['status']} code={code}",
                 file=sys.stderr,
             )
             if not retryable or attempt + 1 >= attempts:
@@ -270,9 +269,7 @@ class AgyOrchestrationRunner:
                 if step["status"] == "running" and task_run_id and task_run_id not in executed:
                     receipt = self.engine.execute_job(task_run_id)
                     if receipt["status"] not in {"completed", "partial"}:
-                        raise AssertionError(
-                            f"Project step failed: {project_run_id}/{step['node_id']}: {receipt}"
-                        )
+                        raise AssertionError(f"Project step failed: {project_run_id}/{step['node_id']}: {receipt}")
                     executed.add(task_run_id)
             self.runtime.tick_once()
             run = self.db.get_project_run(project_run_id)
@@ -301,13 +298,10 @@ class AgyOrchestrationRunner:
         audit = None
         for attempt in range(3):
             # Prefer shallow first if a healthy deep spec was seeded; fall back to deep.
-            deep = attempt > 0 or not any(
-                (self.config.path_value("adapter_spec_root") / "antigravity").glob("*.json")
-            )
+            deep = attempt > 0 or not any((self.config.path_value("adapter_spec_root") / "antigravity").glob("*.json"))
             audit = Doctor(self.config, self.db).audit([WORKER], deep=deep)
             print(
-                f"[agy-orch] doctor attempt {attempt + 1} deep={deep}: "
-                f"{json.dumps(audit, ensure_ascii=False)[:400]}",
+                f"[agy-orch] doctor attempt {attempt + 1} deep={deep}: {json.dumps(audit, ensure_ascii=False)[:400]}",
                 file=sys.stderr,
             )
             if audit.get("ok"):
@@ -320,8 +314,7 @@ class AgyOrchestrationRunner:
             for attempt in range(3):
                 audit = Doctor(self.config, self.db).audit([WORKER], deep=True)
                 print(
-                    f"[agy-orch] doctor deep-retry {attempt + 1}: "
-                    f"{json.dumps(audit, ensure_ascii=False)[:400]}",
+                    f"[agy-orch] doctor deep-retry {attempt + 1}: {json.dumps(audit, ensure_ascii=False)[:400]}",
                     file=sys.stderr,
                 )
                 if audit.get("ok"):
@@ -489,8 +482,7 @@ class AgyOrchestrationRunner:
                 "S2_sequential_project": {**project_a_run, "pass": project_a_run["status"] == "completed"},
                 "S3_parallel_join_project": {**project_b_run, "pass": project_b_run["status"] == "completed"},
                 "S4_cross_project_artifact": {
-                    "pass": project_c_run["status"] == "completed"
-                    and len(cross_project_lineage["consumers"]) >= 1,
+                    "pass": project_c_run["status"] == "completed" and len(cross_project_lineage["consumers"]) >= 1,
                     "source_project_run_id": project_a_run["project_run_id"],
                     "source_artifact_uid": project_a_artifact,
                     "consumer_project_run_id": project_c_run["project_run_id"],

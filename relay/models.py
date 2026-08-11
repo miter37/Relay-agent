@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,10 @@ class JobRequest:
     inputs: dict[str, Any] = field(default_factory=dict)
     artifact_inputs: list[dict[str, str]] = field(default_factory=list)
     resolved_artifact_inputs: list[dict[str, Any]] = field(default_factory=list)
+    # ``inherit`` keeps the registered Task/Project policy.  Human/API callers
+    # may override it for one execution; Orchestrator review is Project-only.
+    review_mode: str = "inherit"
+    review_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -111,6 +116,7 @@ class TaskSpec:
     input_schema: str | None = None
     output_contract: str | None = None
     validation_policy: str | None = None
+    review_policy: dict[str, Any] | None = None
     task_id: str | None = None
     version: int = 1
 
@@ -139,6 +145,22 @@ class TaskSpec:
                 parse_schema(self.input_schema)
             except ValueError as exc:
                 raise RelayError("TASK_INVALID", str(exc)) from exc
+        if self.review_policy is not None:
+            if not isinstance(self.review_policy, dict):
+                raise RelayError("TASK_INVALID", "review_policy must be an object.")
+            unknown = set(self.review_policy) - {"enabled", "reviewer", "guidelines", "max_reruns"}
+            if unknown:
+                raise RelayError("TASK_INVALID", f"Unknown review_policy keys: {', '.join(sorted(unknown))}")
+            if "enabled" in self.review_policy and not isinstance(self.review_policy["enabled"], bool):
+                raise RelayError("TASK_INVALID", "review_policy.enabled must be a boolean.")
+            if self.review_policy.get("reviewer", "human") != "human":
+                raise RelayError("TASK_INVALID", "Standalone Task review_policy only supports reviewer=human.")
+            guidelines = self.review_policy.get("guidelines")
+            if guidelines is not None and (not isinstance(guidelines, str) or len(guidelines) > 8000):
+                raise RelayError("TASK_INVALID", "review_policy guidelines must be text up to 8000 characters.")
+            max_reruns = self.review_policy.get("max_reruns", 0)
+            if not isinstance(max_reruns, int) or isinstance(max_reruns, bool) or not 0 <= max_reruns <= 20:
+                raise RelayError("TASK_INVALID", "review_policy max_reruns must be between 0 and 20.")
 
     def to_row(self) -> dict[str, Any]:
         from .util import new_job_id, utc_now
@@ -160,6 +182,7 @@ class TaskSpec:
             "input_schema": self.input_schema,
             "output_contract": self.output_contract,
             "validation_policy": self.validation_policy,
+            "review_policy_json": json.dumps(self.review_policy, ensure_ascii=False) if self.review_policy else None,
             "version": self.version,
             "created_at": now,
             "updated_at": now,
@@ -181,6 +204,7 @@ class TaskSpec:
             "input_schema",
             "output_contract",
             "validation_policy",
+            "review_policy",
         }
         out: dict[str, Any] = {}
         for key, value in changes.items():
@@ -188,6 +212,12 @@ class TaskSpec:
                 continue
             if key == "fallback_enabled":
                 out[key] = 1 if value else 0
+            elif key == "review_policy":
+                from .errors import RelayError
+
+                if value is not None and not isinstance(value, dict):
+                    raise RelayError("TASK_INVALID", "review_policy must be an object.")
+                out["review_policy_json"] = json.dumps(value, ensure_ascii=False) if value else None
             elif key == "task_summary":
                 from .validation import normalize_summary
 
@@ -224,4 +254,5 @@ class TaskSpec:
             timeout_seconds=snapshot.get("timeout_seconds") or request.get("timeout_seconds"),
             profile=snapshot.get("profile") or request.get("profile"),
             result_format=snapshot.get("result_format") or request.get("result_format"),
+            review_policy=snapshot.get("review_policy") or request.get("review_policy"),
         )

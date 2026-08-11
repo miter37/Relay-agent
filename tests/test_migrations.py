@@ -204,7 +204,7 @@ class MigrationTests(unittest.TestCase):
                     "project_id": "legacy-project",
                     "name": "Legacy project",
                     "description": "Legacy project description.",
-                    "definition_json": "{\"nodes\":[],\"connections\":[],\"output_selection\":[]}",
+                    "definition_json": '{"nodes":[],"connections":[],"output_selection":[]}',
                     "project_summary": "Legacy project description.",
                 }
             )
@@ -215,7 +215,9 @@ class MigrationTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as conn, conn:
                 self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
                 self.assertEqual(
-                    conn.execute("SELECT project_summary FROM projects WHERE project_id='legacy-project'").fetchone()[0],
+                    conn.execute("SELECT project_summary FROM projects WHERE project_id='legacy-project'").fetchone()[
+                        0
+                    ],
                     "Legacy project description.",
                 )
 

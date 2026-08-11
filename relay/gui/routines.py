@@ -26,18 +26,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .design_html import kv_row, td, td_html, th_row
 from .design_tokens import COLORS
 from .design_typography import apply_type
-from .design_widgets import IconButton
+from .design_widgets import IconButton, LabeledButton
 
 
 def _format_fields(payload):
     if not payload:
         return "<i>No details available.</i>"
-    rows = "".join(
-        f"<tr><td><b>{escape(str(key))}</b></td><td>{escape(str(value or '-'))}</td></tr>"
-        for key, value in payload.items()
-    )
+    rows = "".join(kv_row(key, value or "-") for key, value in payload.items())
     return f"<table>{rows}</table>"
 
 
@@ -157,15 +155,16 @@ class RoutineDetailView(QWidget):
         self.refresh_button = IconButton("refresh", "Refresh this Routine")
         self.refresh_button.clicked.connect(self._on_refresh)
         header.addWidget(self.refresh_button)
-        self.run_button = IconButton("play", "Run this Routine now", tone="accent")
-        self.run_button.clicked.connect(self._on_run)
-        header.addWidget(self.run_button)
         self.edit_button = IconButton("pencil", "Edit this Routine")
         self.edit_button.clicked.connect(self._on_edit)
         header.addWidget(self.edit_button)
         self.delete_button = IconButton("trash", "Delete this Routine", tone="danger")
         self.delete_button.clicked.connect(self._on_delete)
         header.addWidget(self.delete_button)
+        # Same primary-action promotion as the Project/Task detail screens.
+        self.run_button = LabeledButton("play", "Run", tone="primary")
+        self.run_button.clicked.connect(self._on_run)
+        header.addWidget(self.run_button)
         layout.addLayout(header)
         self.tabs = QTabWidget()
         self.overview_browser = QTextBrowser()
@@ -241,15 +240,11 @@ class RoutineDetailView(QWidget):
         if not runs:
             return "<i>No Routine Runs recorded yet.</i>"
         rows = "".join(
-            "<tr>"
-            f"<td>{RoutineDetailView._run_link(run)}</td>"
-            f"<td>{escape(str(run.get('status') or '-'))}</td>"
-            f"<td>{escape(str(run.get('trigger_type') or '-'))}</td>"
-            f"<td>{escape(str(run.get('scheduled_for_utc') or run.get('updated_at') or '-'))}</td>"
-            "</tr>"
+            f"<tr>{td_html(RoutineDetailView._run_link(run))}{td(run.get('status') or '-')}"
+            f"{td(run.get('trigger_type') or '-')}{td(run.get('scheduled_for_utc') or run.get('updated_at') or '-')}</tr>"
             for run in runs
         )
-        return f"<table><tr><th>Run</th><th>Status</th><th>Trigger</th><th>When</th></tr>{rows}</table>"
+        return f"<table>{th_row(['Run', 'Status', 'Trigger', 'When'])}{rows}</table>"
 
     @staticmethod
     def _run_link(run):

@@ -1,4 +1,5 @@
 import pathlib
+
 p = pathlib.Path("relay/daemon.py")
 t = p.read_text(encoding="utf-8")
 marker = "        self.routine_runtime = RoutineRuntime(self.config, self.db, self.engine, self.routine_service)"

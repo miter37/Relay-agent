@@ -90,9 +90,7 @@ class ParseStepOverridesTests(unittest.TestCase):
         self.assertEqual(parse_step_overrides("[1,2,3]"), {})
 
     def test_valid_object_round_trips(self):
-        self.assertEqual(
-            parse_step_overrides(json.dumps({"worker_override": "codex"})), {"worker_override": "codex"}
-        )
+        self.assertEqual(parse_step_overrides(json.dumps({"worker_override": "codex"})), {"worker_override": "codex"})
 
 
 class _OverrideHarness(unittest.TestCase):

@@ -57,7 +57,11 @@ class ProjectRunOrchestratorEndpointTests(_ApiHarness):
     def test_enabled_orchestrator_returns_events_and_budget(self):
         project_run_id = self._solo_project_run({"enabled": True, "max_llm_calls_per_run": 4})
         self.db.append_project_run_event(
-            project_run_id, node_id="a", kind="decision", actor="orchestrator", summary="Retrying a.",
+            project_run_id,
+            node_id="a",
+            kind="decision",
+            actor="orchestrator",
+            summary="Retrying a.",
             detail={"strategy": "retry"},
         )
         self.db.upsert_orchestrator_state(project_run_id, llm_calls_used=2)
@@ -75,7 +79,9 @@ class ProjectRunOrchestratorEndpointTests(_ApiHarness):
     def test_events_are_returned_in_seq_order(self):
         project_run_id = self._solo_project_run({"enabled": True})
         self.db.append_project_run_event(project_run_id, node_id=None, kind="note", actor="runtime", summary="Started.")
-        self.db.append_project_run_event(project_run_id, node_id="a", kind="decision", actor="orchestrator", summary="Fixed.")
+        self.db.append_project_run_event(
+            project_run_id, node_id="a", kind="decision", actor="orchestrator", summary="Fixed."
+        )
 
         response = project_run_orchestrator(self.engine, project_run_id)
 
@@ -89,9 +95,7 @@ class ProjectRunOrchestratorEndpointTests(_ApiHarness):
 class ProjectRunReceiptOrchestratorFieldsTests(_ApiHarness):
     def test_receipt_step_carries_step_overrides_and_orchestrator_summary(self):
         project_run_id = self._solo_project_run({"enabled": True})
-        self.db.update_project_step(
-            project_run_id, "a", step_overrides_json=json.dumps({"worker_override": "codex"})
-        )
+        self.db.update_project_step(project_run_id, "a", step_overrides_json=json.dumps({"worker_override": "codex"}))
         self.db.append_project_run_event(
             project_run_id, node_id="a", kind="decision", actor="orchestrator", summary="Swapped worker to codex."
         )

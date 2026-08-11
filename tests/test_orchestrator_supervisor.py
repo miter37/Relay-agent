@@ -180,7 +180,9 @@ class Tier0Tests(_SupervisorHarness):
 class Tier1Tests(_SupervisorHarness):
     def test_tier1_applies_a_valid_decision(self):
         self.stub_agent._decision = RepairDecision(
-            strategy="rebind_connection", node_id="b", reason="fixing role",
+            strategy="rebind_connection",
+            node_id="b",
+            reason="fixing role",
             connection_overrides={"A1": "output"},
         )
         project_run_id = self._mismatched_connection_project_run({"enabled": True})
@@ -197,7 +199,9 @@ class Tier1Tests(_SupervisorHarness):
 
     def test_tier1_repair_reaches_dispatch(self):
         self.stub_agent._decision = RepairDecision(
-            strategy="rebind_connection", node_id="b", reason="fixing role",
+            strategy="rebind_connection",
+            node_id="b",
+            reason="fixing role",
             connection_overrides={"A1": "output"},
         )
         project_run_id = self._mismatched_connection_project_run({"enabled": True})
@@ -214,7 +218,10 @@ class Tier1Tests(_SupervisorHarness):
 class OutOfAuthorityTests(_SupervisorHarness):
     def test_worker_not_in_available_list_is_rejected(self):
         self.stub_agent._decision = RepairDecision(
-            strategy="retry_with_worker", node_id="a", reason="swap", worker="nonexistent-worker",
+            strategy="retry_with_worker",
+            node_id="a",
+            reason="swap",
+            worker="nonexistent-worker",
         )
         # Trigger a worker-unavailable scenario so evidence.available_workers is populated.
         a = self._task("A")
@@ -245,7 +252,9 @@ class OutOfAuthorityTests(_SupervisorHarness):
 
     def test_role_not_produced_by_upstream_is_rejected(self):
         self.stub_agent._decision = RepairDecision(
-            strategy="rebind_connection", node_id="b", reason="fixing role",
+            strategy="rebind_connection",
+            node_id="b",
+            reason="fixing role",
             connection_overrides={"A1": "role-nothing-produced"},
         )
         project_run_id = self._mismatched_connection_project_run({"enabled": True})
@@ -259,9 +268,7 @@ class OutOfAuthorityTests(_SupervisorHarness):
 class BudgetTests(_SupervisorHarness):
     def test_per_node_repair_budget_exhaustion_escalates_to_terminal(self):
         self.stub_agent._decision = RepairDecision(strategy="retry", node_id="a", reason="try again")
-        project_run_id = self._transient_failure_project_run(
-            {"enabled": True, "max_repair_attempts_per_node": 1}
-        )
+        project_run_id = self._transient_failure_project_run({"enabled": True, "max_repair_attempts_per_node": 1})
 
         first = self.supervisor.on_step_failed(project_run_id, "a")
         self.assertIsNotNone(first)

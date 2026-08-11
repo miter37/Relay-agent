@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -164,3 +165,32 @@ class Phase6bPartialReexecuteTests(unittest.TestCase):
         runtime.tick_once()
         third_job = self.db.get_job(self.db.get_project_step(run_id, "step")["active_task_run_id"])
         self.assertEqual(third_job["requested_worker"], "auto")
+
+    def test_partial_reexecute_instruction_addendum_reaches_child_run(self):
+        task = self.engine.create_task(TaskSpec(name="Addendum", instructions="original instructions"))
+        project = self.project_service.create_project(
+            {
+                "name": "Addendum flow",
+                "nodes": [{"node_id": "step", "task_id": task["task_id"]}],
+                "connections": [],
+                "output_selection": [],
+            }
+        )
+        run_id = self.project_service.create_project_run(project["project_id"])["project_run_id"]
+        runtime = ProjectRuntime(self.db, self.engine, self.project_service)
+        runtime.tick_once()
+        first_job = self.db.get_project_step(run_id, "step")["active_task_run_id"]
+        self.db.update_job(first_job, status="COMPLETED", result_status="complete")
+        self.db.update_project_run(run_id, status="completed")
+
+        self.project_service.partial_reexecute(run_id, from_node="step", instruction_addendum="only fix the title")
+        runtime.tick_once()
+        second_job = self.db.get_job(self.db.get_project_step(run_id, "step")["active_task_run_id"])
+        dispatched_task_text = json.loads(second_job["request_json"]).get("task") or ""
+
+        self.assertIn("original instructions", dispatched_task_text)
+        self.assertIn("only fix the title", dispatched_task_text)
+
+        # The registered Task's own instructions are never mutated by a one-off addendum.
+        stored_task = self.db.get_task(task["task_id"])
+        self.assertEqual(stored_task["instructions"], "original instructions")

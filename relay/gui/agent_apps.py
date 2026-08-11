@@ -338,9 +338,7 @@ class AgentAppListView(QWidget):
             button.setEnabled(enabled)
         if enabled and self._selected:
             is_enabled = bool(self._selected.get("enabled"))
-            self.toggle_button.set_tooltip(
-                "Disable this Agent App" if is_enabled else "Enable this Agent App"
-            )
+            self.toggle_button.set_tooltip("Disable this Agent App" if is_enabled else "Enable this Agent App")
 
     def _edit(self) -> None:
         if self._selected:

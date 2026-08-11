@@ -154,6 +154,9 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
     if not raw:
         raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
     detail = engine.show(job_id)
+    detail["artifacts"] = [
+        item for item in detail.get("artifacts", []) if item.get("publication_status") in (None, "published")
+    ]
     request = _load_request(raw)
     snapshot: dict[str, Any] = {}
     try:
@@ -199,7 +202,17 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
     status = raw.get("status")
     can_schedule = False
     schedule_reason: str | None = None
-    if status == "COMPLETED" and raw.get("result_status") == "complete":
+    if (
+        status == "COMPLETED"
+        and raw.get("result_status") == "complete"
+        and raw.get("review_status")
+        in {
+            None,
+            "not_started",
+            "not_required",
+            "approved",
+        }
+    ):
         try:
             validate_source_job(raw, engine.agent_registry)
             can_schedule = True
@@ -231,6 +244,25 @@ def job_detail(engine, job_id: str) -> dict[str, Any]:
         "can_open_result": bool(detail.get("output_path") and Path(detail["output_path"]).is_file()),
         "can_open_folder": bool(detail.get("artifact_path") and Path(detail["artifact_path"]).is_dir()),
     }
+    detail["review_status"] = raw.get("review_status") or "not_required"
+    detail["workflow_status"] = (
+        "needs_review"
+        if detail["review_status"] in {"pending_human", "needs_human", "delivery_failed"}
+        else "completed"
+        if status in {"COMPLETED", "PARTIAL"}
+        else str(status or "unknown").lower()
+    )
+    if raw.get("review_id"):
+        from .reviews.service import ReviewService
+
+        detail["review"] = ReviewService(engine.db, engine, engine.config).get(raw["review_id"])
+        detail["actions"].update(
+            {
+                "can_review_confirm": detail["review_status"] in {"pending_human", "needs_human", "delivery_failed"},
+                "can_review_rerun": detail["review_status"] in {"pending_human", "needs_human"},
+                "can_review_reject": detail["review_status"] in {"pending_human", "needs_human"},
+            }
+        )
     detail["task_run_id"] = detail["job_id"]
     return detail
 
@@ -267,7 +299,8 @@ def job_result(db: Database, job_id: str, *, max_bytes: int = 1024 * 1024) -> di
 def job_artifacts(db: Database, job_id: str) -> dict[str, Any]:
     if not db.get_job(job_id):
         raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
-    return {"ok": True, "job_id": job_id, "task_run_id": job_id, "artifacts": db.artifacts_for_job(job_id)}
+    artifacts = [item for item in db.artifacts_for_job(job_id) if item.get("publication_status") in (None, "published")]
+    return {"ok": True, "job_id": job_id, "task_run_id": job_id, "artifacts": artifacts}
 
 
 def job_events(db: Database, job_id: str) -> dict[str, Any]:
@@ -402,20 +435,22 @@ def run_lineage(db: Database, run_id: str) -> dict[str, Any]:
         "task_run_id": run_id,
         "run_id": run_id,
         "inputs": db.lineage_for_job(run_id),
-        "outputs": db.artifacts_for_job(run_id),
+        "outputs": [
+            item for item in db.artifacts_for_job(run_id) if item.get("publication_status") in (None, "published")
+        ],
     }
 
 
 def artifact_detail(db: Database, artifact_uid: str) -> dict[str, Any]:
     artifact = db.artifact_by_uid(artifact_uid)
-    if not artifact:
+    if not artifact or artifact.get("publication_status") not in (None, "published"):
         raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
     return {"ok": True, "artifact": artifact}
 
 
 def artifact_lineage(db: Database, artifact_uid: str) -> dict[str, Any]:
     artifact = db.artifact_by_uid(artifact_uid)
-    if not artifact:
+    if not artifact or artifact.get("publication_status") not in (None, "published"):
         raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
     return {"ok": True, "artifact": artifact, "consumers": db.lineage_for_artifact(artifact_uid)}
 
@@ -481,6 +516,9 @@ def search_artifacts(db: Database, **kwargs: Any) -> dict[str, Any]:
 
 
 def artifact_content(db: Database, artifact_uid: str, *, max_bytes: int = 65536) -> dict[str, Any]:
+    artifact = db.artifact_by_uid(artifact_uid)
+    if not artifact or artifact.get("publication_status") not in (None, "published"):
+        raise RelayError("ARTIFACT_NOT_FOUND", f"Artifact not found: {artifact_uid}")
     return db.artifact_content(artifact_uid, normalize_max_bytes(max_bytes))
 
 
@@ -527,7 +565,16 @@ def get_agent(engine, agent_id: str) -> dict[str, Any]:
 
 
 def _task_public(task: dict[str, Any]) -> dict[str, Any]:
-    return {**task, "fallback_enabled": bool(task.get("fallback_enabled", 1))}
+    public = {**task, "fallback_enabled": bool(task.get("fallback_enabled", 1))}
+    raw = task.get("review_policy_json")
+    if raw:
+        try:
+            decoded = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(decoded, dict):
+                public["review_policy"] = decoded
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return public
 
 
 def list_tasks(engine, *, name: str | None = None, limit: int = 200) -> dict[str, Any]:
@@ -722,6 +769,7 @@ def create_task(engine, payload: dict[str, Any]) -> dict[str, Any]:
         input_schema=payload.get("input_schema"),
         output_contract=payload.get("output_contract"),
         validation_policy=payload.get("validation_policy"),
+        review_policy=payload.get("review_policy"),
     )
     task = engine.create_task(spec)
     return {"ok": True, "task": _task_public(task)}
@@ -779,6 +827,7 @@ def run_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         "request_id",
         "inputs",
         "model",
+        "review_mode",
     }
     if overrides or any(field in payload for field in request_fields):
 
@@ -798,6 +847,7 @@ def run_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
             caller=overrides.get("caller", "human"),
             inputs=dict(value("inputs", {}) or {}),
             model=value("model"),
+            review_mode=value("review_mode", "inherit") or "inherit",
         )
     job, reused, task = engine.run_task(
         task_id,
@@ -935,6 +985,7 @@ def _catalog_project_run(run: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         pass
     status = str(run.get("status") or "").lower()
+    workflow_status = "needs_review" if int(run.get("pending_review_count") or 0) else status
     failure_reason = None
     if status == "failed":
         failure_reason = normalize_summary(
@@ -958,6 +1009,7 @@ def _catalog_project_run(run: dict[str, Any]) -> dict[str, Any]:
         "project_version": run.get("project_version"),
         "project_summary": snapshot.get("project_summary"),
         "status": status,
+        "workflow_status": workflow_status,
         "step_count": int(run.get("step_count") or 0),
         "completed_step_count": int(run.get("completed_step_count") or 0),
         "failed_step_count": int(run.get("failed_step_count") or 0),
@@ -1059,11 +1111,22 @@ def project_run(engine, project_run_id: str) -> dict[str, Any]:
     run = engine.db.get_project_run(project_run_id)
     if not run:
         raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
+    from .reviews.service import ReviewService
+
+    reviews = [
+        item
+        for item in ReviewService(engine.db, engine, engine.config).list(limit=200)["reviews"]
+        if item.get("project_run_id") == project_run_id
+    ]
+    actionable = any(item.get("status") in {"pending_human", "needs_human", "delivery_failed"} for item in reviews)
+    public = _project_run_public(
+        run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None
+    )
+    public["workflow_status"] = "needs_review" if actionable else str(run.get("status") or "unknown")
     return {
         "ok": True,
-        "project_run": _project_run_public(
-            run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None
-        ),
+        "project_run": public,
+        "reviews": reviews,
     }
 
 
@@ -1217,6 +1280,11 @@ def get_approval(engine, token: str) -> dict[str, Any]:
 
 
 def approve_checkpoint(engine, project_run_id: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    review = engine.db.review_session_for_approval(token) if hasattr(engine.db, "review_session_for_approval") else None
+    if review and review.get("project_run_id") == project_run_id:
+        from .reviews.service import ReviewService
+
+        return ReviewService(engine.db, engine, engine.config).confirm(review["review_id"])
     from .approvals.service import ApprovalService
 
     service = ApprovalService(engine.db, engine, engine.config)
@@ -1226,6 +1294,13 @@ def approve_checkpoint(engine, project_run_id: str, token: str, payload: dict[st
 
 
 def reject_checkpoint(engine, project_run_id: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    review = engine.db.review_session_for_approval(token) if hasattr(engine.db, "review_session_for_approval") else None
+    if review and review.get("project_run_id") == project_run_id:
+        from .reviews.service import ReviewService
+
+        return ReviewService(engine.db, engine, engine.config).reject(
+            review["review_id"], str(payload.get("reason") or "Rejected")
+        )
     from .approvals.service import ApprovalService
 
     service = ApprovalService(engine.db, engine, engine.config)
@@ -1244,6 +1319,68 @@ def edit_checkpoint(engine, project_run_id: str, token: str, payload: dict[str, 
     role = str(payload.get("role") or "output")
     res = service.approve_with_edits(project_run_id, token, reviewer=reviewer, edit_file_path=edit_file_path, role=role)
     return {"ok": True, **res}
+
+
+# --- Result review gates ---
+
+
+def list_reviews(engine, *, status: str | None = None, limit: int = 100) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    return ReviewService(engine.db, engine, engine.config).list(status=status, limit=limit)
+
+
+def get_review(engine, review_id: str) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    return ReviewService(engine.db, engine, engine.config).get(review_id)
+
+
+def task_run_review(engine, task_run_id: str) -> dict[str, Any]:
+    job = engine.db.get_job(task_run_id)
+    if not job:
+        raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {task_run_id}")
+    review_id = job.get("review_id")
+    if not review_id:
+        return {"ok": True, "task_run_id": task_run_id, "review": None}
+    return get_review(engine, review_id)
+
+
+def project_run_reviews(engine, project_run_id: str) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    if not engine.db.get_project_run(project_run_id):
+        raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
+    reviews = ReviewService(engine.db, engine, engine.config).list(limit=200)["reviews"]
+    return {
+        "ok": True,
+        "project_run_id": project_run_id,
+        "reviews": [item for item in reviews if item.get("project_run_id") == project_run_id],
+    }
+
+
+def confirm_review(engine, review_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    return ReviewService(engine.db, engine, engine.config).confirm(review_id)
+
+
+def rerun_review(engine, review_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    return ReviewService(engine.db, engine, engine.config).rerun(review_id, str(payload.get("comment") or ""))
+
+
+def reject_review(engine, review_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    return ReviewService(engine.db, engine, engine.config).reject(review_id, str(payload.get("reason") or ""))
+
+
+def retry_review_delivery(engine, review_id: str) -> dict[str, Any]:
+    from .reviews.service import ReviewService
+
+    return ReviewService(engine.db, engine, engine.config).retry_delivery(review_id)
 
 
 # --- Phase 6b Comparison ---
@@ -1271,7 +1408,15 @@ def partial_reexecute_project_run(engine, project_run_id: str, payload: dict[str
         raise RelayError("INVALID_REQUEST", "from_node is required for partial_reexecute")
     cascade = bool(payload.get("cascade", True))
     worker = payload.get("worker")
-    res = engine.project_service.partial_reexecute(project_run_id, from_node=from_node, cascade=cascade, worker=worker)
+    instruction_addendum = payload.get("instruction_addendum")
+    if instruction_addendum is not None:
+        if not isinstance(instruction_addendum, str):
+            raise RelayError("INVALID_REQUEST", "instruction_addendum must be a string")
+        if len(instruction_addendum) > 4000:
+            raise RelayError("INVALID_REQUEST", "instruction_addendum must be 4000 characters or fewer")
+    res = engine.project_service.partial_reexecute(
+        project_run_id, from_node=from_node, cascade=cascade, worker=worker, instruction_addendum=instruction_addendum
+    )
     return {"ok": True, **res}
 
 

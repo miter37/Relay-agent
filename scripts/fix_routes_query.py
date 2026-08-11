@@ -1,4 +1,5 @@
 import pathlib
+
 p = pathlib.Path("relay/daemon.py")
 t = p.read_text(encoding="utf-8")
 old = (
@@ -18,7 +19,11 @@ new = (
     '            self._json(HTTPStatus.OK, {"ok": True, "routines": [_routine_public(r) for r in routines]})\n'
     "            return\n"
 )
-if old in t and 'name = (params.get("name")' not in t.split('        if path == "/v1/routines":')[1].split('        if path.startswith("/v1/projects/":')[0]:
+if (
+    old in t
+    and 'name = (params.get("name")'
+    not in t.split('        if path == "/v1/routines":')[1].split('        if path.startswith("/v1/projects/":')[0]
+):
     t = t.replace(old, new, 1)
     print("updated /v1/routines GET")
 else:
@@ -26,13 +31,13 @@ else:
 
 # /v1/routines/{id}/runs -> parse limit
 old_runs = (
-    "                if suffix.endswith(\"/runs\"):\n"
-    "                    rid = suffix[: -len(\"/runs\")]\n"
+    '                if suffix.endswith("/runs"):\n'
+    '                    rid = suffix[: -len("/runs")]\n'
     "                    self._json(HTTPStatus.OK, routine_runs(self.daemon.engine, rid))\n"
 )
 new_runs = (
-    "                if suffix.endswith(\"/runs\"):\n"
-    "                    rid = suffix[: -len(\"/runs\")]\n"
+    '                if suffix.endswith("/runs"):\n'
+    '                    rid = suffix[: -len("/runs")]\n'
     "                    try:\n"
     '                        limit = int((params.get("limit") or ["100"])[0])\n'
     "                    except ValueError:\n"
@@ -41,7 +46,7 @@ new_runs = (
     "                    rows = self.daemon.engine.db.list_routine_runs(routine_id=rid, limit=limit)\n"
     '                    self._json(HTTPStatus.OK, {"ok": True, "routine_id": rid, "runs": rows})\n'
 )
-if old_runs in t and 'list_routine_runs' not in t:
+if old_runs in t and "list_routine_runs" not in t:
     t = t.replace(old_runs, new_runs, 1)
     print("updated /v1/routines/{id}/runs")
 else:

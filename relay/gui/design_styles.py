@@ -60,10 +60,12 @@ def application_stylesheet() -> str:
             border-radius: {RADIUS["panel"]}px;
         }}
         QLabel#emptyState {{ color: {color["text.secondary"]}; padding: {SPACING["xl"]}px; }}
-        QLabel#pageTitle {{ color: {color["text.primary"]}; }}
+        QLabel#brandMark {{ color: {color["accent.primary"]}; }}
+        QLabel#pageTitle {{ color: {color["text.secondary"]}; }}
         QLabel#detailTitle {{ color: {color["text.primary"]}; }}
         QLabel#sectionTitle {{ color: {color["text.primary"]}; }}
         QLabel#mutedText {{ color: {color["text.muted"]}; }}
+        QLabel#dataText {{ color: {color["text.secondary"]}; }}
         QLabel#emptyHint {{ color: {color["text.secondary"]}; background: {color["bg.surface"]}; border: 1px dashed {color["border.subtle"]}; border-radius: {RADIUS["panel"]}px; padding: {SPACING["xl"]}px; }}
         QLabel#doctorStatus {{ color: {color["text.muted"]}; }}
         QLabel#doctorStatus[tone="healthy"] {{ color: {color["state.success"]}; }}
@@ -109,9 +111,22 @@ def application_stylesheet() -> str:
         QPushButton#iconAction[tone="accent"]:hover {{ background: {color["bg.hover"]}; border-color: {color["accent.primary"]}; }}
         QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QTextBrowser, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QDateTimeEdit {{
             background: {color["bg.input"]}; border: 1px solid {color["border.subtle"]};
-            border-radius: {RADIUS["control"]}px; color: {color["text.primary"]}; padding: {SPACING["sm"]}px;
+            border-radius: {RADIUS["control"]}px; color: {color["text.primary"]};
         }}
+        QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QDateTimeEdit {{ padding: {SPACING["sm"]}px; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QDateTimeEdit {{ min-height: {METRICS["controlHeight"]}px; }}
+        /* QComboBox gets no vertical padding, unlike the other controls above,
+           and `max-height` is deliberately absent here: Qt's QStyleSheetStyle
+           does not actually clamp QComboBox to a stylesheet max-height (verified
+           empirically - it was silently ignored), and its rendered height is
+           `font_content_height + 2*vertical_padding` regardless. Any vertical
+           padding compounds with the font's own content height, and a CJK-script
+           item (e.g. a Korean Task name) needs a taller fallback-font content
+           height than Latin text - stacking padding on top of that pushed the
+           combo well past the picker row's fixed height and into the row below.
+           Horizontal padding is kept (it doesn't affect height); the combo's
+           built-in frame/arrow already reserve enough vertical room on their own. */
+        QComboBox {{ padding: 0 {SPACING["sm"]}px; }}
         QLineEdit:read-only, QTextEdit:read-only, QPlainTextEdit:read-only {{ background: {color["bg.surface"]}; }}
         QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateEdit:focus, QTimeEdit:focus, QDateTimeEdit:focus {{ border: 1px solid {color["border.focus"]}; }}
         QPushButton:focus, QCheckBox:focus, QRadioButton:focus {{ border-color: {color["border.focus"]}; }}

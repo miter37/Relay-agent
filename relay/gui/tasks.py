@@ -9,7 +9,6 @@ widgets never delete or rerun a Task silently.
 from __future__ import annotations
 
 import json
-from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -34,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..task_inputs import compile_definitions, extract_definitions, normalize_definition, validate_inputs
+from .design_html import kv_row, td, th_row
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
 
@@ -250,10 +250,7 @@ class InputDefinitionsEditor(QWidget):
 def _format_fields(payload: dict) -> str:
     if not payload:
         return "<i>No details available.</i>"
-    rows = "".join(
-        f"<tr><td><b>{escape(str(key))}</b></td><td>{escape(str(value or '—'))}</td></tr>"
-        for key, value in payload.items()
-    )
+    rows = "".join(kv_row(key, value or "—") for key, value in payload.items())
     return f"<table>{rows}</table>"
 
 
@@ -378,15 +375,18 @@ class TaskDetailView(QWidget):
         self.refresh_button = IconButton("refresh", "Refresh this Task")
         self.refresh_button.clicked.connect(self._on_refresh)
         header.addWidget(self.refresh_button)
-        self.run_button = IconButton("play", "Run this Task", tone="accent")
-        self.run_button.clicked.connect(self._on_run)
-        header.addWidget(self.run_button)
         self.edit_button = IconButton("pencil", "Edit this Task")
         self.edit_button.clicked.connect(self._on_edit)
         header.addWidget(self.edit_button)
         self.delete_button = IconButton("trash", "Delete this Task", tone="danger")
         self.delete_button.clicked.connect(self._on_delete)
         header.addWidget(self.delete_button)
+        # Run is the one primary action on this screen, matching the same
+        # promotion made on the Project detail screen: it should visibly
+        # outweigh the quiet refresh/edit/delete icon row, not blend into it.
+        self.run_button = LabeledButton("play", "Run", tone="primary")
+        self.run_button.clicked.connect(self._on_run)
+        header.addWidget(self.run_button)
         layout.addLayout(header)
 
         self.tabs = QTabWidget()
@@ -457,15 +457,12 @@ class TaskDetailView(QWidget):
         if not runs:
             return "<i>No Runs recorded for this Task yet.</i>"
         rows = "".join(
-            "<tr>"
-            f"<td>{escape(str(run.get('task_run_id') or run.get('job_id') or run.get('run_id') or '—'))}</td>"
-            f"<td>{escape(str(run.get('status') or '—'))}</td>"
-            f"<td>{escape(str(run.get('completed_at') or run.get('created_at') or '—'))}</td>"
-            f"<td>{escape(str(run.get('actual_worker') or run.get('requested_worker') or '—'))}</td>"
-            "</tr>"
+            f"<tr>{td(run.get('task_run_id') or run.get('job_id') or run.get('run_id') or '—')}"
+            f"{td(run.get('status') or '—')}{td(run.get('completed_at') or run.get('created_at') or '—')}"
+            f"{td(run.get('actual_worker') or run.get('requested_worker') or '—')}</tr>"
             for run in runs
         )
-        return f"<table><tr><th>Run</th><th>Status</th><th>When</th><th>Worker</th></tr>{rows}</table>"
+        return f"<table>{th_row(['Run', 'Status', 'When', 'Worker'])}{rows}</table>"
 
     def _on_refresh(self) -> None:
         if self.task_id:
@@ -490,15 +487,22 @@ class TaskEditorDialog(QDialog):
     def __init__(self, *, task=None, available_workers=None, profiles=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Task" if task else "Register Task")
-        self.resize(640, 620)
+        # Wide, not tall: Instructions routinely holds long prompt text, and it's
+        # easier to write/scan that with more horizontal room than more vertical
+        # room. The short scalar fields below are split into two columns instead
+        # of one long stack so Instructions isn't left with whatever is left over.
+        self.resize(920, 720)
         self._task_id = str(task.get("task_id") or "") if task else ""
 
         root = QVBoxLayout(self)
-        form = QFormLayout()
+        fields_row = QHBoxLayout()
+        left_form = QFormLayout()
+        right_form = QFormLayout()
+
         self.name_edit = QLineEdit()
-        form.addRow("Name", self.name_edit)
+        left_form.addRow("Name", self.name_edit)
         self.description_edit = QLineEdit()
-        form.addRow("Description", self.description_edit)
+        left_form.addRow("Description", self.description_edit)
 
         self.worker_combo = QComboBox()
         workers = list(_WORKER_CHOICES)
@@ -506,45 +510,67 @@ class TaskEditorDialog(QDialog):
             if worker and worker not in workers:
                 workers.append(worker)
         self.worker_combo.addItems(workers)
-        form.addRow("Default Worker", self.worker_combo)
+        left_form.addRow("Default Worker", self.worker_combo)
 
         self.fallback_checkbox = QCheckBox("Allow Worker fallback")
         self.fallback_checkbox.setChecked(True)
-        form.addRow("Fallback", self.fallback_checkbox)
+        left_form.addRow("Fallback", self.fallback_checkbox)
 
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(0, 24 * 60 * 60)
         self.timeout_spin.setSpecialValueText("No timeout")
         self.timeout_spin.setValue(0)
-        form.addRow("Timeout (seconds)", self.timeout_spin)
+        left_form.addRow("Timeout (seconds)", self.timeout_spin)
 
         self.profile_combo = QComboBox()
         self.profile_combo.addItems(list(profiles or _PROFILE_CHOICES))
-        form.addRow("Profile", self.profile_combo)
+        right_form.addRow("Profile", self.profile_combo)
 
         self.format_combo = QComboBox()
         self.format_combo.addItems(_RESULT_FORMATS)
-        form.addRow("Result format", self.format_combo)
+        right_form.addRow("Result format", self.format_combo)
+
+        self.validation_policy_edit = QLineEdit()
+        self.validation_policy_edit.setPlaceholderText("Optional identifier, e.g. strict, lenient")
+        right_form.addRow("Validation policy", self.validation_policy_edit)
 
         self.output_contract_edit = QTextEdit()
         self.output_contract_edit.setPlaceholderText("Optional JSON describing the expected output shape")
         self.output_contract_edit.setAcceptRichText(False)
         self.output_contract_edit.setMinimumHeight(80)
-        form.addRow("Output contract", self.output_contract_edit)
+        right_form.addRow("Output contract", self.output_contract_edit)
 
-        self.validation_policy_edit = QLineEdit()
-        self.validation_policy_edit.setPlaceholderText("Optional identifier, e.g. strict, lenient")
-        form.addRow("Validation policy", self.validation_policy_edit)
-
-        root.addLayout(form)
+        fields_row.addLayout(left_form, 1)
+        fields_row.addLayout(right_form, 1)
+        root.addLayout(fields_row)
 
         self.input_definitions = InputDefinitionsEditor()
         root.addWidget(self.input_definitions)
 
+        review_box = QFormLayout()
+        self.review_enabled_checkbox = QCheckBox("Require result review before publishing")
+        self.review_enabled_checkbox.setToolTip(
+            "The Task finishes first; its result becomes visible to the reviewer and is published only after confirmation."
+        )
+        review_box.addRow("Review gate", self.review_enabled_checkbox)
+        self.review_reviewer_combo = QComboBox()
+        self.review_reviewer_combo.addItem("Human", "human")
+        review_box.addRow("Reviewer", self.review_reviewer_combo)
+        self.review_guidelines_edit = QTextEdit()
+        self.review_guidelines_edit.setAcceptRichText(False)
+        self.review_guidelines_edit.setPlaceholderText("Optional notes about what the reviewer should check")
+        self.review_guidelines_edit.setMaximumHeight(72)
+        review_box.addRow("Review notes", self.review_guidelines_edit)
+        self.review_max_reruns_spin = QSpinBox()
+        self.review_max_reruns_spin.setRange(0, 20)
+        self.review_max_reruns_spin.setSpecialValueText("Human decides")
+        review_box.addRow("Automatic reruns", self.review_max_reruns_spin)
+        root.addLayout(review_box)
+
         root.addWidget(QLabel("<b>Instructions</b>"))
         self.instructions_edit = QTextEdit()
         self.instructions_edit.setAcceptRichText(False)
-        self.instructions_edit.setMinimumHeight(180)
+        self.instructions_edit.setMinimumHeight(260)
         root.addWidget(self.instructions_edit, 1)
 
         self.error_label = QLabel("")
@@ -584,6 +610,15 @@ class TaskEditorDialog(QDialog):
         self.output_contract_edit.setPlainText(str(task.get("output_contract") or ""))
         self.validation_policy_edit.setText(str(task.get("validation_policy") or ""))
         self.instructions_edit.setPlainText(str(task.get("instructions") or ""))
+        review = task.get("review_policy") or {}
+        if isinstance(review, str):
+            try:
+                review = json.loads(review)
+            except json.JSONDecodeError:
+                review = {}
+        self.review_enabled_checkbox.setChecked(bool(review.get("enabled")))
+        self.review_guidelines_edit.setPlainText(str(review.get("guidelines") or ""))
+        self.review_max_reruns_spin.setValue(int(review.get("max_reruns") or 0))
 
     def _on_save(self) -> None:
         try:
@@ -624,6 +659,16 @@ class TaskEditorDialog(QDialog):
         validation = self.validation_policy_edit.text().strip()
         if validation:
             payload["validation_policy"] = validation
+        if self.review_enabled_checkbox.isChecked():
+            policy = {
+                "enabled": True,
+                "reviewer": "human",
+                "max_reruns": int(self.review_max_reruns_spin.value()),
+            }
+            guidelines = self.review_guidelines_edit.toPlainText().strip()
+            if guidelines:
+                policy["guidelines"] = guidelines
+            payload["review_policy"] = policy
         return payload
 
     @property
@@ -663,6 +708,11 @@ class TaskRunDialog(QDialog):
         self.format_combo.addItem("(default)")
         self.format_combo.addItems(_RESULT_FORMATS)
         form.addRow("Result format override", self.format_combo)
+        self.review_combo = QComboBox()
+        self.review_combo.addItem("Use Task setting", "inherit")
+        self.review_combo.addItem("Require human review", "human")
+        self.review_combo.addItem("Skip review for this run", "off")
+        form.addRow("Review gate", self.review_combo)
         layout.addLayout(form)
 
         self.inputs_form = QFormLayout()
@@ -722,6 +772,9 @@ class TaskRunDialog(QDialog):
         result_format = self.format_combo.currentText()
         if result_format and result_format != "(default)":
             overrides["format"] = result_format
+        review_mode = self.review_combo.currentData()
+        if review_mode and review_mode != "inherit":
+            overrides["review_mode"] = review_mode
         inputs = self._input_values()
         if inputs:
             overrides["inputs"] = inputs

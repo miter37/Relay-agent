@@ -276,6 +276,29 @@ class DaemonProjectRunRouteTests(unittest.TestCase):
         )
         self.assertTrue(ok.get("ok"))
 
+    def test_partial_reexecute_accepts_instruction_addendum(self):
+        project_run_id = self._make_project_run()
+        ok = self.client.request(
+            "POST",
+            f"/v1/project-runs/{project_run_id}/partial-reexecute",
+            {"from_node": "b", "cascade": False, "instruction_addendum": "please double-check the totals"},
+        )
+        self.assertTrue(ok.get("ok"))
+        with self.assertRaises(RelayError) as ctx:
+            self.client.request(
+                "POST",
+                f"/v1/project-runs/{project_run_id}/partial-reexecute",
+                {"from_node": "b", "cascade": False, "instruction_addendum": 123},
+            )
+        self.assertEqual(ctx.exception.code, "INVALID_REQUEST")
+        with self.assertRaises(RelayError) as ctx:
+            self.client.request(
+                "POST",
+                f"/v1/project-runs/{project_run_id}/partial-reexecute",
+                {"from_node": "b", "cascade": False, "instruction_addendum": "x" * 4001},
+            )
+        self.assertEqual(ctx.exception.code, "INVALID_REQUEST")
+
 
 class DaemonProjectListQueryRouteTests(unittest.TestCase):
     """Regression for query-parameter parsing on /v1/tasks and /v1/projects."""

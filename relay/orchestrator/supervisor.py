@@ -96,7 +96,10 @@ class Supervisor:
         if decision is None:
             if self.llm_calls_used(project_run_id) >= config["max_llm_calls_per_run"]:
                 self._record_event(
-                    project_run_id, node_id, "fallback", "runtime",
+                    project_run_id,
+                    node_id,
+                    "fallback",
+                    "runtime",
                     "LLM call budget exhausted for this Run; reporting the failure as-is.",
                 )
                 return None
@@ -109,7 +112,10 @@ class Supervisor:
             except Exception as exc:  # noqa: BLE001 - any agent failure must fall back, not propagate
                 logger.warning("orchestrator agent failed for %s/%s: %s", project_run_id, node_id, exc)
                 self._record_event(
-                    project_run_id, node_id, "fallback", "orchestrator",
+                    project_run_id,
+                    node_id,
+                    "fallback",
+                    "orchestrator",
                     f"Orchestrator call failed ({exc}); falling back to a deterministic failure report.",
                 )
                 return None
@@ -121,7 +127,10 @@ class Supervisor:
         authority_error = self._authority_violation(decision, evidence)
         if authority_error:
             self._record_event(
-                project_run_id, node_id, "report", actor,
+                project_run_id,
+                node_id,
+                "report",
+                actor,
                 f"Decision rejected (out of authority): {authority_error}",
                 detail={"strategy": decision.strategy, "rejected_reason": authority_error},
             )
@@ -129,27 +138,40 @@ class Supervisor:
 
         if self.repair_attempts_used(project_run_id, node_id) >= config["max_repair_attempts_per_node"]:
             self._record_event(
-                project_run_id, node_id, "report", actor,
+                project_run_id,
+                node_id,
+                "report",
+                actor,
                 f"Per-node repair budget exhausted for {node_id!r}; reporting the failure as-is.",
             )
             return None
         if self.repair_attempts_used(project_run_id, node_id=None) >= config["max_repair_attempts_per_run"]:
             self._record_event(
-                project_run_id, node_id, "report", actor,
+                project_run_id,
+                node_id,
+                "report",
+                actor,
                 "Per-run repair budget exhausted; reporting the failure as-is.",
             )
             return None
 
         if decision.strategy in self._strategies_used(project_run_id, node_id):
             self._record_event(
-                project_run_id, node_id, "report", actor,
+                project_run_id,
+                node_id,
+                "report",
+                actor,
                 f"Strategy {decision.strategy!r} was already attempted on {node_id!r}; refusing to repeat it.",
             )
             return None
 
         self._apply_decision(project_run_id, node_id, decision)
         self._record_event(
-            project_run_id, node_id, "decision", actor, decision.reason,
+            project_run_id,
+            node_id,
+            "decision",
+            actor,
+            decision.reason,
             detail={
                 "strategy": decision.strategy,
                 "worker": decision.worker,
@@ -215,7 +237,9 @@ class Supervisor:
         # Rescue blocked descendants exactly as a human retry does.
         for step in self.db.list_project_steps(project_run_id):
             if step["node_id"] != node_id and step["status"] == "blocked":
-                self.db.update_project_step(project_run_id, step["node_id"], status="pending", error_code=None, error_message=None)
+                self.db.update_project_step(
+                    project_run_id, step["node_id"], status="pending", error_code=None, error_message=None
+                )
 
         self.db.update_project_run(project_run_id, status="running", completed_at=None, started_at=None)
 
@@ -237,11 +261,7 @@ class Supervisor:
 
     def _repair_events(self, project_run_id: str, node_id: str | None) -> list[dict[str, Any]]:
         events = self.db.list_project_run_events(project_run_id)
-        return [
-            e
-            for e in events
-            if e.get("kind") == "decision" and (node_id is None or e.get("node_id") == node_id)
-        ]
+        return [e for e in events if e.get("kind") == "decision" and (node_id is None or e.get("node_id") == node_id)]
 
     def repair_attempts_used(self, project_run_id: str, node_id: str | None) -> int:
         return len(self._repair_events(project_run_id, node_id))
@@ -262,7 +282,9 @@ class Supervisor:
         """A bounded summary of prior decisions in this Run, carried into the next LLM
         call instead of resending the full event history."""
         events = self.db.list_project_run_events(project_run_id)
-        lines = [f"- {e['node_id'] or 'run'}: {e['summary']}" for e in events if e.get("kind") in {"decision", "report"}]
+        lines = [
+            f"- {e['node_id'] or 'run'}: {e['summary']}" for e in events if e.get("kind") in {"decision", "report"}
+        ]
         digest = "\n".join(lines[-10:])
         if len(digest) > 1500:
             digest = digest[-1500:]

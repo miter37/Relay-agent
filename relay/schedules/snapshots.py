@@ -56,6 +56,8 @@ def _hash_file(path: Path) -> tuple[int, str]:
 def validate_source_job(job: dict[str, Any], registry: AgentRegistry) -> JobRequest:
     if job.get("status") != "COMPLETED" or job.get("result_status") != "complete":
         raise RelayError("SCHEDULE_NOT_ELIGIBLE", "Only completely successful Jobs can become Schedules.")
+    if job.get("review_status") not in (None, "not_started", "not_required", "approved"):
+        raise RelayError("SCHEDULE_NOT_ELIGIBLE", "A result must pass review before it can become a Schedule.")
     if not bool(job.get("replayable", 1)):
         raise RelayError("SCHEDULE_NOT_ELIGIBLE", "This Job did not save a replayable request.")
     raw = job.get("request_json")

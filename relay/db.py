@@ -13,7 +13,7 @@ from .search import artifact_mime, artifact_search_content, fts_query, result_su
 from .util import new_artifact_uid, new_job_id, utc_now
 from .validation import normalize_summary
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     task_preview TEXT,
     task_summary TEXT,
     result_summary TEXT,
+    review_status TEXT NOT NULL DEFAULT 'not_required',
+    review_id TEXT,
+    review_policy_json TEXT,
+    review_candidate_root TEXT,
+    review_target_delta_json TEXT,
     title TEXT,
     requested_worker TEXT NOT NULL,
     actual_worker TEXT,
@@ -142,6 +147,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     role TEXT NOT NULL DEFAULT 'output',
     producer_attempt_id INTEGER,
     producer TEXT NOT NULL DEFAULT 'worker',
+    publication_status TEXT NOT NULL DEFAULT 'published',
     created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_uid
@@ -204,6 +210,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     input_schema TEXT,
     output_contract TEXT,
     validation_policy TEXT,
+    review_policy_json TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -256,6 +263,7 @@ CREATE TABLE IF NOT EXISTS project_run_steps (
     input_manifest_json TEXT,
     resolved_connections_json TEXT,
     step_overrides_json TEXT,
+    review_id TEXT,
     error_code TEXT,
     error_message TEXT,
     started_at TEXT,
@@ -299,6 +307,42 @@ CREATE TABLE IF NOT EXISTS project_run_orchestrator_state (
     state_digest TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS review_sessions (
+    review_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    task_run_id TEXT,
+    project_run_id TEXT,
+    node_id TEXT,
+    approval_token TEXT,
+    reviewer TEXT NOT NULL,
+    status TEXT NOT NULL,
+    guidelines TEXT,
+    max_reruns INTEGER NOT NULL DEFAULT 0,
+    reruns_used INTEGER NOT NULL DEFAULT 0,
+    current_round INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_status ON review_sessions(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_task ON review_sessions(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_project ON review_sessions(project_run_id, node_id);
+
+CREATE TABLE IF NOT EXISTS review_rounds (
+    review_id TEXT NOT NULL REFERENCES review_sessions(review_id) ON DELETE CASCADE,
+    round_no INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL REFERENCES jobs(job_id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    comment TEXT,
+    evaluation_json TEXT,
+    candidate_manifest_json TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    PRIMARY KEY (review_id, round_no),
+    UNIQUE (task_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_rounds_task ON review_rounds(task_run_id);
 
 CREATE TABLE IF NOT EXISTS routines (
     routine_id TEXT PRIMARY KEY,
@@ -542,6 +586,51 @@ CREATE TABLE IF NOT EXISTS project_run_orchestrator_state (
 
 MIGRATION_15_TO_16 = """
 ALTER TABLE tasks ADD COLUMN default_model TEXT;
+"""
+
+MIGRATION_16_TO_17 = """
+ALTER TABLE jobs ADD COLUMN review_status TEXT NOT NULL DEFAULT 'not_required';
+ALTER TABLE jobs ADD COLUMN review_id TEXT;
+ALTER TABLE jobs ADD COLUMN review_policy_json TEXT;
+ALTER TABLE jobs ADD COLUMN review_candidate_root TEXT;
+ALTER TABLE jobs ADD COLUMN review_target_delta_json TEXT;
+ALTER TABLE tasks ADD COLUMN review_policy_json TEXT;
+ALTER TABLE artifacts ADD COLUMN publication_status TEXT NOT NULL DEFAULT 'published';
+ALTER TABLE project_run_steps ADD COLUMN review_id TEXT;
+CREATE TABLE IF NOT EXISTS review_sessions (
+    review_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    task_run_id TEXT,
+    project_run_id TEXT,
+    node_id TEXT,
+    approval_token TEXT,
+    reviewer TEXT NOT NULL,
+    status TEXT NOT NULL,
+    guidelines TEXT,
+    max_reruns INTEGER NOT NULL DEFAULT 0,
+    reruns_used INTEGER NOT NULL DEFAULT 0,
+    current_round INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_status ON review_sessions(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_task ON review_sessions(task_run_id);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_project ON review_sessions(project_run_id, node_id);
+CREATE TABLE IF NOT EXISTS review_rounds (
+    review_id TEXT NOT NULL REFERENCES review_sessions(review_id) ON DELETE CASCADE,
+    round_no INTEGER NOT NULL,
+    task_run_id TEXT NOT NULL REFERENCES jobs(job_id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    comment TEXT,
+    evaluation_json TEXT,
+    candidate_manifest_json TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    PRIMARY KEY (review_id, round_no),
+    UNIQUE (task_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_rounds_task ON review_rounds(task_run_id);
 """
 
 MIGRATION_9_TO_10 = """
@@ -831,6 +920,7 @@ class Database:
                         MIGRATION_13_TO_14,
                         MIGRATION_14_TO_15,
                         MIGRATION_15_TO_16,
+                        MIGRATION_16_TO_17,
                     ):
                         for statement in migration.split(";"):
                             if statement.strip():
@@ -1141,7 +1231,30 @@ class Database:
                     conn.rollback()
                     backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
                     raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
-            if version == CURRENT_SCHEMA_VERSION:
+            # All legacy branches above intentionally preserve their original
+            # migration code. Finish the additive review migration here so a
+            # v0-v16 database reaches the same v17 shape without duplicating
+            # another large version branch.
+            current_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if current_version == 16:
+                self.last_backup_path = self.last_backup_path or self._create_backup()
+                try:
+                    conn.execute("BEGIN")
+                    for statement in MIGRATION_16_TO_17.split(";"):
+                        if statement.strip():
+                            try:
+                                conn.execute(statement)
+                            except sqlite3.OperationalError as exc:
+                                if "duplicate column" not in str(exc):
+                                    raise
+                    conn.execute("PRAGMA user_version=17")
+                    conn.execute("COMMIT")
+                except Exception as exc:
+                    conn.rollback()
+                    backup = f" Backup: {self.last_backup_path}" if self.last_backup_path else ""
+                    raise RelayError("DATABASE_MIGRATION_FAILED", f"Database migration failed.{backup}") from exc
+                current_version = 17
+            if current_version == CURRENT_SCHEMA_VERSION:
                 self._backfill_job_metadata(conn)
                 self._ensure_search_tables(conn)
                 self._backfill_catalog_summaries(conn, read_results=False)
@@ -1240,6 +1353,9 @@ class Database:
             if not row:
                 return False
             artifact = dict(row)
+            if artifact.get("publication_status") not in (None, "published"):
+                conn.execute("DELETE FROM artifact_search WHERE artifact_uid=?", (artifact_uid,))
+                return False
             content, _available = artifact_search_content(artifact, max_bytes=1024 * 1024)
             conn.execute("DELETE FROM artifact_search WHERE artifact_uid=?", (artifact_uid,))
             conn.execute(
@@ -1269,7 +1385,8 @@ class Database:
                         values,
                     )
             for row in conn.execute(
-                "SELECT * FROM artifacts WHERE artifact_uid IS NOT NULL ORDER BY artifact_id"
+                "SELECT * FROM artifacts WHERE artifact_uid IS NOT NULL "
+                "AND (publication_status IS NULL OR publication_status='published') ORDER BY artifact_id"
             ).fetchall():
                 artifact = dict(row)
                 content, _available = artifact_search_content(artifact, max_bytes=1024 * 1024)
@@ -1306,7 +1423,10 @@ class Database:
         with self.connect() as conn:
             if not self._fts_available(conn):
                 raise RelayError("SEARCH_UNAVAILABLE", "SQLite FTS5 is not available.")
-            where = ["1=1"]
+            where = [
+                "1=1",
+                "COALESCE(j.review_status, 'not_required') NOT IN ('pending_human','needs_human','delivery_failed','revision_queued')",
+            ]
             params: list[Any] = []
             join = ""
             if query:
@@ -1362,7 +1482,7 @@ class Database:
         with self.connect() as conn:
             if not self._fts_available(conn):
                 raise RelayError("SEARCH_UNAVAILABLE", "SQLite FTS5 is not available.")
-            where = ["1=1"]
+            where = ["1=1", "(ar.publication_status IS NULL OR ar.publication_status='published')"]
             params: list[Any] = []
             join = ""
             if query:
@@ -1900,6 +2020,105 @@ class Database:
             rows = conn.execute("SELECT * FROM artifacts WHERE job_id=? ORDER BY artifact_id", (job_id,)).fetchall()
             return [dict(r) for r in rows]
 
+    def update_artifact_publication(self, artifact_uid: str, publication_status: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE artifacts SET publication_status=? WHERE artifact_uid=?",
+                (publication_status, artifact_uid),
+            )
+            if publication_status != "published":
+                if self._ensure_search_tables(conn):
+                    conn.execute("DELETE FROM artifact_search WHERE artifact_uid=?", (artifact_uid,))
+
+    def update_artifact_path(self, artifact_uid: str, final_path: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE artifacts SET final_path=? WHERE artifact_uid=?", (final_path, artifact_uid))
+
+    def create_review_session(self, row: dict[str, Any]) -> None:
+        now = utc_now()
+        values = {"created_at": now, "updated_at": now, **row}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO review_sessions ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def get_review_session(self, review_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM review_sessions WHERE review_id=?", (review_id,)).fetchone()
+            return dict(row) if row else None
+
+    def review_session_for_approval(self, approval_token: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM review_sessions WHERE approval_token=?", (approval_token,)).fetchone()
+            return dict(row) if row else None
+
+    def review_session_for_task(self, task_run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM review_sessions WHERE task_run_id=? ORDER BY updated_at DESC LIMIT 1",
+                (task_run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def review_session_for_project_node(self, project_run_id: str, node_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM review_sessions WHERE project_run_id=? AND node_id=? ORDER BY updated_at DESC LIMIT 1",
+                (project_run_id, node_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_review_sessions(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM review_sessions"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status=?"
+            params.append(status)
+        query += " ORDER BY updated_at ASC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def update_review_session(self, review_id: str, **changes: Any) -> None:
+        if not changes:
+            return
+        changes["updated_at"] = utc_now()
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE review_sessions SET {','.join(f'{key}=?' for key in keys)} WHERE review_id=?",
+                [changes[key] for key in keys] + [review_id],
+            )
+
+    def create_review_round(self, row: dict[str, Any]) -> None:
+        values = {"created_at": utc_now(), **row}
+        keys = list(values)
+        with self.connect() as conn:
+            conn.execute(
+                f"INSERT INTO review_rounds ({','.join(keys)}) VALUES ({','.join('?' for _ in keys)})",
+                [values[key] for key in keys],
+            )
+
+    def list_review_rounds(self, review_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM review_rounds WHERE review_id=? ORDER BY round_no",
+                (review_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_review_round(self, review_id: str, round_no: int, **changes: Any) -> None:
+        if not changes:
+            return
+        keys = list(changes)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE review_rounds SET {','.join(f'{key}=?' for key in keys)} WHERE review_id=? AND round_no=?",
+                [changes[key] for key in keys] + [review_id, round_no],
+            )
+
     def artifact_by_uid(self, artifact_uid: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM artifacts WHERE artifact_uid=?", (artifact_uid,)).fetchone()
@@ -2052,7 +2271,9 @@ class Database:
     ) -> list[dict[str, Any]]:
         if limit < 1 or limit > 200:
             raise ValueError("Catalog limit must be between 1 and 200")
-        where: list[str] = []
+        where: list[str] = [
+            "COALESCE(j.review_status, 'not_required') NOT IN ('pending_human','needs_human','delivery_failed','revision_queued')"
+        ]
         params: list[Any] = []
         if status:
             where.append("j.status=?")
@@ -2072,7 +2293,8 @@ class Database:
         sql = (
             "SELECT j.*, COUNT(a.artifact_id) AS artifact_count, "
             "GROUP_CONCAT(DISTINCT a.role) AS artifact_roles "
-            "FROM jobs j LEFT JOIN artifacts a ON a.job_id=j.job_id"
+            "FROM jobs j LEFT JOIN artifacts a ON a.job_id=j.job_id "
+            "AND (a.publication_status IS NULL OR a.publication_status='published')"
         )
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -2295,6 +2517,8 @@ class Database:
             "SUM(CASE WHEN ps.status='completed' THEN 1 ELSE 0 END) AS completed_step_count, "
             "SUM(CASE WHEN ps.status='failed' THEN 1 ELSE 0 END) AS failed_step_count, "
             "SUM(CASE WHEN ps.status='blocked' THEN 1 ELSE 0 END) AS blocked_step_count, "
+            "(SELECT COUNT(*) FROM review_sessions rs WHERE rs.project_run_id=pr.project_run_id "
+            "AND rs.status IN ('pending_human','needs_human','delivery_failed')) AS pending_review_count, "
             "(SELECT ps2.node_id FROM project_run_steps ps2 "
             "WHERE ps2.project_run_id=pr.project_run_id AND ps2.status='failed' "
             "ORDER BY COALESCE(ps2.completed_at, ps2.updated_at) ASC, ps2.node_id ASC LIMIT 1) AS failed_node_id "

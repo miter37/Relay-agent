@@ -55,6 +55,11 @@ TYPE_SCALE: dict[str, TypeRole] = {
     "caption": TypeRole(12, QFont.Normal, 0.0),
     "overline": TypeRole(11, QFont.DemiBold, 0.6, uppercase=True),
     "mono": TypeRole(12, QFont.Normal, 0.0, mono=True),
+    # IDs, hashes, durations: mono for tabular-figure alignment, paired with the
+    # "dataText" QSS color rule (design_styles.py) so this reads as one
+    # consistent convention everywhere instead of some tables dimming IDs and
+    # others not. See design_widgets.apply_data_style().
+    "data": TypeRole(12, QFont.Normal, -0.1, mono=True),
 }
 
 _FONT_CACHE: dict[str, QFont] = {}

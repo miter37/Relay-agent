@@ -114,7 +114,9 @@ class AntigravityAdapter(Adapter):
                     target_art = ctx.artifact_dir / "probe-artifact.txt"
                     if scratch_art.exists() and not target_art.exists():
                         target_art.parent.mkdir(parents=True, exist_ok=True)
-                        target_art.write_text(scratch_art.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+                        target_art.write_text(
+                            scratch_art.read_text(encoding="utf-8", errors="replace"), encoding="utf-8"
+                        )
                     return
             except OSError:
                 pass

@@ -1,10 +1,10 @@
 """One-shot real antigravity Task Run smoke test."""
+
 from __future__ import annotations
 
 import json
 import os
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 

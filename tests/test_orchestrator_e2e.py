@@ -101,9 +101,7 @@ class Scenario2ConnectionRoleMismatchZeroAgentCallsTests(unittest.TestCase):
                     {"node_id": "collect", "task_id": collect["task_id"]},
                     {"node_id": "summarize", "task_id": summarize["task_id"]},
                 ],
-                "connections": [
-                    {"from_node": "collect", "from_role": "raw", "to_node": "summarize", "to_alias": "A1"}
-                ],
+                "connections": [{"from_node": "collect", "from_role": "raw", "to_node": "summarize", "to_alias": "A1"}],
                 "output_selection": [{"node_id": "summarize", "role": "final"}],
                 "orchestrator": {"enabled": True},
             }

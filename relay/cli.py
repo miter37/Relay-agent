@@ -56,6 +56,7 @@ def _read_input_schema(inline: str | None, path: str | None) -> str | None:
         raise RelayError("INPUT_SCHEMA_INVALID", str(exc)) from exc
     return json.dumps(parsed, ensure_ascii=False)
 
+
 COMMANDS = {
     "run",
     "submit",
@@ -84,6 +85,7 @@ COMMANDS = {
     "run-lineage",
     "task",
     "approval",
+    "review",
     "compare",
     "project",
     "project-run",
@@ -425,6 +427,23 @@ def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--json")
     update.add_argument("--machine", action="store_true")
 
+    review_config = proj_sub.add_parser(
+        "review-config",
+        help="Configure or disable result review for one Project node",
+        description=(
+            "Update one node's optional result review gate without rewriting the full Project JSON. "
+            "Use --reviewer orchestrator with --guidelines to let the Orchestrator evaluate the result."
+        ),
+    )
+    review_config.add_argument("project_id")
+    review_config.add_argument("--node", required=True, help="Project node_id whose result should be reviewed")
+    review_config.add_argument("--disable", action="store_true", help="Disable the review gate and keep its settings")
+    review_config.add_argument("--reviewer", choices=["human", "orchestrator"])
+    review_config.add_argument("--guidelines", help="Orchestrator review criteria and evaluation instructions")
+    review_config.add_argument("--guidelines-file", help="Read Orchestrator review criteria from a UTF-8 text file")
+    review_config.add_argument("--max-reruns", type=int, help="Maximum automatic reruns for Orchestrator review (0-20)")
+    review_config.add_argument("--machine", action="store_true")
+
     delete_p = proj_sub.add_parser("delete", help="Soft-delete a Project")
     delete_p.add_argument("project_id")
     delete_p.add_argument("--machine", action="store_true")
@@ -473,6 +492,13 @@ def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
     reexec.add_argument("--from-node", required=True)
     reexec.add_argument("--no-cascade", action="store_false", dest="cascade")
     reexec.add_argument("--worker")
+    reexec.add_argument(
+        "--comment",
+        help=(
+            "Free-text note appended to this node's Task instructions for this attempt only; "
+            "the registered Task definition is never modified."
+        ),
+    )
     reexec.add_argument("--machine", action="store_true")
     show = run_sub.add_parser("show", help="Show a Project Run")
     show.add_argument("project_run_id")
@@ -481,6 +507,10 @@ def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
     steps = run_sub.add_parser("steps", help="List Project Run steps")
     steps.add_argument("project_run_id")
     steps.add_argument("--machine", action="store_true")
+
+    reviews = run_sub.add_parser("reviews", help="List result reviews for a Project Run")
+    reviews.add_argument("project_run_id")
+    reviews.add_argument("--machine", action="store_true")
 
     receipt = run_sub.add_parser("receipt", help="Show the Project Run receipt")
     receipt.add_argument("project_run_id")
@@ -529,6 +559,39 @@ def _project_cli_request(args, config: Config) -> Any:
     if cmd == "update":
         payload = _load_project_payload(args)
         return client.request("POST", f"/v1/projects/{args.project_id}", payload)
+    if cmd == "review-config":
+        if args.guidelines is not None and args.guidelines_file:
+            raise RelayError("INVALID_REQUEST", "Use only one of --guidelines and --guidelines-file.")
+        if args.disable and any((args.reviewer, args.guidelines, args.guidelines_file, args.max_reruns is not None)):
+            raise RelayError("INVALID_REQUEST", "--disable cannot be combined with review configuration options.")
+        if args.max_reruns is not None and not 0 <= args.max_reruns <= 20:
+            raise RelayError("INVALID_REQUEST", "--max-reruns must be between 0 and 20.")
+        project = client.request("GET", f"/v1/projects/{args.project_id}")
+        project_row = project.get("project") or {}
+        try:
+            definition = json.loads(project_row.get("definition_json") or "{}")
+        except (TypeError, ValueError) as exc:
+            raise RelayError("PROJECT_INVALID", "Stored Project definition is not valid JSON.") from exc
+        nodes = definition.get("nodes") or []
+        node = next((item for item in nodes if item.get("node_id") == args.node), None)
+        if node is None:
+            raise RelayError("PROJECT_INVALID", f"Project node not found: {args.node}")
+        checkpoint = dict(node.get("checkpoint") or {})
+        if args.disable:
+            checkpoint["enabled"] = False
+        else:
+            checkpoint["enabled"] = True
+            checkpoint["reviewer"] = args.reviewer or checkpoint.get("reviewer") or "human"
+            if args.guidelines_file:
+                checkpoint["guidelines"] = Path(args.guidelines_file).read_text(encoding="utf-8")
+            elif args.guidelines is not None:
+                checkpoint["guidelines"] = args.guidelines
+            if args.max_reruns is not None:
+                checkpoint["max_reruns"] = args.max_reruns
+            elif "max_reruns" not in checkpoint:
+                checkpoint["max_reruns"] = 2
+        node["checkpoint"] = checkpoint
+        return client.request("POST", f"/v1/projects/{args.project_id}", definition)
     if cmd == "delete":
         return client.request("DELETE", f"/v1/projects/{args.project_id}")
     if cmd == "run":
@@ -577,12 +640,16 @@ def _project_run_cli_request(args, config: Config) -> Any:
         return client.request("GET", f"/v1/project-runs/{prid}")
     if cmd == "steps":
         return client.request("GET", f"/v1/project-runs/{prid}/steps")
+    if cmd == "reviews":
+        return client.request("GET", f"/v1/project-runs/{prid}/reviews")
     if cmd == "receipt":
         return client.request("GET", f"/v1/project-runs/{prid}/receipt")
     if cmd == "reexecute":
         payload = {"from_node": args.from_node, "cascade": args.cascade}
         if args.worker:
             payload["worker"] = args.worker
+        if args.comment:
+            payload["instruction_addendum"] = args.comment
         return client.request("POST", f"/v1/project-runs/{prid}/partial-reexecute", payload)
     if cmd == "retry":
         payload: dict[str, Any] = {}
@@ -823,6 +890,51 @@ def _approval_cli_request(args, config: Config) -> Any:
             {"reviewer": args.reviewer, "file": args.file, "role": args.role},
         )
     raise RelayError("INVALID_REQUEST", f"Unknown approval command: {cmd}")
+
+
+def _add_review_parsers(sub: argparse._SubParsersAction) -> None:
+    review = sub.add_parser("review", help="Inspect and decide result reviews")
+    review_sub = review.add_subparsers(dest="review_command", required=True)
+    list_p = review_sub.add_parser("list", help="List pending or completed reviews")
+    list_p.add_argument("--status")
+    list_p.add_argument("--limit", type=int, default=100)
+    list_p.add_argument("--machine", action="store_true")
+    show_p = review_sub.add_parser("show", help="Show a review and its current result")
+    show_p.add_argument("review_id")
+    show_p.add_argument("--machine", action="store_true")
+    for name, help_text in (("confirm", "Confirm the current result"), ("retry-delivery", "Retry a failed delivery")):
+        action = review_sub.add_parser(name, help=help_text)
+        action.add_argument("review_id")
+        action.add_argument("--machine", action="store_true")
+    rerun = review_sub.add_parser("rerun", help="Add review feedback and rerun")
+    rerun.add_argument("review_id")
+    rerun.add_argument("--comment", required=True)
+    rerun.add_argument("--machine", action="store_true")
+    reject = review_sub.add_parser("reject", help="Reject the current result")
+    reject.add_argument("review_id")
+    reject.add_argument("--reason", required=True)
+    reject.add_argument("--machine", action="store_true")
+
+
+def _review_cli_request(args, config: Config) -> Any:
+    client = _ensure_daemon(config)
+    cmd = args.review_command
+    if cmd == "list":
+        query = f"?limit={args.limit}"
+        if args.status:
+            query += f"&status={args.status}"
+        return client.request("GET", f"/v1/reviews{query}")
+    if cmd == "show":
+        return client.request("GET", f"/v1/reviews/{args.review_id}")
+    if cmd == "confirm":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/confirm", {})
+    if cmd == "retry-delivery":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/retry-delivery", {})
+    if cmd == "rerun":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/rerun", {"comment": args.comment})
+    if cmd == "reject":
+        return client.request("POST", f"/v1/reviews/{args.review_id}/reject", {"reason": args.reason})
+    raise RelayError("INVALID_REQUEST", f"Unknown review command: {cmd}")
 
 
 def _add_compare_parsers(sub: argparse._SubParsersAction) -> None:
@@ -1482,6 +1594,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_project_parsers(sub)
     _add_routine_parsers(sub)
     _add_approval_parsers(sub)
+    _add_review_parsers(sub)
     _add_compare_parsers(sub)
     _add_quality_parsers(sub)
     _add_search_semantic_parsers(sub)
@@ -2180,6 +2293,8 @@ def main(argv: list[str] | None = None) -> int:
             _emit(_routine_cli_request(args, config), machine)
         elif args.command == "approval":
             _emit(_approval_cli_request(args, config), machine)
+        elif args.command == "review":
+            _emit(_review_cli_request(args, config), machine)
         elif args.command == "compare":
             _emit(_compare_cli_request(args, config), machine)
         elif args.command == "quality":

@@ -13,8 +13,7 @@ for path in ["relay/engine.py", "relay/daemon.py"]:
         # Use lazy proxy: store factory then bind in daemon
         t = t.replace(
             marker,
-            marker
-            + "\n        self.routine_service = None  # wired by RelayDaemon to keep engine config-free",
+            marker + "\n        self.routine_service = None  # wired by RelayDaemon to keep engine config-free",
             1,
         )
         if "self.routine_service = None" in t:
@@ -24,7 +23,9 @@ for path in ["relay/engine.py", "relay/daemon.py"]:
             print(f"{path}: marker missing")
     elif path == "relay/daemon.py":
         # Make daemon assign engine.routine_service after instantiation
-        marker = "        self.routine_runtime = RoutineRuntime(self.config, self.db, self.engine, self.routine_service)"
+        marker = (
+            "        self.routine_runtime = RoutineRuntime(self.config, self.db, self.engine, self.routine_service)"
+        )
         if "self.engine.routine_service = self.routine_service" not in t:
             t = t.replace(
                 marker,

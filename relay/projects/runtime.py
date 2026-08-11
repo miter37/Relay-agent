@@ -136,7 +136,7 @@ class ProjectRuntime:
                 )
             if job_status in _TASK_SUCCESS_STATUSES:
                 # Skip if step already processed (prevents duplicate checkpoint pausing on restart)
-                if step["status"] in {"awaiting_approval", "completed"}:
+                if step["status"] in {"awaiting_approval", "awaiting_review", "completed"}:
                     continue
 
                 artifacts = self.engine.db.artifacts_for_job(task_run_id)
@@ -146,10 +146,22 @@ class ProjectRuntime:
                 has_checkpoint = bool(node_def and node_def.get("checkpoint", {}).get("enabled"))
 
                 if has_checkpoint:
-                    from ..approvals.service import ApprovalService
+                    node_checkpoint = node_def.get("checkpoint") or {}
+                    use_review_gate = any(key in node_checkpoint for key in ("reviewer", "guidelines", "max_reruns"))
+                    if use_review_gate:
+                        from ..reviews.service import ReviewService
 
-                    approval_service = ApprovalService(self.db, self.engine, self.engine.config)
-                    approval_service.create_pending_approval(project_run_id, step["node_id"])
+                        review_service = ReviewService(self.db, self.engine, self.engine.config)
+                        review = review_service.create_project_review(
+                            project_run_id, step["node_id"], task_run_id, node_checkpoint
+                        )
+                        if node_checkpoint.get("reviewer") == "orchestrator":
+                            review_service.evaluate_orchestrator(review["review"]["review_id"])
+                    else:
+                        from ..approvals.service import ApprovalService
+
+                        approval_service = ApprovalService(self.db, self.engine, self.engine.config)
+                        approval_service.create_pending_approval(project_run_id, step["node_id"])
                     self.db.update_project_step(
                         project_run_id,
                         step["node_id"],
@@ -188,7 +200,10 @@ class ProjectRuntime:
                     if orchestrator_config:
                         completed_step = self.db.get_project_step(project_run_id, step["node_id"])
                         self._safe_hook(
-                            "narrate_step_completed", self._note, project_run_id, step["node_id"],
+                            "narrate_step_completed",
+                            self._note,
+                            project_run_id,
+                            step["node_id"],
                             narrate_step_completed(completed_step or step),
                         )
             elif job_status in {"FAILED", "CANCELLED"}:
@@ -295,7 +310,9 @@ class ProjectRuntime:
         try:
             resolved_inputs = self.service.resolve_step_inputs(project_run_id, node_id)
         except RelayError as exc:
-            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message, orchestrator_config=orchestrator_config)
+            self._fail_step(
+                project_run_id, node_id, spec, exc.code, exc.message, orchestrator_config=orchestrator_config
+            )
             return
 
         try:
@@ -330,7 +347,9 @@ class ProjectRuntime:
                 caller="service",
             )
         except RelayError as exc:
-            self._fail_step(project_run_id, node_id, spec, exc.code, exc.message, orchestrator_config=orchestrator_config)
+            self._fail_step(
+                project_run_id, node_id, spec, exc.code, exc.message, orchestrator_config=orchestrator_config
+            )
             return
 
         self.db.append_project_step_run(project_run_id, node_id, job["job_id"], worker_override=None)
@@ -350,7 +369,10 @@ class ProjectRuntime:
                 self._safe_hook("narrate_run_started", self._note, project_run_id, None, narrate_run_started(spec))
             is_retry = bool(step_overrides.get("worker_override") or step_overrides.get("instruction_addendum"))
             self._safe_hook(
-                "narrate_step_dispatched", self._note, project_run_id, node_id,
+                "narrate_step_dispatched",
+                self._note,
+                project_run_id,
+                node_id,
                 narrate_step_dispatched(node_id, retry=is_retry),
             )
         self.wake()
@@ -436,7 +458,9 @@ class ProjectRuntime:
                     decision = self._safe_hook(
                         "supervisor.on_output_selection_failed",
                         self.supervisor.on_output_selection_failed,
-                        project_run_id, node_id, role,
+                        project_run_id,
+                        node_id,
+                        role,
                     )
                     if decision:
                         return  # Step reset to pending; the run stays 'running' and re-finalizes next tick.
@@ -482,7 +506,10 @@ class ProjectRuntime:
             run = self.db.get_project_run(project_run_id)
             if run:
                 self._safe_hook(
-                    "narrate_run_completed", self._note, project_run_id, None,
+                    "narrate_run_completed",
+                    self._note,
+                    project_run_id,
+                    None,
                     narrate_run_completed(run, steps, final_ids),
                 )
 

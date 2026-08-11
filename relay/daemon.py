@@ -24,6 +24,7 @@ from .api import (
     catalog_tasks,
     check_job_progress,
     compare_runs,
+    confirm_review,
     create_profile,
     create_project,
     create_routine,
@@ -39,6 +40,7 @@ from .api import (
     get_approval,
     get_project,
     get_receipt_schema_version,
+    get_review,
     get_routine,
     get_task,
     import_data_api,
@@ -52,6 +54,7 @@ from .api import (
     list_jobs,
     list_profiles,
     list_projects,
+    list_reviews,
     list_routines,
     list_runs,
     list_tasks,
@@ -65,10 +68,14 @@ from .api import (
     project_run_orchestrator,
     project_run_receipt,
     project_run_retry,
+    project_run_reviews,
     project_run_steps,
     project_runs,
     quality_attention_api,
     reject_checkpoint,
+    reject_review,
+    rerun_review,
+    retry_review_delivery,
     routine_receipt,
     run_artifacts,
     run_detail,
@@ -86,6 +93,7 @@ from .api import (
     search_artifacts,
     search_runs,
     semantic_search_api,
+    task_run_review,
     update_profile,
     update_project,
     update_routine,
@@ -295,6 +303,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                         "project-runtime",
                         "routine-runtime",
                         "project-orchestrator",
+                        "review-gates",
                     ],
                     "min_gui_version": "1.1.0",
                     "relay_home_id": relay_home_id(self.daemon.config.home),
@@ -372,10 +381,30 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 message = err.message if isinstance(err, RelayError) else str(err)
                 self._api_error(HTTPStatus.BAD_REQUEST, code, message)
             return
+        if path == "/v1/reviews":
+            try:
+                limit = int((params.get("limit") or ["100"])[0])
+                status = (params.get("status") or [None])[0]
+                self._json(HTTPStatus.OK, list_reviews(self.daemon.engine, status=status, limit=limit))
+            except (RelayError, ValueError) as err:
+                code = err.code if isinstance(err, RelayError) else "INVALID_REQUEST"
+                message = err.message if isinstance(err, RelayError) else str(err)
+                self._api_error(HTTPStatus.BAD_REQUEST, code, message)
+            return
+        if path.startswith("/v1/reviews/"):
+            review_id = path[len("/v1/reviews/") :]
+            try:
+                self._json(HTTPStatus.OK, get_review(self.daemon.engine, review_id))
+            except RelayError as err:
+                self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
+            return
         if path.startswith("/v1/task-runs/"):
             suffix = path[len("/v1/task-runs/") :]
             try:
-                self._json(HTTPStatus.OK, run_detail(self.daemon.engine, suffix))
+                if suffix.endswith("/review"):
+                    self._json(HTTPStatus.OK, task_run_review(self.daemon.engine, suffix[: -len("/review")]))
+                else:
+                    self._json(HTTPStatus.OK, run_detail(self.daemon.engine, suffix))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
@@ -447,6 +476,10 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/v1/project-runs/") and path.endswith("/approvals"):
             prid = path[len("/v1/project-runs/") : -len("/approvals")]
             self._json(HTTPStatus.OK, list_approvals(self.daemon.engine, prid))
+            return
+        if path.startswith("/v1/project-runs/") and path.endswith("/reviews"):
+            prid = path[len("/v1/project-runs/") : -len("/reviews")]
+            self._json(HTTPStatus.OK, project_run_reviews(self.daemon.engine, prid))
             return
         if path.startswith("/v1/approvals/"):
             token = path[len("/v1/approvals/") :]
@@ -853,6 +886,26 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 rid = path[len("/v1/routines/") :]
                 self._json(HTTPStatus.OK, update_routine(self.daemon.engine, rid, self._body()))
                 return
+            if path.startswith("/v1/reviews/"):
+                parts = path.split("/")
+                if len(parts) == 5:
+                    review_id, action = parts[3], parts[4]
+                    try:
+                        if action == "confirm":
+                            result = confirm_review(self.daemon.engine, review_id, self._body())
+                        elif action == "rerun":
+                            result = rerun_review(self.daemon.engine, review_id, self._body())
+                        elif action == "reject":
+                            result = reject_review(self.daemon.engine, review_id, self._body())
+                        elif action == "retry-delivery":
+                            result = retry_review_delivery(self.daemon.engine, review_id)
+                        else:
+                            self._api_error(HTTPStatus.NOT_FOUND, "NOT_FOUND", "Unknown review action.")
+                            return
+                        self._json(HTTPStatus.OK, result)
+                    except RelayError as err:
+                        self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+                    return
             if path.startswith("/v1/project-runs/") and "/approvals/" in path:
                 # Path format: /v1/project-runs/{id}/approvals/{token}/{action}
                 parts = path.split("/")

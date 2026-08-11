@@ -200,7 +200,12 @@ class CleanRunNarrationTests(_RuntimeNarrationHarness):
     def test_no_orchestrator_attached_records_no_events(self):
         a = self._task("A")
         project = self.service.create_project(
-            {"name": "Solo", "nodes": [{"node_id": "a", "task_id": a["task_id"]}], "connections": [], "output_selection": []}
+            {
+                "name": "Solo",
+                "nodes": [{"node_id": "a", "task_id": a["task_id"]}],
+                "connections": [],
+                "output_selection": [],
+            }
         )
         run = self.service.create_project_run(project["project_id"])
         project_run_id = run["project_run_id"]

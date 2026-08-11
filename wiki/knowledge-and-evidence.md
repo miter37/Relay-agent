@@ -3,18 +3,19 @@
 ## Verified facts
 
 - Relay version remains 1.1.0; daemon API schema revision remains 5 with minimum GUI 1.1.0. Source: current code and tests.
-- Current SQLite schema is v14. Legacy v0 databases now receive the complete additive migration chain through Task/Project summaries, Projects, Routines, approvals, notifications, receipt versioning, and Artifact producer metadata. Source: `relay/db.py` and migration fixtures.
+- Current SQLite schema is v17. Legacy databases receive additive migrations through Task/Project summaries, Projects, Routines, approvals, notifications, Artifact producer metadata, and review sessions/rounds. Source: `relay/db.py`, migration fixtures, and `tests/test_reviews.py`.
 - Project Artifact connections become real child Run input manifests and lineage rows, not display-only metadata. Source: Project runtime acceptance regression.
 - Project and Routine child Runs use `caller=service` and therefore enforce service-isolation acknowledgement. Source: engine/runtime tests.
 - Routine ticks do not dispatch future occurrences; pinned mismatches fail with `ROUTINE_VERSION_PIN_INVALID`. Source: Routine runtime regressions.
 - Pending checkpoint creation is atomic per Project step; human edits are producer=human Artifacts with original-draft lineage. Source: approval concurrency and edit tests.
 - Checkpoint delivery paths are validated against `allowed_delivery_roots` when Projects are created/updated and again immediately before copy-out. Source: Phase 6a path-boundary tests.
+- Optional result review gates are persisted per Task Run and Project node. Candidate outputs and Working-folder deltas remain unpublished until confirmation; human feedback creates a new review round and rerun, while Orchestrator review fails closed to human handoff. Source: `relay/reviews/service.py`, `relay/engine.py`, `tests/test_reviews.py`.
 - Routine failure policies invoke webhook notifications, retry up to the configured attempt count, and log every attempt. Source: Phase 6d service tests.
 - Project failure notification policies and Project Runs are included in quality/attention views. Source: Phase 6c/6d regression tests.
 - Export manifests carry per-entry SHA-256 values, redact webhook secrets, and optional import restores Task Runs and Artifact bytes under constrained paths. Source: Phase 6e round-trip/security tests.
 - Import rename conflicts rewrite Task IDs inside Project definitions and Project IDs inside Routine targets. Source: lifecycle reference-integrity regression.
 - Task and Task Run catalog endpoints provide bounded metadata, opaque cursor pagination, exact status/Task/date filters, and no raw prompt or Result content. Source: `relay/api.py`, daemon route tests, and `tests/test_catalog.py`.
-- New Task Run receipts use schema v2 summary fields; the full local suite currently passes 479 tests with one skip under `D:\Python314\python.exe`. Source: `relay/receipts.py`, `relay/engine.py`, and full unittest discovery.
+- New Task Run receipts use schema v3 summary fields; the full local suite currently passes 819 tests with one skip under `D:\Python314\python.exe`. Source: `relay/receipts.py`, `relay/engine.py`, and full unittest discovery.
 - The Hermes Relay skill, README, and manual now direct Agents through Catalog-first Task/Task Run selection and immutable Artifact UID reuse with Lineage verification. Source: `skills/hermes-relay/SKILL.md`, documentation examples, and catalog E2E tests.
 - A controlled mission suite validated 5 standalone Tasks, 2 Artifact continuation chains, 3 Project shapes, 10 cataloged Task Runs, failed-Run reporting, Project completion, and `ARTIFACT_CHANGED` tamper rejection. External provider execution was intentionally not invoked. Source: `docs/Relay_Agent_Skill_Mission_Validation_Report_v1.0.md`.
 - Bundled mock Worker E2E now executes five registered Tasks, two Artifact chains, three Project shapes, CLI smoke, receipt delivery, and Project Catalog reads without direct DB status mutation. Source: `tests/test_agent_mission_e2e.py`.

@@ -67,14 +67,13 @@ class RoutineCLITests(unittest.TestCase):
         self.assertEqual(ns.weekday, [1])
 
 
-
-
 class DaemonRoutineListQueryRouteTests(unittest.TestCase):
     """Regression for query-parameter parsing on /v1/routines."""
 
     @staticmethod
     def _free_port():
         import socket
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -105,9 +104,8 @@ class DaemonRoutineListQueryRouteTests(unittest.TestCase):
 
     def _seed_routine(self, name="Daily"):
         from relay.models import TaskSpec
-        task = self.engine.create_task(
-            TaskSpec(name=f"DemoTask-{name}", instructions="do work")
-        )
+
+        task = self.engine.create_task(TaskSpec(name=f"DemoTask-{name}", instructions="do work"))
         routine = self.engine.routine_service.create_routine(
             {
                 "name": name,

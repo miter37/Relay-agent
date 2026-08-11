@@ -3,11 +3,46 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from .design_icons import icon
-from .design_tokens import METRICS, SPACING, status_presentation
-from .design_typography import apply_type
+from .design_tokens import COLORS, METRICS, SPACING, status_presentation
+from .design_typography import apply_type, font_for
+
+
+def apply_data_style(widget: QWidget) -> None:
+    """Mark a widget as holding an ID, hash, or duration: the shared "data" look.
+
+    A single call so every table/detail panel renders these the same way
+    instead of each screen deciding independently whether to dim/monospace them.
+    """
+    apply_type(widget, "data")
+    widget.setObjectName("dataText")
+
+
+def style_data_table_item(item) -> None:
+    """Table-cell equivalent of :func:`apply_data_style`.
+
+    ``QTableWidgetItem`` is not a ``QWidget`` - it has no objectName/QSS, so its
+    font and color are set directly instead of through a stylesheet selector.
+    """
+    item.setFont(font_for("data"))
+    item.setForeground(QColor(COLORS["text.secondary"]))
+
+
+def apply_elevation(widget: QWidget) -> None:
+    """Give a raised surface (a card floating over the canvas) a soft drop shadow.
+
+    QSS has no ``box-shadow``, so a flat-luminance border is the only elevation
+    cue QSS alone can give a ``bg.surfaceRaised`` panel - this is the other half,
+    applied in code to the specific widgets meant to visually lift off the page.
+    """
+    effect = QGraphicsDropShadowEffect(widget)
+    effect.setBlurRadius(18)
+    effect.setOffset(0, 2)
+    effect.setColor(QColor(0, 0, 0, 110))
+    widget.setGraphicsEffect(effect)
 
 
 class StatusBadge(QLabel):
@@ -37,9 +72,7 @@ class IconButton(QPushButton):
     name so screen readers announce the same thing a sighted user hovers.
     """
 
-    def __init__(
-        self, icon_name: str, tooltip: str, *, tone: str = "default", parent: QWidget | None = None
-    ) -> None:
+    def __init__(self, icon_name: str, tooltip: str, *, tone: str = "default", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("iconAction")
         self.setProperty("tone", tone)
@@ -79,9 +112,7 @@ class LabeledButton(QPushButton):
     else leaves the button as a neutral secondary action.
     """
 
-    def __init__(
-        self, icon_name: str, text: str, *, tone: str = "secondary", parent: QWidget | None = None
-    ) -> None:
+    def __init__(self, icon_name: str, text: str, *, tone: str = "secondary", parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
         if tone == "primary":
             self.setObjectName("primaryAction")
@@ -123,6 +154,7 @@ class MetricCard(QFrame):
     def __init__(self, label: str, value: str, qualifier: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("metricCard")
+        apply_elevation(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACING["lg"], SPACING["md"], SPACING["lg"], SPACING["md"])
         label_widget = QLabel(label)

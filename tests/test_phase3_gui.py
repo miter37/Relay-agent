@@ -137,6 +137,14 @@ class TasksWidgetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "[Ii]nstructions"):
             dialog.payload()
 
+    def test_task_editor_gives_instructions_field_real_room(self):
+        dialog = TaskEditorDialog()
+        # Wide enough that long prompt text doesn't wrap constantly, and a
+        # generous minimum height so Instructions isn't left with whatever the
+        # eight scalar fields above it happened not to use.
+        self.assertGreaterEqual(dialog.width(), 900)
+        self.assertGreaterEqual(dialog.instructions_edit.minimumHeight(), 260)
+
     def test_task_run_dialog_builds_schema_validated_inputs_and_overrides(self):
         dialog = TaskRunDialog(
             task={

@@ -109,8 +109,7 @@ class MigrationV14ToV15Tests(unittest.TestCase):
         )
         with closing(sqlite3.connect(path)) as conn, conn:
             conn.execute(
-                "UPDATE project_run_steps SET resolved_connections_json=? "
-                "WHERE project_run_id='run-1' AND node_id='a'",
+                "UPDATE project_run_steps SET resolved_connections_json=? WHERE project_run_id='run-1' AND node_id='a'",
                 (json.dumps({"worker_override": "claude"}),),
             )
             conn.execute("ALTER TABLE project_run_steps DROP COLUMN step_overrides_json")
@@ -200,7 +199,12 @@ class OrchestratorEventStorageTests(unittest.TestCase):
                 "name": "Proj",
                 "description": None,
                 "definition_json": json.dumps(
-                    {"name": "Proj", "nodes": [{"node_id": "a", "task_id": "task-a"}], "connections": [], "output_selection": []}
+                    {
+                        "name": "Proj",
+                        "nodes": [{"node_id": "a", "task_id": "task-a"}],
+                        "connections": [],
+                        "output_selection": [],
+                    }
                 ),
                 "project_summary": "Proj",
             }
@@ -218,9 +222,7 @@ class OrchestratorEventStorageTests(unittest.TestCase):
         )
 
     def test_events_are_returned_in_seq_order(self):
-        self.db.append_project_run_event(
-            "run-1", node_id=None, kind="note", actor="runtime", summary="Run started."
-        )
+        self.db.append_project_run_event("run-1", node_id=None, kind="note", actor="runtime", summary="Run started.")
         self.db.append_project_run_event(
             "run-1", node_id="a", kind="decision", actor="orchestrator", summary="Retrying a.", detail={"x": 1}
         )

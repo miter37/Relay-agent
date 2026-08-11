@@ -158,6 +158,61 @@ class ProjectsWidgetTests(unittest.TestCase):
             },
         )
 
+    def test_project_editor_node_task_connection_output_rows_share_one_height(self):
+        """Every row in these three tables can hold a live QComboBox picker; they
+        must all end up the same height, whether a given row holds one or not."""
+        dialog = ProjectEditorDialog(
+            available_tasks=[{"name": "TA", "task_id": "ta"}],
+            delivery_roots=[],
+        )
+        dialog._on_add_node()
+        dialog._on_add_node()
+        dialog._on_add_connection()
+        dialog._on_add_connection()
+        dialog._on_add_output()
+        dialog._on_add_output()
+
+        for table in (dialog.nodes_table, dialog.connections_table, dialog.outputs_table):
+            heights = {table.rowHeight(row) for row in range(table.rowCount())}
+            self.assertEqual(len(heights), 1, f"{table.objectName() or table}: mismatched row heights {heights}")
+
+    def test_project_editor_run_button_is_a_labelled_primary_action(self):
+        # Run is the one primary action on the Project detail screen; it should
+        # stand out from the plain icon-only refresh/edit/delete row, not blend in.
+        view = ProjectDetailView()
+        self.assertEqual(view.run_button.objectName(), "primaryAction")
+        self.assertEqual(view.run_button.text(), "Run")
+
+    def test_project_detail_definition_tab_defaults_to_structured_view_with_raw_toggle(self):
+        view = ProjectDetailView()
+        view.set_project(
+            {
+                "project_id": "p-1",
+                "name": "Weekly HBM report",
+                "version": 2,
+                "definition_json": json.dumps(
+                    {
+                        "nodes": [{"node_id": "collect", "task_id": "t-1"}],
+                        "connections": [],
+                        "output_selection": [{"node_id": "collect", "role": "final"}],
+                    }
+                ),
+            }
+        )
+        structured_text = view.definition_browser.toPlainText()
+        self.assertIn("Nodes (1)", structured_text)
+        self.assertIn("collect", structured_text)
+        self.assertNotIn('"node_id"', structured_text)
+
+        view._on_toggle_definition_view()
+        raw_text = view.definition_browser.toPlainText()
+        self.assertIn('"node_id"', raw_text)
+        self.assertEqual(view.definition_view_toggle.text(), "View structured")
+
+        view._on_toggle_definition_view()
+        self.assertIn("Nodes (1)", view.definition_browser.toPlainText())
+        self.assertEqual(view.definition_view_toggle.text(), "View raw JSON")
+
     def test_project_editor_populates_orchestrator_from_existing_project(self):
         dialog = ProjectEditorDialog(
             project={

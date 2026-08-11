@@ -464,6 +464,7 @@ class ProjectService:
         from_node: str,
         cascade: bool = True,
         worker: str | None = None,
+        instruction_addendum: str | None = None,
     ) -> dict[str, Any]:
         run = self.db.get_project_run(project_run_id)
         if not run:
@@ -481,8 +482,14 @@ class ProjectService:
         for s in steps:
             if s["node_id"] in targets:
                 payload = {"status": "pending", "active_task_run_id": None, "error_code": None, "error_message": None}
-                if s["node_id"] == from_node and worker is not None:
-                    payload["step_overrides_json"] = canonical_json({"worker_override": worker})
+                if s["node_id"] == from_node and (worker is not None or instruction_addendum is not None):
+                    overrides: dict[str, Any] = {}
+                    if worker is not None:
+                        overrides["worker_override"] = worker
+                    if instruction_addendum is not None and instruction_addendum.strip():
+                        overrides["instruction_addendum"] = instruction_addendum.strip()
+                    if overrides:
+                        payload["step_overrides_json"] = canonical_json(overrides)
                 self.db.update_project_step(project_run_id, s["node_id"], **payload)
 
         self.db.update_project_run(project_run_id, status="running", completed_at=None, started_at=None)

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .design_html import kv_row
 from .design_tokens import COLORS, status_presentation
 from .design_typography import apply_type
 from .design_widgets import IconButton, StatusBadge
@@ -190,10 +191,7 @@ class TaskRunDetailView(QWidget):
         self.set_content(
             "Overview",
             "<table>{}</table>{}".format(
-                "".join(
-                    f"<tr><td><b>{escape(str(key))}</b></td><td>{escape(str(value or '—'))}</td></tr>"
-                    for key, value in fields
-                ),
+                "".join(kv_row(key, value or "—") for key, value in fields),
                 f"<p><b>Requested task</b></p><pre>{escape(str(request_preview or 'Task details are unavailable.'))}</pre>",
             ),
         )
@@ -213,6 +211,21 @@ class TaskRunDetailView(QWidget):
             + artifact_html,
         )
         self.set_content("Progress", self._format_json(job.get("attempts", [])))
+        review = job.get("review") or {}
+        review_data = review.get("review") if isinstance(review.get("review"), dict) else review
+        if review_data:
+            current_round = review.get("current_round") or {}
+            review_html = (
+                f"<h3>Review status: {escape(str(review_data.get('status') or job.get('review_status') or ''))}</h3>"
+                f"<p><b>Reviewer:</b> {escape(str(review_data.get('reviewer') or 'human'))}</p>"
+                f"<p><b>Guidelines</b><br>{escape(str(review_data.get('guidelines') or 'No extra guidelines.')).replace(chr(10), '<br>')}</p>"
+                f"<p><b>Current round:</b> {current_round.get('round_no') or 1} · "
+                f"<b>Reruns:</b> {review_data.get('reruns_used', 0)}/{review_data.get('max_reruns', 0)}</p>"
+                f"{self._format_json(review.get('artifacts') or job.get('artifacts') or [])}"
+            )
+        else:
+            review_html = "<i>This Task Run does not require result review.</i>"
+        self.set_content("Review", review_html)
         self.set_content("Events", self._format_json(job.get("events", [])))
         self.set_content("Files", self._format_json(job.get("artifacts", [])))
 

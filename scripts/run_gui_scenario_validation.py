@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parent.parent
 MOCK_CODEX = ROOT / "mocks" / ("codex.cmd" if os.name == "nt" else "codex")
 
 from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
-from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from relay import __version__  # noqa: E402
@@ -49,7 +48,7 @@ def pump_and_wait(predicate, timeout_ms: int = 6000) -> bool:
 
 def main() -> int:
     results: dict = {"scenarios": [], "failures": []}
-    app = QApplication.instance() or QApplication([])
+    _app = QApplication.instance() or QApplication([])
 
     old_path = os.environ.get("PATH", "")
     os.environ["PATH"] = str(ROOT / "mocks") + os.pathsep + old_path
@@ -148,8 +147,7 @@ def main() -> int:
             window._show_new_task()
             record(
                 "R-02",
-                window.detail_view_mode == "new_task"
-                and window.detail_stack.currentWidget() is window.new_task_view,
+                window.detail_view_mode == "new_task" and window.detail_stack.currentWidget() is window.new_task_view,
                 f"mode={window.detail_view_mode}",
             )
 
@@ -190,7 +188,9 @@ def main() -> int:
             window._set_connection("read-only", "daemon does not support the required API")
             banner_explains = "required API" in window.banner.text()
             button_disabled = not window.new_task_button.isEnabled()
-            button_explains = bool(window.new_task_button.toolTip()) and "required API" in window.new_task_button.toolTip()
+            button_explains = (
+                bool(window.new_task_button.toolTip()) and "required API" in window.new_task_button.toolTip()
+            )
             record(
                 "L-03",
                 button_disabled and banner_explains,

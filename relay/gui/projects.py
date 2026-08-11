@@ -6,7 +6,7 @@ import json
 import os
 from html import escape
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -27,16 +27,81 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextBrowser,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from .design_html import td as _td
+from .design_html import th_row as _th_row
+from .design_tokens import COLORS, METRICS
 from .design_typography import apply_type
-from .design_widgets import IconButton
+from .design_widgets import IconButton, LabeledButton
+
+# Every row in the Nodes/Connections/Final-outputs tables below can hold a live
+# QComboBox picker in at least one column. Qt sizes a row from its tallest cell,
+# and a combo box (QSS-forced to METRICS["controlHeight"]) is taller than a
+# plain QTableWidgetItem cell (QSS-sized to METRICS["rowHeight"]) - left alone,
+# rows with a picker end up a different height than rows without one. Fixing
+# every row in these three tables to one explicit height, instead of letting
+# Qt compute it per-row, is what actually reconciles the two.
+_PICKER_ROW_HEIGHT = METRICS["controlHeight"] + 8
 
 
 def _format_json(value):
     return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
+
+
+def _render_definition_structured(definition: dict) -> str:
+    """A labelled-section summary of a Project definition, not a JSON dump."""
+    color = COLORS
+    nodes = [n for n in (definition.get("nodes") or []) if isinstance(n, dict)]
+    connections = [c for c in (definition.get("connections") or []) if isinstance(c, dict)]
+    outputs = [o for o in (definition.get("output_selection") or []) if isinstance(o, dict)]
+    orchestrator = definition.get("orchestrator")
+    parts: list[str] = []
+
+    description = str(definition.get("description") or "").strip()
+    if description:
+        parts.append(f'<p style="color:{color["text.secondary"]}">{escape(description)}</p>')
+
+    parts.append(f'<h3 style="color:{color["text.primary"]}">Nodes ({len(nodes)})</h3>')
+    if nodes:
+        rows = "".join(f"<tr>{_td(n.get('node_id') or '—')}{_td(n.get('task_id') or '—')}</tr>" for n in nodes)
+        parts.append(f"<table>{_th_row(['Node ID', 'Task'])}{rows}</table>")
+    else:
+        parts.append(f'<p style="color:{color["text.muted"]}">No nodes defined.</p>')
+
+    parts.append(f'<h3 style="color:{color["text.primary"]}">Connections ({len(connections)})</h3>')
+    if connections:
+        rows = "".join(
+            f"<tr>{_td(c.get('from_node') or '—')}{_td(c.get('from_role') or '—')}{_td('→')}"
+            f"{_td(c.get('to_node') or '—')}{_td(c.get('to_alias') or '—')}</tr>"
+            for c in connections
+        )
+        parts.append(f"<table>{_th_row(['From node', 'Role', '', 'To node', 'Alias'])}{rows}</table>")
+    else:
+        parts.append(f'<p style="color:{color["text.muted"]}">No connections; nodes run independently.</p>')
+
+    parts.append(f'<h3 style="color:{color["text.primary"]}">Final outputs ({len(outputs)})</h3>')
+    if outputs:
+        rows = "".join(f"<tr>{_td(o.get('node_id') or '—')}{_td(o.get('role') or '—')}</tr>" for o in outputs)
+        parts.append(f"<table>{_th_row(['Node', 'Role'])}{rows}</table>")
+    else:
+        parts.append(f'<p style="color:{color["text.muted"]}">No final outputs declared.</p>')
+
+    parts.append(f'<h3 style="color:{color["text.primary"]}">Orchestrator</h3>')
+    if isinstance(orchestrator, dict) and orchestrator.get("enabled"):
+        rows = "".join(f"<tr>{_td(key)}{_td(value)}</tr>" for key, value in orchestrator.items() if key != "enabled")
+        parts.append(f"<table>{_th_row(['Setting', 'Value'])}{rows}</table>")
+    else:
+        parts.append(f'<p style="color:{color["text.muted"]}">Not attached to this Project.</p>')
+
+    failure_policy = str(definition.get("failure_policy") or "").strip()
+    if failure_policy:
+        parts.append(f'<p style="color:{color["text.secondary"]}">Failure policy: <b>{escape(failure_policy)}</b></p>')
+
+    return "".join(parts)
 
 
 def _definition_from_project(project):
@@ -150,26 +215,41 @@ class ProjectDetailView(QWidget):
         self.refresh_button = IconButton("refresh", "Refresh this Project")
         self.refresh_button.clicked.connect(self._on_refresh)
         header.addWidget(self.refresh_button)
-        self.run_button = IconButton("play", "Run this Project", tone="accent")
-        self.run_button.clicked.connect(self._on_run)
-        header.addWidget(self.run_button)
         self.edit_button = IconButton("pencil", "Edit this Project")
         self.edit_button.clicked.connect(self._on_edit)
         header.addWidget(self.edit_button)
         self.delete_button = IconButton("trash", "Delete this Project", tone="danger")
         self.delete_button.clicked.connect(self._on_delete)
         header.addWidget(self.delete_button)
+        # Run is the one primary action on this screen; it gets a filled,
+        # labelled button so it visibly outweighs the three quiet icon actions
+        # instead of reading as a same-weight fourth square.
+        self.run_button = LabeledButton("play", "Run", tone="primary")
+        self.run_button.clicked.connect(self._on_run)
+        header.addWidget(self.run_button)
         layout.addLayout(header)
         self.tabs = QTabWidget()
         self.overview_browser = QTextBrowser()
+        definition_tab = QWidget()
+        definition_layout = QVBoxLayout(definition_tab)
+        definition_layout.setContentsMargins(0, 0, 0, 0)
+        definition_toolbar = QHBoxLayout()
+        definition_toolbar.addStretch(1)
+        self.definition_view_toggle = QPushButton("View raw JSON")
+        self.definition_view_toggle.clicked.connect(self._on_toggle_definition_view)
+        definition_toolbar.addWidget(self.definition_view_toggle)
+        definition_layout.addLayout(definition_toolbar)
         self.definition_browser = QTextBrowser()
+        definition_layout.addWidget(self.definition_browser, 1)
         self.runs_browser = QTextBrowser()
         self.tabs.addTab(self.overview_browser, "Overview")
-        self.tabs.addTab(self.definition_browser, "Definition")
+        self.tabs.addTab(definition_tab, "Definition")
         self.tabs.addTab(self.runs_browser, "Runs")
         layout.addWidget(self.tabs, 1)
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(False)
+        self._current_definition: dict = {}
+        self._definition_raw = False
 
     def set_project(self, project, runs=None):
         self.project_id = str(project.get("project_id") or "") or None
@@ -180,7 +260,8 @@ class ProjectDetailView(QWidget):
         self.status_label.setText(f"v{version} · {status}")
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(self.project_id is not None and not deleted_at)
-        self.definition_browser.setHtml(_format_json(_definition_from_project(project)))
+        self._current_definition = _definition_from_project(project)
+        self._render_definition_view()
         self.overview_browser.setHtml(
             _format_json(
                 {
@@ -200,6 +281,9 @@ class ProjectDetailView(QWidget):
         self.project_id = None
         self.title_label.setText("Project")
         self.status_label.setText("")
+        self._current_definition = {}
+        self._definition_raw = False
+        self.definition_view_toggle.setText("View raw JSON")
         for browser in (self.overview_browser, self.definition_browser, self.runs_browser):
             browser.clear()
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
@@ -208,21 +292,27 @@ class ProjectDetailView(QWidget):
     def set_runs(self, runs):
         self.runs_browser.setHtml(self._format_runs(runs))
 
+    def _render_definition_view(self):
+        if self._definition_raw:
+            self.definition_browser.setHtml(_format_json(self._current_definition))
+        else:
+            self.definition_browser.setHtml(_render_definition_structured(self._current_definition))
+
+    def _on_toggle_definition_view(self):
+        self._definition_raw = not self._definition_raw
+        self.definition_view_toggle.setText("View structured" if self._definition_raw else "View raw JSON")
+        self._render_definition_view()
+
     @staticmethod
     def _format_runs(runs):
         if not runs:
             return "<i>No Project Runs recorded for this Project yet.</i>"
-        rows = ""
-        for run in runs:
-            rows += (
-                "<tr>"
-                f"<td>{escape(str(run.get('project_run_id') or '—'))}</td>"
-                f"<td>{escape(str(run.get('status') or '—'))}</td>"
-                f"<td>{escape(str(run.get('created_at') or '—'))}</td>"
-                f"<td>{escape(str(run.get('trigger_type') or '—'))}</td>"
-                "</tr>"
-            )
-        return f"<table><tr><th>Run</th><th>Status</th><th>Created</th><th>Trigger</th></tr>{rows}</table>"
+        rows = "".join(
+            f"<tr>{_td(run.get('project_run_id') or '—')}{_td(run.get('status') or '—')}"
+            f"{_td(run.get('created_at') or '—')}{_td(run.get('trigger_type') or '—')}</tr>"
+            for run in runs
+        )
+        return f"<table>{_th_row(['Run', 'Status', 'Created', 'Trigger'])}{rows}</table>"
 
     def _on_refresh(self):
         if self.project_id:
@@ -239,6 +329,94 @@ class ProjectDetailView(QWidget):
     def _on_delete(self):
         if self.project_id:
             self.delete_requested.emit(self.project_id)
+
+
+class _PickerComboBox(QComboBox):
+    """A QComboBox whose ``sizeHint`` height is capped at ``METRICS["controlHeight"]``.
+
+    ``setFixedHeight`` alone does *not* fix the picker-row-height mismatch:
+    ``QComboBox.sizeHint()`` grows with whatever font Qt falls back to for the
+    current item text - a real Task name in a CJK script (e.g. Korean) can hit
+    a taller fallback font than plain ASCII text, reporting a sizeHint of
+    ~46px even though ``setFixedHeight(28)`` was called. Qt's table view sizes
+    and places `setCellWidget` editors from that reported ``sizeHint()``, not
+    from the widget's actual height policy, so the combo still rendered at its
+    full ~46px and visibly bled into the row below. Overriding ``sizeHint``
+    itself is what Qt's row-placement logic actually reads.
+    """
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt override)
+        hint = super().sizeHint()
+        return QSize(hint.width(), METRICS["controlHeight"])
+
+
+class ReviewGateDialog(QDialog):
+    """Small progressive-disclosure editor for a node's result review gate."""
+
+    def __init__(self, review: dict | None = None, *, parent=None) -> None:
+        super().__init__(parent)
+        review = review or {}
+        self.setWindowTitle("Result review gate")
+        self.resize(520, 360)
+        layout = QVBoxLayout(self)
+        hint = QLabel(
+            "The node completes first. Its result is shown in the Review workspace, "
+            "then the Project continues only after confirmation."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("mutedText")
+        layout.addWidget(hint)
+        form = QFormLayout()
+        self.enabled = QCheckBox("Require review for this node")
+        self.enabled.setChecked(bool(review.get("enabled")))
+        form.addRow("Review gate", self.enabled)
+        self.reviewer = QComboBox()
+        self.reviewer.addItem("Human", "human")
+        self.reviewer.addItem("Orchestrator", "orchestrator")
+        self.reviewer.setCurrentIndex(1 if review.get("reviewer") == "orchestrator" else 0)
+        form.addRow("Reviewer", self.reviewer)
+        self.guidelines = QTextEdit()
+        self.guidelines.setAcceptRichText(False)
+        self.guidelines.setPlaceholderText(
+            "What should be checked, from which perspective, and what counts as acceptable?"
+        )
+        self.guidelines.setPlainText(str(review.get("guidelines") or ""))
+        self.guidelines.setMaximumHeight(110)
+        form.addRow("Review guidelines", self.guidelines)
+        self.max_reruns = QSpinBox()
+        self.max_reruns.setRange(0, 20)
+        self.max_reruns.setValue(int(review.get("max_reruns") if review.get("max_reruns") is not None else 2))
+        self.max_reruns.setToolTip("After this many automatic reruns, the result is handed to a human.")
+        form.addRow("Max automatic reruns", self.max_reruns)
+        layout.addLayout(form)
+        self.error = QLabel()
+        self.error.setObjectName("errorText")
+        self.error.setWordWrap(True)
+        layout.addWidget(self.error)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _save(self) -> None:
+        if (
+            self.enabled.isChecked()
+            and self.reviewer.currentData() == "orchestrator"
+            and not self.guidelines.toPlainText().strip()
+        ):
+            self.error.setText("Orchestrator review requires review guidelines.")
+            return
+        self.accept()
+
+    def payload(self) -> dict:
+        if not self.enabled.isChecked():
+            return {}
+        return {
+            "enabled": True,
+            "reviewer": self.reviewer.currentData(),
+            "guidelines": self.guidelines.toPlainText().strip() or None,
+            "max_reruns": int(self.max_reruns.value()),
+        }
 
 
 class ProjectEditorDialog(QDialog):
@@ -292,16 +470,20 @@ class ProjectEditorDialog(QDialog):
             root.addWidget(no_tasks_hint)
 
         root.addWidget(QLabel("<b>Nodes</b>"))
-        self.nodes_table = QTableWidget(0, 3)
-        self.nodes_table.setHorizontalHeaderLabels(["Node ID", "Task", "Checkpoint (JSON)"])
+        self.nodes_table = QTableWidget(0, 4)
+        self.nodes_table.setHorizontalHeaderLabels(["Node ID", "Task", "Checkpoint (JSON)", "Review gate"])
         nodes_header = self.nodes_table.horizontalHeader()
         nodes_header.setSectionResizeMode(0, QHeaderView.Interactive)
         nodes_header.setSectionResizeMode(1, QHeaderView.Stretch)
         nodes_header.setSectionResizeMode(2, QHeaderView.Interactive)
+        nodes_header.setSectionResizeMode(3, QHeaderView.Fixed)
         self.nodes_table.setColumnWidth(0, 180)
         self.nodes_table.setColumnWidth(2, 220)
+        self.nodes_table.setColumnWidth(3, 116)
         self.nodes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.nodes_table.setMinimumHeight(140)
+        self.nodes_table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.nodes_table.verticalHeader().setDefaultSectionSize(_PICKER_ROW_HEIGHT)
         self.nodes_table.itemChanged.connect(lambda item: item.setToolTip(item.text()))
         root.addWidget(self.nodes_table)
         node_buttons = QHBoxLayout()
@@ -335,6 +517,8 @@ class ProjectEditorDialog(QDialog):
         self.connections_table.setColumnWidth(3, 100)
         self.connections_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.connections_table.setMinimumHeight(140)
+        self.connections_table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.connections_table.verticalHeader().setDefaultSectionSize(_PICKER_ROW_HEIGHT)
         self.connections_table.itemChanged.connect(lambda item: item.setToolTip(item.text()))
         root.addWidget(self.connections_table)
         conn_buttons = QHBoxLayout()
@@ -356,6 +540,8 @@ class ProjectEditorDialog(QDialog):
         self.outputs_table.setColumnWidth(0, 220)
         self.outputs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.outputs_table.setMinimumHeight(110)
+        self.outputs_table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.outputs_table.verticalHeader().setDefaultSectionSize(_PICKER_ROW_HEIGHT)
         self.outputs_table.itemChanged.connect(lambda item: item.setToolTip(item.text()))
         root.addWidget(self.outputs_table)
         output_buttons = QHBoxLayout()
@@ -478,6 +664,7 @@ class ProjectEditorDialog(QDialog):
                 self._set_cell(self.nodes_table, row, 2, json.dumps(checkpoint))
             else:
                 self._set_cell(self.nodes_table, row, 2, "")
+            self._set_review_button(row)
 
     def _populate_connections(self, connections):
         self.connections_table.setRowCount(0)
@@ -525,8 +712,9 @@ class ProjectEditorDialog(QDialog):
 
     def _build_task_combo(self, selected_task_id: str = "") -> QComboBox:
         """A picker, not a field the user has to hand-type a Task ID into."""
-        combo = QComboBox()
+        combo = _PickerComboBox()
         combo.setEditable(False)
+        combo.setFixedHeight(METRICS["controlHeight"])
         found = False
         for task_id, name in self._task_options:
             combo.addItem(name, task_id)
@@ -551,8 +739,9 @@ class ProjectEditorDialog(QDialog):
     def _build_node_combo(self, selected_node_id: str = "") -> QComboBox:
         """Editable picker over the node_ids already typed in the Nodes table above,
         so a connection/output can't silently reference a node that doesn't exist."""
-        combo = QComboBox()
+        combo = _PickerComboBox()
         combo.setEditable(True)
+        combo.setFixedHeight(METRICS["controlHeight"])
         combo.addItems(self._current_node_ids())
         combo.setCurrentText(selected_node_id)
         combo.setPlaceholderText("node_id")
@@ -570,6 +759,7 @@ class ProjectEditorDialog(QDialog):
         self._set_cell(self.nodes_table, row, 0, "", tooltip="Unique within this Project, e.g. research.")
         self.nodes_table.setCellWidget(row, 1, self._build_task_combo())
         self._set_cell(self.nodes_table, row, 2, "")
+        self._set_review_button(row)
 
     def _on_remove_node(self):
         rows = sorted({item.row() for item in self.nodes_table.selectedIndexes()}, reverse=True)
@@ -671,6 +861,24 @@ class ProjectEditorDialog(QDialog):
         if orchestrator is not None:
             result["orchestrator"] = orchestrator
         return result
+
+    def _set_review_button(self, row: int) -> None:
+        button = QPushButton("Configure…")
+        button.clicked.connect(lambda _checked=False, current_row=row: self._configure_review(current_row))
+        self.nodes_table.setCellWidget(row, 3, button)
+
+    def _configure_review(self, row: int) -> None:
+        checkpoint = self._parse_checkpoint(self._row_text(self.nodes_table, row, 2)) or {}
+        review = {
+            key: checkpoint.get(key) for key in ("enabled", "reviewer", "guidelines", "max_reruns") if key in checkpoint
+        }
+        dialog = ReviewGateDialog(review, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        for key in ("enabled", "reviewer", "guidelines", "max_reruns"):
+            checkpoint.pop(key, None)
+        checkpoint.update(dialog.payload())
+        self._set_cell(self.nodes_table, row, 2, json.dumps(checkpoint) if checkpoint else "")
 
     def _orchestrator_payload(self) -> dict | None:
         """None means "omit the key" - a brand-new Project that never enabled the
@@ -829,19 +1037,12 @@ class ProjectRunMonitorDialog(QDialog):
         if not ordered:
             self.steps_browser.setHtml("<i>No step telemetry yet for this Project Run.</i>")
             return
-        rows = ""
-        for step in ordered:
-            rows += (
-                "<tr>"
-                f"<td>{escape(str(step.get('node_id') or '-'))}</td>"
-                f"<td>{escape(str(step.get('task_id') or '-'))}</td>"
-                f"<td>{escape(str(step.get('status') or '-'))}</td>"
-                f"<td>{escape(str(step.get('error_code') or '-'))}</td>"
-                "</tr>"
-            )
-        self.steps_browser.setHtml(
-            f"<table><tr><th>Node</th><th>Task</th><th>Status</th><th>Error</th></tr>{rows}</table>"
+        rows = "".join(
+            f"<tr>{_td(step.get('node_id') or '-')}{_td(step.get('task_id') or '-')}"
+            f"{_td(step.get('status') or '-')}{_td(step.get('error_code') or '-')}</tr>"
+            for step in ordered
         )
+        self.steps_browser.setHtml(f"<table>{_th_row(['Node', 'Task', 'Status', 'Error'])}{rows}</table>")
 
     def _submit_reexec(self):
         node_id = self.reexec_node_edit.text().strip()

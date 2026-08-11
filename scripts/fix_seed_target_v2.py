@@ -1,4 +1,5 @@
 import pathlib
+
 p = pathlib.Path("tests/test_phase5_cli.py")
 t = p.read_text(encoding="utf-8")
 old_block = (
@@ -8,10 +9,10 @@ old_block = (
 new_block = (
     '    def _seed_routine(self, name="Daily"):\n'
     "        from relay.models import TaskSpec\n"
-    '        task = self.engine.create_task(\n'
+    "        task = self.engine.create_task(\n"
     '            TaskSpec(name=f"DemoTask-{name}", instructions="do work")\n'
     "        )\n"
-    '        routine = self.engine.routine_service.create_routine(\n'
+    "        routine = self.engine.routine_service.create_routine(\n"
     "            {\n"
     '                "name": name,\n'
     '                "target_type": "task",\n'

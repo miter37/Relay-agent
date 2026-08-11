@@ -59,9 +59,12 @@ PROJECT_DEFINITION_SCHEMA: dict[str, Any] = {
                     "task_id": {"type": "string", "description": "An existing registered Task."},
                     "checkpoint": {
                         "type": "object",
-                        "description": "Pause for human approval after this node.",
+                        "description": "Pause for human or Orchestrator review after this node.",
                         "properties": {
                             "enabled": {"type": "boolean"},
+                            "reviewer": {"type": "string", "enum": ["human", "orchestrator"]},
+                            "guidelines": {"type": "string", "maxLength": 8000},
+                            "max_reruns": {"type": "integer", "minimum": 0, "maximum": 20, "default": 2},
                             "deliver_to": {
                                 "type": "array",
                                 "items": {
@@ -227,6 +230,21 @@ class ProjectSpec:
                 if not isinstance(node.checkpoint, dict):
                     raise RelayError("PROJECT_INVALID", f"Node checkpoint must be an object: {node.node_id}")
                 deliver_to = node.checkpoint.get("deliver_to") or []
+                reviewer = str(node.checkpoint.get("reviewer") or "human")
+                if reviewer not in {"human", "orchestrator"}:
+                    raise RelayError(
+                        "PROJECT_INVALID", f"checkpoint reviewer must be human or orchestrator: {node.node_id}"
+                    )
+                guidelines = node.checkpoint.get("guidelines")
+                if guidelines is not None and (not isinstance(guidelines, str) or len(guidelines) > 8000):
+                    raise RelayError("PROJECT_INVALID", f"checkpoint guidelines are invalid: {node.node_id}")
+                max_reruns = node.checkpoint.get("max_reruns", 0)
+                if not isinstance(max_reruns, int) or isinstance(max_reruns, bool) or not 0 <= max_reruns <= 20:
+                    raise RelayError(
+                        "PROJECT_INVALID", f"checkpoint max_reruns must be between 0 and 20: {node.node_id}"
+                    )
+                if reviewer == "orchestrator" and not str(guidelines or "").strip():
+                    raise RelayError("PROJECT_INVALID", f"Orchestrator review guidelines are required: {node.node_id}")
                 if not isinstance(deliver_to, list):
                     raise RelayError("PROJECT_INVALID", f"deliver_to must be a list in node {node.node_id}")
                 for item in deliver_to:
