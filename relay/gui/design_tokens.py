@@ -101,6 +101,11 @@ _STATUS_PRESENTATIONS = {
     "success": StatusPresentation("completed", "Completed", "state.success"),
     "partial": StatusPresentation("partial", "Partial", "state.warning"),
     "needs_approval": StatusPresentation("needs_approval", "Needs approval", "state.warning"),
+    "needs_review": StatusPresentation("needs_review", "Needs review", "state.warning"),
+    # ``awaiting_review`` is the historical run-status spelling. Keep it as
+    # an alias so status badges remain useful while API payloads migrate to
+    # the workflow-oriented ``needs_review`` vocabulary.
+    "awaiting_review": StatusPresentation("needs_review", "Needs review", "state.warning"),
     "failed": StatusPresentation("failed", "Failed", "state.danger"),
     "danger": StatusPresentation("failed", "Error", "state.danger"),
     "error": StatusPresentation("failed", "Error", "state.danger"),

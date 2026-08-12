@@ -1,3 +1,15 @@
+- 2026-08-12 15:37 | Completed Buzz follow-through: stable polling/scroll behavior, review evaluation-handoff-round evidence, semantic pipeline legend states, and real Qt Workspace QA; 207 GUI tests pass.
+- 2026-08-12 15:37 | Full unittest discovery rechecked and exceeded the 244-second limit without a reported failure; focused GUI suites and Ruff pass.
+- 2026-08-12 13:40 | Completed 8 proactive UX fixes: selection, safe saves, review actions, run links, guided routines, scoped polling, inline reviews, and Ctrl+K Quick find.
+- 2026-08-12 13:22 | Added guided Routine schedule authoring, inline Task/Project Run review actions, section-aware finished polling, and global Quick find; 162 GUI tests pass.
+- 2026-08-12 12:55 | Proactive GUI flow audit identified concrete consistency, save-safety, review-draft, cross-navigation, Routine-authoring, and polling improvements; backlog recorded.
+- 2026-08-12 12:25 | Added segmented Date/Task and Date/Project catalog views; grouped runs show execution dates with same-day occurrence suffixes; 137 focused GUI tests pass.
+- 2026-08-12 10:03 | Replaced recurring GUI JSON dumps with shared property/data tables, nested-value rendering, and Artifact Field/Value/Type columns; 133 focused GUI tests pass.
+- 2026-08-12 09:31 | 강화한 Artifact preview surface: 역할·상태·형식·크기 목록, 중앙 preview surface, 접이식 경로/메타데이터, Windows 열기·폴더·경로 액션, unsupported 경로 fallback과 상태 색상을 추가; 141개 GUI 회귀 테스트 통과.
+- 2026-08-12 09:27 | Saved a detailed Buzz source benchmark and Relay UI/UX implementation guide covering workspace structure, review surfaces, artifact UX, anchored refresh, phased delivery, and acceptance checks.
+- 2026-08-12 08:52 | Fixed app-wide scroll resets during polling/re-rendering across runs, projects, tasks, routines, reviews, schedules, artifacts, pipeline, tables, and event views; 122 focused GUI tests pass.
+- 2026-08-12 08:36 | Improved Artifact JSON hierarchy by removing array counts and preserving preview scroll position across refreshes; 127 related GUI tests pass.
+- 2026-08-12 08:30 | Fixed Artifact Explorer selection reset, added safe external-link labels, PDF memory loading, path fallback, and double-click file opening; 125 related GUI tests pass.
 - 2026-08-12 02:18 | Unified Artifact Explorer across Task Run, Project Run, and Reviews with safe format previews, path actions, review-scoped candidate reads, and 837-test verification.
 - 2026-08-11 21:15 | Reframed GitHub README and package metadata around Relay's durable Task→Project→Artifact→review workflow; synchronized repository description and discovery topics.
 - 2026-08-11 19:58 | Fixed Project Orchestrator review config invocation and added regression coverage; live run recovered after worker re-verification and reached human review at positioning.
@@ -114,3 +126,12 @@
 - 2026-08-05 16:28 | Added GUI Worker deep-doctor actions, daemon deep-doctor API, long-running request handling, and verified Codex endpoint execution.
 - 2026-08-05 16:30 | Reduced automatic GUI health polling to a 10-minute interval while preserving immediate manual refresh.
 - 2026-08-11 19:25 | Added optional human/Orchestrator result review gates with candidate publication, reruns, Reviews Inbox, Project pipeline status, API/CLI, migration v17, and full 819-test verification.
+- 2026-08-12 10:25 | Artifact JSON preview now defaults to a Markdown-like text outline and offers a Tree view toggle; mode switching and refresh behavior pass in 134 GUI tests.
+- 2026-08-12 10:36 | Removed duplicate Files/result.json entries while retaining the Result record; normalized JSON outline heading typography and verified related GUI tests.
+- 2026-08-12 10:42 | Fixed JSON Text view typography so headings, values, and bullets render at the same 10px size while only # and ## remain bold.
+- 2026-08-12 10:47 | Made Task Run detail content copyable, replaced Overview with a borderless key/value layout, and wrapped Requested task to prevent horizontal scrolling; 126 GUI tests pass.
+- 2026-08-12 10:49 | Replaced JSON Markdown rendering with a same-size indented report-text renderer; structural labels are bold and values remain 10px; 126 GUI tests pass.
+- 2026-08-12 10:52 | Prevented Run polling from interrupting drag-copy: identical content skips re-rendering and active selections defer changed content; 127 GUI tests pass.
+- 2026-08-12 10:56 | Made JSON report hierarchy visibly indented with explicit non-breaking spaces alongside CSS padding; 127 GUI tests pass.
+- 2026-08-12 11:18 | Unified Artifact Open action across platforms and fixed Show folder to open the Artifact's immediate parent directory; 124 GUI tests pass.
+- 2026-08-12 14:12 | Added Project Run Workspace as the default full-width detail surface with stage summary, shared Artifact preview, inline Review Panel, and catalog return; 91 focused Project Run/Review tests pass.

@@ -8,11 +8,12 @@ from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -29,6 +30,7 @@ from .design_icon_app import app_icon
 from .design_tokens import METRICS, SPACING
 from .design_typography import apply_type
 from .design_widgets import IconButton, NavButton
+from .json_display import render_json_html
 from .profiles import ProfilesView
 from .project_runs import ProjectRunsView, _artifact_kind
 from .projects import ProjectRunMonitorDialog, ProjectsView
@@ -38,6 +40,7 @@ from .rpc_client import GuiRpcClient
 from .runs import RunsView
 from .schedule_detail import ScheduleDetailView
 from .schedule_editor import ScheduleEditorDialog
+from .scroll_state import preserve_scroll
 from .settings import SettingsView
 from .state import GuiState
 from .tasks import TasksView
@@ -211,6 +214,14 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.health_label)
         title_layout.addWidget(self.health_time_label)
         title_layout.addWidget(self.health_refresh_button)
+        self.quick_find_edit = QLineEdit()
+        self.quick_find_edit.setObjectName("quickFind")
+        self.quick_find_edit.setPlaceholderText("Quick find…  Ctrl+K")
+        self.quick_find_edit.setMaximumWidth(250)
+        self.quick_find_edit.returnPressed.connect(self._quick_find)
+        title_layout.addWidget(self.quick_find_edit)
+        self.quick_find_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        self.quick_find_shortcut.activated.connect(self._focus_quick_find)
         # A visible gap between the passive health readout and the one action in the
         # global bar keeps them from reading as a single blended control cluster.
         title_layout.addSpacing(SPACING["lg"])
@@ -292,25 +303,25 @@ class MainWindow(QMainWindow):
         self.job_detail_view.open_folder_requested.connect(self._open_folder)
         self.job_detail_view.open_log_requested.connect(self._open_log)
         self.job_detail_view.artifact_preview_requested.connect(self._preview_task_run_artifact)
-        self.job_detail_view.artifact_open_requested.connect(
-            lambda path: self._open_path(path, file_only=True)
-        )
+        self.job_detail_view.artifact_open_requested.connect(lambda path: self._open_path(path, file_only=True))
         self.job_detail_view.artifact_folder_requested.connect(
-            lambda path: self._open_path(str(Path(path).parent), directory_only=True)
+            lambda path: self._open_path(path, directory_only=True)
         )
         self.job_detail_view.log_options_changed.connect(self._log_options_changed)
+        self.job_detail_view.review_confirm_requested.connect(self._confirm_review)
+        self.job_detail_view.review_rerun_requested.connect(self._rerun_review)
+        self.job_detail_view.review_reject_requested.connect(self._reject_review)
         self.detail_stack.addWidget(self.runs_view)
         self.project_runs_view = ProjectRunsView()
         self.project_runs_view.select_run_requested.connect(self._select_project_run)
+        self.project_runs_view.browse_requested.connect(self._clear_selected_project_run)
         self.project_runs_view.filters_changed.connect(self._on_project_runs_filter_changed)
         self.project_runs_view.action_requested.connect(self._submit_project_run_action_v2)
         self.project_runs_view.open_output_requested.connect(self._open_project_run_artifact)
         self.project_runs_view.artifact_preview_requested.connect(self._preview_project_run_artifact)
-        self.project_runs_view.artifact_path_open_requested.connect(
-            lambda path: self._open_path(path, file_only=True)
-        )
+        self.project_runs_view.artifact_path_open_requested.connect(lambda path: self._open_path(path, file_only=True))
         self.project_runs_view.artifact_folder_open_requested.connect(
-            lambda path: self._open_path(str(Path(path).parent), directory_only=True)
+            lambda path: self._open_path(path, directory_only=True)
         )
         self.project_runs_view.approve_requested.connect(self._approve_project_run_checkpoint)
         self.project_runs_view.reject_requested.connect(self._reject_project_run_checkpoint)
@@ -319,6 +330,9 @@ class MainWindow(QMainWindow):
         self.project_runs_view.reexecute_from_node_requested.connect(self._reexecute_project_run_from_node)
         self.project_runs_view.reexecute_with_comment_requested.connect(self._reexecute_project_run_with_comment)
         self.project_runs_view.edit_task_requested.connect(self._edit_task_from_project_run_node)
+        self.project_runs_view.detail.review_confirm_requested.connect(self._confirm_review)
+        self.project_runs_view.detail.review_rerun_requested.connect(self._rerun_review)
+        self.project_runs_view.detail.review_reject_requested.connect(self._reject_review)
         self.detail_stack.addWidget(self.project_runs_view)
         self.tasks_view = TasksView()
         self.tasks_view.refresh_requested.connect(self._refresh_tasks)
@@ -331,6 +345,7 @@ class MainWindow(QMainWindow):
         self.tasks_view.task_edit_submitted.connect(self._submit_update_task)
         self.tasks_view.task_run_submitted.connect(self._submit_run_task)
         self.tasks_view.task_run_files_requested.connect(self._load_task_run_files)
+        self.tasks_view.detail.run_link_requested.connect(self._open_task_run_from_detail)
         self.detail_stack.addWidget(self.tasks_view)
         self.reviews_view = ReviewsView()
         self.reviews_view.refresh_requested.connect(self._refresh_reviews)
@@ -338,7 +353,7 @@ class MainWindow(QMainWindow):
         self.reviews_view.artifact_preview_requested.connect(self._preview_review_artifact)
         self.reviews_view.open_artifact_requested.connect(lambda path: self._open_path(path, file_only=True))
         self.reviews_view.open_artifact_folder_requested.connect(
-            lambda path: self._open_path(str(Path(path).parent), directory_only=True)
+            lambda path: self._open_path(path, directory_only=True)
         )
         self.reviews_view.confirm_requested.connect(self._confirm_review)
         self.reviews_view.rerun_requested.connect(self._rerun_review)
@@ -360,6 +375,7 @@ class MainWindow(QMainWindow):
         self.projects_view.create_requested.connect(self._open_project_editor_for_create)
         self.projects_view.select_project_requested.connect(self._select_project)
         self.projects_view.edit_project_requested.connect(self._open_project_editor_for_edit)
+        self.projects_view.detail.run_link_requested.connect(self._open_project_run_from_detail)
         self.projects_view.delete_project_requested.connect(self._delete_project_requested)
         self.projects_view.run_project_requested.connect(self._submit_create_project_run)
         self.projects_view.project_create_submitted.connect(self._submit_create_project)
@@ -437,6 +453,52 @@ class MainWindow(QMainWindow):
             self._request("security", "/v1/security")
             self._request("agent_apps", "/v1/agent-apps")
             self._request("antigravity_setup", "/v1/agents/antigravity/setup")
+
+    def _focus_quick_find(self) -> None:
+        self.quick_find_edit.setFocus()
+        self.quick_find_edit.selectAll()
+
+    def _quick_find(self) -> None:
+        query = self.quick_find_edit.text().strip().casefold()
+        if not query:
+            return
+        candidates: list[tuple[str, str, str]] = []
+        for task_id, task in self.tasks_index.items():
+            candidates.append(("task", task_id, str(task.get("name") or task_id)))
+        for project_id, project in self.projects_index.items():
+            candidates.append(("project", project_id, str(project.get("name") or project_id)))
+        for run_id, run in self.jobs.items():
+            label = str(run.get("task_name") or run.get("task_title") or run.get("job_id") or run_id)
+            candidates.append(("task-run", run_id, label))
+        for run_id, run in self.project_runs_index.items():
+            label = str(run.get("project_name") or run.get("project_id") or run_id)
+            candidates.append(("project-run", run_id, label))
+        for review_id, review in self.reviews_index.items():
+            label = str(review.get("task_title") or review.get("node_id") or review_id)
+            candidates.append(("review", review_id, label))
+        matches = [item for item in candidates if query in f"{item[1]} {item[2]}".casefold()]
+        if not matches:
+            self.banner.setText(f"Nothing found for '{self.quick_find_edit.text().strip()}'.")
+            self.banner.show()
+            return
+        kind, item_id, _label = sorted(
+            matches,
+            key=lambda item: (0 if query == item[1].casefold() else 1 if item[1].casefold().startswith(query) else 2, item[2].casefold()),
+        )[0]
+        self.quick_find_edit.clear()
+        if kind == "task":
+            self._show_tasks()
+            self._select_task(item_id)
+        elif kind == "project":
+            self._show_projects()
+            self._select_project(item_id)
+        elif kind == "task-run":
+            self._open_task_run_from_detail(item_id)
+        elif kind == "project-run":
+            self._open_project_run_from_detail(item_id)
+        else:
+            self._show_reviews()
+            self._select_review(item_id)
 
     def _create_agent_app(self) -> None:
         if self.current_mode != "normal":
@@ -630,6 +692,9 @@ class MainWindow(QMainWindow):
             ("project_run_v2_orchestrator", project_run_id), f"/v1/project-runs/{project_run_id}/orchestrator"
         )
 
+    def _clear_selected_project_run(self) -> None:
+        self.selected_project_run_id = None
+
     def _request_node_artifacts(self, project_run_id: str, steps: list[dict]) -> None:
         for step in steps or []:
             if not isinstance(step, dict):
@@ -753,11 +818,18 @@ class MainWindow(QMainWindow):
         if self.current_mode != "normal" or not self.selected_project_run_id or not artifact_uid:
             return
         record = self.project_runs_view.detail.artifacts_view.selected_record()
+        if not record:
+            record = self.project_runs_view.detail.workspace_view.artifacts_view.selected_record()
         if record and record.artifact_uid == str(artifact_uid) and record.review_id:
             encoded_review = quote(record.review_id, safe="")
             encoded_uid = quote(str(artifact_uid), safe="")
             self._request(
-                ("project_run_review_artifact_content", self.selected_project_run_id, record.review_id, str(artifact_uid)),
+                (
+                    "project_run_review_artifact_content",
+                    self.selected_project_run_id,
+                    record.review_id,
+                    str(artifact_uid),
+                ),
                 f"/v1/reviews/{encoded_review}/artifacts/{encoded_uid}/content?max_bytes=262144",
             )
             return
@@ -855,12 +927,16 @@ class MainWindow(QMainWindow):
 
     def _confirm_review(self, review_id: str) -> None:
         if self.current_mode == "normal":
-            self._request_post(("review_action", "confirm"), f"/v1/reviews/{quote(review_id, safe='')}/confirm", {})
+            self._request_post(
+                ("review_action", "confirm", review_id),
+                f"/v1/reviews/{quote(review_id, safe='')}/confirm",
+                {},
+            )
 
     def _rerun_review(self, review_id: str, comment: str) -> None:
         if self.current_mode == "normal":
             self._request_post(
-                ("review_action", "rerun"),
+                ("review_action", "rerun", review_id),
                 f"/v1/reviews/{quote(review_id, safe='')}/rerun",
                 {"comment": comment},
             )
@@ -868,7 +944,7 @@ class MainWindow(QMainWindow):
     def _reject_review(self, review_id: str, reason: str) -> None:
         if self.current_mode == "normal":
             self._request_post(
-                ("review_action", "reject"),
+                ("review_action", "reject", review_id),
                 f"/v1/reviews/{quote(review_id, safe='')}/reject",
                 {"reason": reason},
             )
@@ -934,6 +1010,19 @@ class MainWindow(QMainWindow):
             return
         self.tasks_view.show_edit_editor(task_id)
 
+    def _open_task_run_from_detail(self, run_id: str) -> None:
+        if self.current_mode != "normal" or not run_id:
+            return
+        self.selected_job_id = str(run_id)
+        self._show_runs()
+        self._request(("detail", str(run_id)), f"/v1/jobs/{quote(str(run_id), safe='')}")
+
+    def _open_project_run_from_detail(self, run_id: str) -> None:
+        if self.current_mode != "normal" or not run_id:
+            return
+        self._show_project_runs()
+        self._select_project_run(str(run_id))
+
     def _delete_task_requested(self, task_id: str) -> None:
         if self.current_mode != "normal":
             return
@@ -957,11 +1046,15 @@ class MainWindow(QMainWindow):
     def _submit_create_task(self, payload: dict) -> None:
         if self.current_mode != "normal":
             return
+        if self.tasks_view.editor is not None:
+            self.tasks_view.editor.set_saving(True)
         self._request_post("task_create", "/v1/tasks", payload)
 
     def _submit_update_task(self, task_id: str, payload: dict) -> None:
         if self.current_mode != "normal":
             return
+        if self.tasks_view.editor is not None:
+            self.tasks_view.editor.set_saving(True)
         self._request_post(("task_update", task_id), f"/v1/tasks/{task_id}", payload)
 
     def _submit_run_task(self, task_id: str, overrides: dict) -> None:
@@ -1167,10 +1260,14 @@ class MainWindow(QMainWindow):
 
     def _submit_create_routine(self, payload: dict) -> None:
         if self.current_mode == "normal":
+            if self.routines_view.editor is not None:
+                self.routines_view.editor.set_saving(True)
             self._request_post("routine_create", "/v1/routines", payload)
 
     def _submit_update_routine(self, routine_id: str, payload: dict) -> None:
         if self.current_mode == "normal":
+            if self.routines_view.editor is not None:
+                self.routines_view.editor.set_saving(True)
             self._request_post(("routine_update", routine_id), f"/v1/routines/{routine_id}", payload)
 
     def _run_routine_now(self, routine_id: str) -> None:
@@ -1405,7 +1502,7 @@ class MainWindow(QMainWindow):
             self._request("active", "/v1/jobs?bucket=active&limit=200")
 
     def _refresh_finished(self) -> None:
-        if self.current_mode == "normal":
+        if self.current_mode == "normal" and self.active_section in {"runs", "reviews", "schedules"}:
             self.finished_cursor = None
             self._request("finished", self._finished_path())
             self._request("schedules", "/v1/schedules")
@@ -1544,6 +1641,9 @@ class MainWindow(QMainWindow):
                     self.project_runs_view.detail.artifacts_view.cache_artifact_error(
                         artifact_uid, str(error or "Artifact preview is unavailable.")
                     )
+                    self.project_runs_view.detail.workspace_view.artifacts_view.cache_artifact_error(
+                        artifact_uid, str(error or "Artifact preview is unavailable.")
+                    )
             elif isinstance(kind, tuple) and kind[0] == "task_run_artifact_content":
                 job_id = str(kind[1] or "")
                 artifact_uid = str(kind[2] or "")
@@ -1558,6 +1658,9 @@ class MainWindow(QMainWindow):
                     self.project_runs_view.detail.artifacts_view.cache_artifact_error(
                         artifact_uid, str(error or "Review candidate preview is unavailable.")
                     )
+                    self.project_runs_view.detail.workspace_view.artifacts_view.cache_artifact_error(
+                        artifact_uid, str(error or "Review candidate preview is unavailable.")
+                    )
             elif isinstance(kind, tuple) and kind[0] == "review_artifact_content":
                 review_id = str(kind[1] or "")
                 artifact_uid = str(kind[2] or "")
@@ -1565,6 +1668,37 @@ class MainWindow(QMainWindow):
                     self.reviews_view.artifacts_view.cache_error(
                         artifact_uid, str(error or "Review candidate preview is unavailable.")
                     )
+            elif kind == "task_create" or (isinstance(kind, tuple) and kind[0] == "task_update"):
+                message = (
+                    (payload or {}).get("error_message")
+                    or (payload or {}).get("error")
+                    or str(error)
+                    or "Relay could not save this Task."
+                )
+                if self.tasks_view.editor is not None:
+                    self.tasks_view.editor.report_save_error(str(message))
+                else:
+                    self.banner.setText(str(message))
+                    self.banner.show()
+            elif kind == "routine_create" or (isinstance(kind, tuple) and kind[0] == "routine_update"):
+                message = (
+                    (payload or {}).get("error_message")
+                    or (payload or {}).get("error")
+                    or str(error)
+                    or "Relay could not save this Routine."
+                )
+                if self.routines_view.editor is not None:
+                    self.routines_view.editor.report_save_error(str(message))
+                else:
+                    self.banner.setText(str(message))
+                    self.banner.show()
+            elif isinstance(kind, tuple) and kind[0] == "review_action":
+                self.reviews_view.set_action_pending(False)
+                if len(kind) > 2:
+                    self.job_detail_view.set_review_action_pending(False, str(kind[2]))
+                    self.project_runs_view.detail.set_review_action_pending(False, str(kind[2]))
+                self.banner.setText(str((payload or {}).get("error_message") or error or "Review action failed."))
+                self.banner.show()
             elif kind == "project_create" or (isinstance(kind, tuple) and kind[0] == "project_update"):
                 # The daemon returns a structured {"error_code", "error_message"} body
                 # even on a 4xx (see RelayDaemon.do_POST's except RelayError), so
@@ -1830,11 +1964,20 @@ class MainWindow(QMainWindow):
             self.reviews_view.set_review(payload)
             return
         if isinstance(kind, tuple) and kind[0] == "review_action":
+            review_id = str(kind[2] if len(kind) > 2 else payload.get("review_id") or "")
             self.banner.setText(
                 "Review action completed." if payload.get("ok", True) else "Review action needs attention."
             )
             self.banner.show()
+            self.reviews_view.action_completed(review_id or str(self.reviews_view.current_review_id() or ""))
+            self.job_detail_view.review_action_completed(review_id)
+            self.project_runs_view.detail.review_action_completed(review_id)
             self._refresh_reviews()
+            if self.selected_project_run_id:
+                self._request(
+                    ("project_run_v2_reviews", self.selected_project_run_id),
+                    f"/v1/project-runs/{self.selected_project_run_id}/reviews",
+                )
             return
         if kind == "tasks":
             tasks = payload.get("tasks", [])
@@ -1885,6 +2028,8 @@ class MainWindow(QMainWindow):
                 self.selected_task_id = task_id
                 self.tasks_index[task_id] = new_task
                 self._request("tasks", "/v1/tasks")
+            if self.tasks_view.editor is not None:
+                self.tasks_view.editor.close_after_save()
             return
         if isinstance(kind, tuple) and kind[0] == "task_update":
             task_id = str(kind[1] or "")
@@ -1894,6 +2039,8 @@ class MainWindow(QMainWindow):
                 if updated_task:
                     self.tasks_index[task_id] = updated_task
                 self._request(("task_detail", task_id), f"/v1/tasks/{task_id}")
+            if self.tasks_view.editor is not None:
+                self.tasks_view.editor.close_after_save()
             return
         if isinstance(kind, tuple) and kind[0] == "task_delete":
             task_id = str(kind[1] or "")
@@ -2035,6 +2182,8 @@ class MainWindow(QMainWindow):
                 self.routines_index[routine_id] = routine
                 self.routines_view.set_routine(routine)
                 self._refresh_routines()
+            if self.routines_view.editor is not None:
+                self.routines_view.editor.close_after_save()
             return
         if isinstance(kind, tuple) and kind[0] == "routine_update":
             routine_id = str(kind[1] or "")
@@ -2044,6 +2193,8 @@ class MainWindow(QMainWindow):
                 self.selected_routine_id = routine_id
                 self.routines_view.set_routine(routine)
             self._refresh_routines()
+            if self.routines_view.editor is not None:
+                self.routines_view.editor.close_after_save()
             return
         if isinstance(kind, tuple) and kind[0] == "routine_delete":
             routine_id = str(kind[1] or "")
@@ -2162,6 +2313,7 @@ class MainWindow(QMainWindow):
             if project_run_id == self.selected_project_run_id and artifact_uid and isinstance(artifact, dict):
                 view = self.project_runs_view.detail.artifacts_view
                 view.cache_artifact_detail(artifact_uid, artifact)
+                self.project_runs_view.detail.workspace_view.artifacts_view.cache_artifact_detail(artifact_uid, artifact)
                 if _artifact_kind(artifact) not in {"image", "pdf", "unsupported"}:
                     encoded_uid = quote(artifact_uid, safe="")
                     self._request(
@@ -2176,12 +2328,18 @@ class MainWindow(QMainWindow):
                 self.project_runs_view.detail.artifacts_view.cache_artifact_content(
                     artifact_uid, payload if isinstance(payload, dict) else {}
                 )
+                self.project_runs_view.detail.workspace_view.artifacts_view.cache_artifact_content(
+                    artifact_uid, payload if isinstance(payload, dict) else {}
+                )
             return
         if isinstance(kind, tuple) and kind[0] == "project_run_review_artifact_content":
             project_run_id = str(kind[1] or "")
             artifact_uid = str(kind[3] or "")
             if project_run_id == self.selected_project_run_id and artifact_uid:
                 self.project_runs_view.detail.artifacts_view.cache_artifact_content(
+                    artifact_uid, payload if isinstance(payload, dict) else {}
+                )
+                self.project_runs_view.detail.workspace_view.artifacts_view.cache_artifact_content(
                     artifact_uid, payload if isinstance(payload, dict) else {}
                 )
             return
@@ -2361,6 +2519,10 @@ class MainWindow(QMainWindow):
         )
 
     def _render_schedules(self) -> None:
+        with preserve_scroll(self.schedule_list):
+            self._render_schedules_content()
+
+    def _render_schedules_content(self) -> None:
         selected = self.schedule_list.currentItem().data(Qt.UserRole) if self.schedule_list.currentItem() else None
         self.schedule_list.clear()
         rows = sorted(self.schedules.values(), key=lambda schedule: str(schedule.get("name") or "").casefold())
@@ -2592,4 +2754,4 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _format_payload(value) -> str:
-        return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
+        return render_json_html(value)

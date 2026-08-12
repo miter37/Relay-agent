@@ -37,6 +37,8 @@ from .design_html import th_row as _th_row
 from .design_tokens import COLORS, METRICS
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .json_display import render_json_html
+from .scroll_state import preserve_scroll, set_html
 
 # Every row in the Nodes/Connections/Final-outputs tables below can hold a live
 # QComboBox picker in at least one column. Qt sizes a row from its tallest cell,
@@ -49,6 +51,10 @@ _PICKER_ROW_HEIGHT = METRICS["controlHeight"] + 8
 
 
 def _format_json(value):
+    return render_json_html(value)
+
+
+def _format_raw_json(value) -> str:
     return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
 
 
@@ -152,7 +158,7 @@ class ProjectsListView(QWidget):
         self.search_edit.textChanged.connect(self._rerender)
         layout.addWidget(self.search_edit)
         self.list_widget = QListWidget()
-        self.list_widget.itemActivated.connect(self._item_activated)
+        self.list_widget.currentItemChanged.connect(self._item_changed)
         layout.addWidget(self.list_widget, 1)
 
     def set_projects(self, projects):
@@ -165,6 +171,10 @@ class ProjectsListView(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def _rerender(self):
+        with preserve_scroll(self.list_widget):
+            self._rerender_content()
+
+    def _rerender_content(self):
         query = self.search_edit.text().strip().casefold()
         self.list_widget.clear()
         visible = 0
@@ -194,12 +204,17 @@ class ProjectsListView(QWidget):
         if project_id:
             self.select_project_requested.emit(str(project_id))
 
+    def _item_changed(self, item, _previous):
+        if item is not None:
+            self._item_activated(item)
+
 
 class ProjectDetailView(QWidget):
     edit_requested = Signal(str)
     delete_requested = Signal(str)
     run_requested = Signal(str)
     refresh_requested = Signal(str)
+    run_link_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -242,6 +257,8 @@ class ProjectDetailView(QWidget):
         self.definition_browser = QTextBrowser()
         definition_layout.addWidget(self.definition_browser, 1)
         self.runs_browser = QTextBrowser()
+        self.runs_browser.setOpenLinks(False)
+        self.runs_browser.anchorClicked.connect(self._on_run_link)
         self.tabs.addTab(self.overview_browser, "Overview")
         self.tabs.addTab(definition_tab, "Definition")
         self.tabs.addTab(self.runs_browser, "Runs")
@@ -262,7 +279,8 @@ class ProjectDetailView(QWidget):
             button.setEnabled(self.project_id is not None and not deleted_at)
         self._current_definition = _definition_from_project(project)
         self._render_definition_view()
-        self.overview_browser.setHtml(
+        set_html(
+            self.overview_browser,
             _format_json(
                 {
                     "Project ID": project.get("project_id"),
@@ -273,9 +291,9 @@ class ProjectDetailView(QWidget):
                     "Updated": project.get("updated_at"),
                     "Deleted": deleted_at,
                 }
-            )
+            ),
         )
-        self.runs_browser.setHtml(self._format_runs(runs or []))
+        set_html(self.runs_browser, self._format_runs(runs or []))
 
     def clear(self):
         self.project_id = None
@@ -285,18 +303,19 @@ class ProjectDetailView(QWidget):
         self._definition_raw = False
         self.definition_view_toggle.setText("View raw JSON")
         for browser in (self.overview_browser, self.definition_browser, self.runs_browser):
-            browser.clear()
+            with preserve_scroll(browser):
+                browser.clear()
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(False)
 
     def set_runs(self, runs):
-        self.runs_browser.setHtml(self._format_runs(runs))
+        set_html(self.runs_browser, self._format_runs(runs))
 
     def _render_definition_view(self):
         if self._definition_raw:
-            self.definition_browser.setHtml(_format_json(self._current_definition))
+            set_html(self.definition_browser, _format_raw_json(self._current_definition))
         else:
-            self.definition_browser.setHtml(_render_definition_structured(self._current_definition))
+            set_html(self.definition_browser, _render_definition_structured(self._current_definition))
 
     def _on_toggle_definition_view(self):
         self._definition_raw = not self._definition_raw
@@ -308,11 +327,24 @@ class ProjectDetailView(QWidget):
         if not runs:
             return "<i>No Project Runs recorded for this Project yet.</i>"
         rows = "".join(
-            f"<tr>{_td(run.get('project_run_id') or '—')}{_td(run.get('status') or '—')}"
+            f"<tr>{_td(ProjectDetailView._run_link(run))}{_td(run.get('status') or '—')}"
             f"{_td(run.get('created_at') or '—')}{_td(run.get('trigger_type') or '—')}</tr>"
             for run in runs
         )
         return f"<table>{_th_row(['Run', 'Status', 'Created', 'Trigger'])}{rows}</table>"
+
+    @staticmethod
+    def _run_link(run) -> str:
+        run_id = str(run.get("project_run_id") or "—")
+        if run_id == "—":
+            return escape(run_id)
+        return f'<a href="relay://project-run/{escape(run_id)}">{escape(run_id)}</a>'
+
+    def _on_run_link(self, url) -> None:
+        if url.scheme() == "relay" and url.host() == "project-run":
+            run_id = url.path().lstrip("/")
+            if run_id:
+                self.run_link_requested.emit(run_id)
 
     def _on_refresh(self):
         if self.project_id:
@@ -1035,14 +1067,14 @@ class ProjectRunMonitorDialog(QDialog):
             key=lambda step: (node_order.get(step.get("node_id"), 99), step.get("node_id") or ""),
         )
         if not ordered:
-            self.steps_browser.setHtml("<i>No step telemetry yet for this Project Run.</i>")
+            set_html(self.steps_browser, "<i>No step telemetry yet for this Project Run.</i>")
             return
         rows = "".join(
             f"<tr>{_td(step.get('node_id') or '-')}{_td(step.get('task_id') or '-')}"
             f"{_td(step.get('status') or '-')}{_td(step.get('error_code') or '-')}</tr>"
             for step in ordered
         )
-        self.steps_browser.setHtml(f"<table>{_th_row(['Node', 'Task', 'Status', 'Error'])}{rows}</table>")
+        set_html(self.steps_browser, f"<table>{_th_row(['Node', 'Task', 'Status', 'Error'])}{rows}</table>")
 
     def _submit_reexec(self):
         node_id = self.reexec_node_edit.text().strip()

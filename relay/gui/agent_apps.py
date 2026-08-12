@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from .design_tokens import SPACING
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .scroll_state import preserve_scroll
 
 
 class AgentAppWizard(QDialog):
@@ -313,18 +314,19 @@ class AgentAppListView(QWidget):
     def set_agents(self, agents: list[dict]) -> None:
         self._selected = None
         self._agents = {str(item.get("agent_id")): item for item in agents if item.get("agent_id")}
-        self.agent_list.clear()
-        for agent in agents:
-            status = {
-                "ready": "Ready",
-                "needs_test": "Needs a test",
-                "disabled": "Off",
-                "unavailable": "Unavailable",
-            }.get(agent.get("status"), str(agent.get("status") or "Unknown"))
-            builtin = "Built in" if agent.get("builtin") else "Added by you"
-            item = QListWidgetItem(f"{agent.get('display_name') or agent.get('agent_id')} · {status} · {builtin}")
-            item.setData(Qt.UserRole, agent.get("agent_id"))
-            self.agent_list.addItem(item)
+        with preserve_scroll(self.agent_list):
+            self.agent_list.clear()
+            for agent in agents:
+                status = {
+                    "ready": "Ready",
+                    "needs_test": "Needs a test",
+                    "disabled": "Off",
+                    "unavailable": "Unavailable",
+                }.get(agent.get("status"), str(agent.get("status") or "Unknown"))
+                builtin = "Built in" if agent.get("builtin") else "Added by you"
+                item = QListWidgetItem(f"{agent.get('display_name') or agent.get('agent_id')} · {status} · {builtin}")
+                item.setData(Qt.UserRole, agent.get("agent_id"))
+                self.agent_list.addItem(item)
         self._set_actions(False)
 
     def _select(self, item: QListWidgetItem) -> None:

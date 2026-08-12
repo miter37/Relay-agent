@@ -44,6 +44,14 @@ class RoutinesWidgetTests(unittest.TestCase):
         view._item_activated(view.list_widget.item(0))
         self.assertEqual(seen, ["r-1"])
 
+    def test_list_selects_on_current_item_change(self):
+        view = RoutinesListView()
+        view.set_routines([{"routine_id": "r-1", "name": "Daily report", "enabled": 1}])
+        seen = []
+        view.select_routine_requested.connect(seen.append)
+        view.list_widget.setCurrentRow(0)
+        self.assertEqual(seen, ["r-1"])
+
     def test_detail_renders_runs_and_clears(self):
         view = RoutineDetailView()
         view.set_routine(
@@ -92,7 +100,7 @@ class RoutinesWidgetTests(unittest.TestCase):
             dialog.payload()
 
     def test_editor_preview_emits_rule_without_target_requirement(self):
-        dialog = RoutineEditorDialog()
+        dialog = RoutineEditorDialog(available_tasks=[{"task_id": "t-1", "name": "Daily task"}])
         dialog.rule_edit.setPlainText('{"type": "daily", "times": ["09:00"]}')
         seen = []
         dialog.preview_requested.connect(seen.append)
@@ -100,6 +108,32 @@ class RoutinesWidgetTests(unittest.TestCase):
         self.assertEqual(seen[0]["rule"]["timezone"], "UTC")
         dialog.set_preview([{"local_time": "2026-08-04T09:00", "instant_utc": "2026-08-04T00:00:00+00:00"}])
         self.assertIn("2026-08-04", dialog.preview_browser.toPlainText())
+
+    def test_guided_schedule_builds_rule_without_json(self):
+        dialog = RoutineEditorDialog(available_tasks=[{"task_id": "t-1", "name": "Daily task"}])
+        dialog.name_edit.setText("Weekdays")
+        dialog.rule_type_combo.setCurrentText("Selected weekdays")
+        dialog.schedule_time_edit.setText("08:30")
+        dialog.weekdays_edit.setText("1,2,3,4,5")
+        payload = dialog.payload()
+        self.assertEqual(
+            payload["rule"],
+            {"type": "weekly", "times": ["08:30"], "timezone": "UTC", "weekdays": [1, 2, 3, 4, 5]},
+        )
+        self.assertFalse(dialog.rule_edit.isVisible())
+
+    def test_editor_save_stays_open_until_result(self):
+        dialog = RoutineEditorDialog(available_tasks=[{"task_id": "t-1", "name": "Daily task"}])
+        dialog.name_edit.setText("Daily report")
+        dialog.rule_edit.setPlainText('{"type": "daily", "times": ["09:00"]}')
+        submitted = []
+        dialog.accepted_payload.connect(submitted.append)
+        dialog._on_save()
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(dialog._saving)
+        dialog.report_save_error("ROUTINE_INVALID")
+        self.assertFalse(dialog._saving)
+        self.assertEqual(dialog.name_edit.text(), "Daily report")
 
     def test_edit_editor_selects_existing_target(self):
         dialog = RoutineEditorDialog(

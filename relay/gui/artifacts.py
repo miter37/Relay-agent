@@ -14,15 +14,17 @@ from html import escape as html_escape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from PySide6.QtCore import QByteArray, Qt, Signal
-from PySide6.QtGui import QImage, QImageReader, QPainter, QPixmap
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -30,11 +32,17 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from .design_typography import apply_type, font_for
+from .design_widgets import SectionHeader
+from .json_display import render_json_report_html
+from .scroll_state import preserve_scroll, set_html, set_markdown, set_plain_text
 
 TEXT_SUFFIXES = {
     ".bash",
@@ -86,6 +94,54 @@ MAX_TABLE_COLUMNS = 100
 MAX_ARCHIVE_ENTRIES = 2_000
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_PDF_BYTES = 100 * 1024 * 1024
+JSON_REPORT_STYLE_SHEET = """
+body, div, span {
+    font-size: 13px;
+    font-weight: normal;
+}
+"""
+
+
+def _format_artifact_size(size: int | None) -> str:
+    if size is None or size < 0:
+        return "—"
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024):.1f} GB"
+
+
+def _artifact_kind_label(record: ArtifactRecord | None) -> str:
+    labels = {
+        "json": "JSON",
+        "json_lines": "JSONL",
+        "table": "Table",
+        "markdown": "Markdown",
+        "html": "HTML",
+        "image": "Image",
+        "svg": "SVG",
+        "pdf": "PDF",
+        "archive": "Archive",
+        "text": "Text",
+        "unsupported": "File",
+    }
+    return labels.get(artifact_kind(record), "File")
+
+
+def _artifact_status_state(status: str) -> str:
+    normalized = status.casefold().replace("-", "_").replace(" ", "_")
+    if normalized in {"candidate", "pending", "pending_human", "needs_human"}:
+        return "candidate"
+    if normalized in {"published", "confirmed", "approved", "complete", "completed"}:
+        return "completed"
+    if normalized in {"rejected", "failed", "delivery_failed"}:
+        return "failed"
+    if normalized in {"superseded", "archived"}:
+        return "muted"
+    return "muted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,9 +199,7 @@ class ArtifactRecord:
     def identity(self) -> str:
         if self.artifact_uid:
             return f"uid:{self.artifact_uid}"
-        return "path:" + "|".join(
-            (self.source_task_run_id, self.node_id, self.role, self.relative_path)
-        )
+        return "path:" + "|".join((self.source_task_run_id, self.node_id, self.role, self.relative_path))
 
     @classmethod
     def merge(cls, records: Iterable[ArtifactRecord]) -> list[ArtifactRecord]:
@@ -225,6 +279,7 @@ def artifact_kind(record: ArtifactRecord) -> str:
 
 class _SafeHTMLParser(HTMLParser):
     _allowed = {
+        "a",
         "b",
         "blockquote",
         "br",
@@ -260,6 +315,7 @@ class _SafeHTMLParser(HTMLParser):
         super().__init__(convert_charrefs=False)
         self.parts: list[str] = []
         self._blocked_depth = 0
+        self._external_link_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
@@ -268,6 +324,18 @@ class _SafeHTMLParser(HTMLParser):
             return
         if tag in self._blocked:
             self._blocked_depth = 1
+            return
+        if tag == "a":
+            href = next((value or "" for key, value in attrs if key.casefold() == "href"), "")
+            parsed = urlparse(href)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                label = f"[External link: {html_escape(href)}] "
+            elif parsed.scheme == "mailto" and parsed.path:
+                label = f"[External mail link: {html_escape(href)}] "
+            else:
+                label = "[Link omitted] "
+            self.parts.append(f"<span>{label}")
+            self._external_link_depth += 1
             return
         if tag not in self._allowed:
             return
@@ -288,6 +356,11 @@ class _SafeHTMLParser(HTMLParser):
         tag = tag.casefold()
         if self._blocked_depth:
             self._blocked_depth -= 1
+            return
+        if tag == "a":
+            if self._external_link_depth:
+                self._external_link_depth -= 1
+                self.parts.append("</span>")
             return
         if tag in self._allowed and tag not in {"br", "hr"}:
             self.parts.append(f"</{tag}>")
@@ -339,53 +412,125 @@ class ArtifactExplorerView(QWidget):
         self._content_by_uid: dict[str, dict[str, Any]] = {}
         self._selected_uid = ""
         self._selected_artifact_uid: str | None = None
+        self._rendered_uid = ""
 
         root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        list_panel = QWidget()
+        list_panel.setObjectName("artifactListPanel")
+        list_layout = QVBoxLayout(list_panel)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+        list_layout.setSpacing(0)
+        list_layout.addWidget(SectionHeader("Artifacts", "Select a result to inspect"))
         self.artifact_tree = QTreeWidget()
-        self.artifact_tree.setHeaderLabels(["Artifact", "Details"])
+        self.artifact_tree.setHeaderLabels(["Artifact", "Status", "Format"])
         self.artifact_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.artifact_tree.setMinimumWidth(300)
+        self.artifact_tree.setColumnWidth(0, 260)
+        self.artifact_tree.setColumnWidth(1, 100)
+        self.artifact_tree.setColumnWidth(2, 120)
+        self.artifact_tree.header().setStretchLastSection(True)
         self.artifact_tree.itemClicked.connect(self._on_item_clicked)
-        root.addWidget(self.artifact_tree, 0)
+        self.artifact_tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        list_layout.addWidget(self.artifact_tree, 1)
+        root.addWidget(list_panel, 0)
 
         detail = QWidget()
         detail_layout = QVBoxLayout(detail)
+        detail_layout.setContentsMargins(12, 0, 0, 0)
+        detail_layout.setSpacing(8)
+
         header = QHBoxLayout()
+        header.setSpacing(6)
         self.preview_header = QLabel("Select an Artifact to preview.")
+        self.preview_header.setObjectName("detailTitle")
+        apply_type(self.preview_header, "title.detail")
         self.preview_header.setWordWrap(True)
         header.addWidget(self.preview_header, 1)
+        self.format_label = QLabel("")
+        self.format_label.setObjectName("artifactFormat")
+        apply_type(self.format_label, "overline")
+        header.addWidget(self.format_label)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("artifactStatus")
+        apply_type(self.status_label, "overline")
+        header.addWidget(self.status_label)
+        self.details_button = QToolButton()
+        self.details_button.setText("Details")
+        self.details_button.setCheckable(True)
+        self.details_button.setToolTip("Show Artifact path and metadata")
+        self.details_button.setAccessibleName("Show Artifact details")
+        self.details_button.toggled.connect(self._toggle_details)
+        header.addWidget(self.details_button)
         self.raw_button = QPushButton("Raw")
+        self.raw_button.setToolTip("Show the unformatted text returned for this Artifact")
         self.raw_button.clicked.connect(self._show_raw)
         header.addWidget(self.raw_button)
-        self.open_file_button = QPushButton("Open file")
-        self.open_file_button.clicked.connect(self._emit_open_file)
-        header.addWidget(self.open_file_button)
-        self.open_folder_button = QPushButton("Open containing folder")
-        self.open_folder_button.clicked.connect(self._emit_open_folder)
-        header.addWidget(self.open_folder_button)
-        self.copy_path_button = QPushButton("Copy path")
-        self.copy_path_button.clicked.connect(self._emit_copy_path)
-        header.addWidget(self.copy_path_button)
+        self.json_mode_button = QPushButton("Text view")
+        self.json_mode_button.setObjectName("jsonModeToggle")
+        self.json_mode_button.setCheckable(True)
+        self.json_mode_button.setToolTip("Switch to the JSON tree view")
+        self.json_mode_button.toggled.connect(self._toggle_json_mode)
+        header.addWidget(self.json_mode_button)
         detail_layout.addLayout(header)
 
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        self.open_file_button = QPushButton("Open")
+        self.open_file_button.setToolTip("Open this Artifact with the system default application")
+        self.open_file_button.clicked.connect(self._emit_open_file)
+        actions.addWidget(self.open_file_button)
+        self.open_folder_button = QPushButton("Show folder")
+        self.open_folder_button.setToolTip("Open the folder containing this Artifact")
+        self.open_folder_button.clicked.connect(self._emit_open_folder)
+        actions.addWidget(self.open_folder_button)
+        self.copy_path_button = QPushButton("Copy path")
+        self.copy_path_button.clicked.connect(self._emit_copy_path)
+        actions.addWidget(self.copy_path_button)
+        actions.addStretch(1)
+        detail_layout.addLayout(actions)
+
+        self.metadata_panel = QFrame()
+        self.metadata_panel.setObjectName("artifactMetadata")
+        metadata_layout = QVBoxLayout(self.metadata_panel)
+        metadata_layout.setContentsMargins(10, 8, 10, 8)
+        metadata_layout.setSpacing(2)
         self.path_label = QLabel("")
+        self.path_label.setObjectName("artifactPath")
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(True)
-        detail_layout.addWidget(self.path_label)
+        metadata_layout.addWidget(self.path_label)
         self.metadata_label = QLabel("")
+        self.metadata_label.setObjectName("mutedText")
         self.metadata_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.metadata_label.setWordWrap(True)
-        detail_layout.addWidget(self.metadata_label)
+        metadata_layout.addWidget(self.metadata_label)
+        detail_layout.addWidget(self.metadata_panel)
 
         self.preview_stack = QStackedWidget()
+        self.preview_stack.setObjectName("artifactPreviewSurface")
         self.empty_preview = QLabel("Select an Artifact from the list to preview it.")
+        self.empty_preview.setObjectName("emptyState")
         self.empty_preview.setAlignment(Qt.AlignCenter)
         self.metadata_preview = QLabel("")
         self.metadata_preview.setWordWrap(True)
         self.metadata_preview.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.json_preview = QTreeWidget()
-        self.json_preview.setHeaderLabels(["Field", "Value"])
+        self.json_preview.setHeaderLabels(["Field", "Value", "Type"])
         self.json_preview.setColumnWidth(0, 220)
+        self.json_preview.setColumnWidth(1, 420)
+        self.json_preview.setColumnWidth(2, 100)
+        self.json_preview.setAlternatingRowColors(True)
+        self.json_outline_preview = QTextBrowser()
+        self.json_outline_preview.setObjectName("evidencePane")
+        self.json_outline_preview.setOpenExternalLinks(False)
+        outline_font = QFont(font_for("body"))
+        outline_font.setPixelSize(13)
+        self.json_outline_preview.setFont(outline_font)
+        self.json_outline_preview.document().setDefaultFont(outline_font)
+        self.json_outline_preview.document().setDefaultStyleSheet(JSON_REPORT_STYLE_SHEET)
         self.json_lines_preview = QTreeWidget()
         self.json_lines_preview.setHeaderLabels(["Row", "Value"])
         self.table_preview = QTableWidget()
@@ -396,6 +541,7 @@ class ArtifactExplorerView(QWidget):
         self.svg_preview = QLabel("SVG preview unavailable.")
         self.svg_preview.setAlignment(Qt.AlignCenter)
         self.pdf_document = QPdfDocument(self)
+        self._pdf_buffer = QBuffer(self)
         self.pdf_view = QPdfView()
         self.pdf_view.setDocument(self.pdf_document)
         self.archive_preview = _SafeTextBrowser()
@@ -403,6 +549,7 @@ class ArtifactExplorerView(QWidget):
             self.empty_preview,
             self.metadata_preview,
             self.json_preview,
+            self.json_outline_preview,
             self.json_lines_preview,
             self.table_preview,
             self.text_preview,
@@ -416,11 +563,28 @@ class ArtifactExplorerView(QWidget):
         detail_layout.addWidget(self.preview_stack, 1)
         root.addWidget(detail, 1)
         self._raw_text = ""
+        self._json_view_mode = "outline"
+        self._json_value: Any | None = None
+        self._details_expanded = False
         self.raw_button.setEnabled(False)
+        self._set_json_mode_available(False)
         self._show_empty()
 
     def set_groups(self, groups: Iterable[ArtifactGroup], *, auto_select_primary: bool) -> None:
-        self._groups = [group for group in groups if group.records]
+        previous_uid = self._selected_uid
+        filtered_groups: list[ArtifactGroup] = []
+        for group in groups:
+            records = tuple(
+                record
+                for record in group.records
+                if not (
+                    group.label.strip().casefold() == "files"
+                    and Path(record.relative_path or record.name).name.casefold() == "result.json"
+                )
+            )
+            if records:
+                filtered_groups.append(ArtifactGroup(group.label, records))
+        self._groups = filtered_groups
         self._records_by_uid = {}
         for group in self._groups:
             for record in group.records:
@@ -431,9 +595,15 @@ class ArtifactExplorerView(QWidget):
                     ArtifactRecord.merge([existing, record])[0] if existing else record
                 )
         self._render_tree()
-        selected = self._default_uid() if auto_select_primary else ""
+        selected = (
+            previous_uid
+            if previous_uid and previous_uid in self._records_by_uid
+            else self._default_uid()
+            if auto_select_primary
+            else ""
+        )
         if selected:
-            self.select_artifact(selected)
+            self.select_artifact(selected, request_missing=selected != previous_uid)
         else:
             self._selected_uid = ""
             self._selected_artifact_uid = None
@@ -450,14 +620,20 @@ class ArtifactExplorerView(QWidget):
         if item is not None:
             self.artifact_tree.setCurrentItem(item)
         self._render_selected()
-        if request_missing and uid and uid not in self._content_by_uid and artifact_kind(self.selected_record()) in {
-            "json",
-            "json_lines",
-            "table",
-            "markdown",
-            "html",
-            "text",
-        }:
+        if (
+            request_missing
+            and uid
+            and uid not in self._content_by_uid
+            and artifact_kind(self.selected_record())
+            in {
+                "json",
+                "json_lines",
+                "table",
+                "markdown",
+                "html",
+                "text",
+            }
+        ):
             record = self.selected_record()
             self.preview_requested.emit(uid, record.review_id if record else "")
 
@@ -491,20 +667,55 @@ class ArtifactExplorerView(QWidget):
         return (primary or (records[0] if records else None)).artifact_uid if records else ""
 
     def _render_tree(self) -> None:
+        with preserve_scroll(self.artifact_tree):
+            self._render_tree_content()
+
+    def _render_tree_content(self) -> None:
         self.artifact_tree.clear()
         for group in self._groups:
-            parent = QTreeWidgetItem([group.label, f"{len(group.records)} item(s)"])
+            parent = QTreeWidgetItem([group.label, f"{len(group.records)}", ""])
             parent.setFlags(Qt.ItemIsEnabled)
             self.artifact_tree.addTopLevelItem(parent)
             for record in group.records:
                 status = record.publication_status
+                kind = _artifact_kind_label(record)
                 child = QTreeWidgetItem(
-                    [f"{record.role} · {record.name or record.relative_path or 'Artifact'}", status]
+                    [
+                        f"{'★ ' if record.is_primary else ''}{record.role} · "
+                        f"{record.name or record.relative_path or 'Artifact'}",
+                        status.replace("_", " ").title(),
+                        f"{kind} · {_format_artifact_size(record.size)}",
+                    ]
                 )
                 child.setData(0, Qt.UserRole, record.artifact_uid)
-                child.setToolTip(0, record.relative_path or record.name)
+                child.setToolTip(
+                    0,
+                    "\n".join(
+                        item
+                        for item in (
+                            record.relative_path or record.name,
+                            f"Role: {record.role}",
+                            f"Status: {record.publication_status}",
+                            f"Format: {kind}",
+                        )
+                        if item
+                    ),
+                )
+                child.setToolTip(1, record.publication_status)
+                child.setToolTip(2, f"{kind} · {_format_artifact_size(record.size)}")
+                child.setForeground(1, QColor(self._status_color(record.publication_status)))
                 parent.addChild(child)
             parent.setExpanded(True)
+
+    @staticmethod
+    def _status_color(status: str) -> str:
+        state = _artifact_status_state(status)
+        return {
+            "candidate": "#E3B341",
+            "completed": "#5BD48A",
+            "failed": "#F07A75",
+            "muted": "#999999",
+        }.get(state, "#999999")
 
     def _find_tree_item(self, artifact_uid: str) -> QTreeWidgetItem | None:
         for index in range(self.artifact_tree.topLevelItemCount()):
@@ -520,12 +731,48 @@ class ArtifactExplorerView(QWidget):
         if uid:
             self.select_artifact(uid)
 
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        uid = str(item.data(0, Qt.UserRole) or "")
+        if not uid:
+            return
+        self.select_artifact(uid, request_missing=False)
+        self._emit_open_file()
+
+    def _capture_preview_scroll(self) -> tuple[int, int] | None:
+        widget = self.preview_stack.currentWidget()
+        if not hasattr(widget, "verticalScrollBar") or not hasattr(widget, "horizontalScrollBar"):
+            return None
+        return widget.verticalScrollBar().value(), widget.horizontalScrollBar().value()
+
+    def _restore_preview_scroll(self, position: tuple[int, int] | None) -> None:
+        if position is None:
+            return
+        widget = self.preview_stack.currentWidget()
+        if not hasattr(widget, "verticalScrollBar") or not hasattr(widget, "horizontalScrollBar"):
+            return
+        vertical, horizontal = position
+        widget.verticalScrollBar().setValue(min(vertical, widget.verticalScrollBar().maximum()))
+        widget.horizontalScrollBar().setValue(min(horizontal, widget.horizontalScrollBar().maximum()))
+
     def _render_selected(self) -> None:
+        position = self._capture_preview_scroll() if self._rendered_uid == self._selected_uid else None
+        try:
+            self._render_selected_impl()
+        finally:
+            self._rendered_uid = self._selected_uid
+            self._restore_preview_scroll(position)
+
+    def _render_selected_impl(self) -> None:
         record = self.selected_record()
         if record is None:
             self._show_empty()
             return
         self.preview_header.setText(f"{record.role} · {record.name or record.relative_path or record.artifact_uid}")
+        self.format_label.setText(_artifact_kind_label(record))
+        self.status_label.setProperty("state", _artifact_status_state(record.publication_status))
+        self.status_label.setText(record.publication_status.replace("_", " ").title())
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
         self.path_label.setText(record.final_path or "Full path unavailable")
         size = "—" if record.size is None else f"{record.size} bytes"
         self.metadata_label.setText(
@@ -536,6 +783,7 @@ class ArtifactExplorerView(QWidget):
         self.open_folder_button.setEnabled(bool(record.final_path))
         self.copy_path_button.setEnabled(bool(record.final_path))
         self.raw_button.setEnabled(False)
+        self._set_json_mode_available(False)
         self._raw_text = ""
         kind = artifact_kind(record)
         cached = self._content_by_uid.get(record.artifact_uid)
@@ -549,7 +797,9 @@ class ArtifactExplorerView(QWidget):
         if kind == "unsupported":
             self.metadata_preview.setText(
                 "In-app preview is not available for this format.\n\n"
-                f"{record.name or record.relative_path or record.artifact_uid}"
+                f"{record.name or record.relative_path or record.artifact_uid}\n"
+                f"Path: {record.final_path or 'Full path unavailable'}\n\n"
+                "Use 'Open' to inspect it with the system default application."
             )
             self.preview_stack.setCurrentWidget(self.metadata_preview)
             return
@@ -563,7 +813,7 @@ class ArtifactExplorerView(QWidget):
             return
         text = str(cached.get("text") or "")
         self._raw_text = text
-        self.raw_preview.setPlainText(text)
+        set_plain_text(self.raw_preview, text)
         self.raw_button.setEnabled(True)
         if bool(cached.get("truncated")):
             self.metadata_label.setText(self.metadata_label.text() + " · Preview truncated")
@@ -574,63 +824,129 @@ class ArtifactExplorerView(QWidget):
         elif kind == "table":
             self._render_table(text, delimiter="\t" if record.relative_path.casefold().endswith(".tsv") else ",")
         elif kind == "markdown":
-            self.text_preview.setMarkdown(text)
+            set_markdown(self.text_preview, text)
             self.preview_stack.setCurrentWidget(self.text_preview)
         elif kind == "html":
-            self.text_preview.setHtml(_safe_html(text))
+            set_html(self.text_preview, _safe_html(text))
             self.preview_stack.setCurrentWidget(self.text_preview)
         else:
-            self.text_preview.setPlainText(text)
+            set_plain_text(self.text_preview, text)
             self.preview_stack.setCurrentWidget(self.text_preview)
 
     def _show_empty(self) -> None:
         self._selected_artifact_uid = None
         self.preview_header.setText("Select an Artifact to preview.")
+        self.format_label.clear()
+        self.status_label.clear()
         self.path_label.clear()
         self.metadata_label.clear()
+        self.details_button.setChecked(False)
         self.open_file_button.setEnabled(False)
         self.open_folder_button.setEnabled(False)
         self.copy_path_button.setEnabled(False)
         self.raw_button.setEnabled(False)
+        self._set_json_mode_available(False)
         self._raw_text = ""
         self.preview_stack.setCurrentWidget(self.empty_preview)
+
+    def _toggle_details(self, expanded: bool) -> None:
+        self._details_expanded = expanded
+        self.metadata_panel.setVisible(expanded)
+        self.details_button.setText("Hide details" if expanded else "Details")
+        self.details_button.setToolTip(
+            "Hide Artifact path and metadata" if expanded else "Show Artifact path and metadata"
+        )
 
     def _show_raw(self) -> None:
         if self._raw_text:
             self.preview_stack.setCurrentWidget(self.raw_preview)
 
+    def _set_json_mode_available(self, available: bool) -> None:
+        self.json_mode_button.blockSignals(True)
+        self.json_mode_button.setEnabled(available)
+        if not available:
+            self.json_mode_button.setChecked(False)
+            self.json_mode_button.setText("Text view")
+            self.json_mode_button.setToolTip("Available for JSON Artifacts")
+        self.json_mode_button.blockSignals(False)
+        if available:
+            self._update_json_mode_button()
+
+    def _update_json_mode_button(self) -> None:
+        tree_mode = self._json_view_mode == "tree"
+        self.json_mode_button.blockSignals(True)
+        self.json_mode_button.setChecked(tree_mode)
+        self.json_mode_button.blockSignals(False)
+        self.json_mode_button.setText("Tree view" if tree_mode else "Text view")
+        self.json_mode_button.setToolTip(
+            "Switch to the text outline view" if tree_mode else "Switch to the JSON tree view"
+        )
+
+    def _toggle_json_mode(self, tree_mode: bool) -> None:
+        self._json_view_mode = "tree" if tree_mode else "outline"
+        self._update_json_mode_button()
+        self._show_json_preview()
+
+    def _show_json_preview(self) -> None:
+        self.preview_stack.setCurrentWidget(
+            self.json_preview if self._json_view_mode == "tree" else self.json_outline_preview
+        )
+
     def _render_json(self, text: str) -> None:
         try:
             value = json.loads(text)
         except json.JSONDecodeError:
+            self._json_value = None
+            self._set_json_mode_available(False)
             self.metadata_preview.setText("JSON preview unavailable: the content is not valid JSON.")
             self.preview_stack.setCurrentWidget(self.metadata_preview)
             return
+        self._json_value = value
+        self._set_json_mode_available(True)
         self.json_preview.clear()
         if isinstance(value, dict):
             for key, child_value in value.items():
                 self._add_json_value(self.json_preview, str(key), child_value)
         else:
             self._add_json_value(self.json_preview, "value", value)
-        self.preview_stack.setCurrentWidget(self.json_preview)
+        set_html(self.json_outline_preview, render_json_report_html(value))
+        self._show_json_preview()
 
     def _add_json_value(self, parent: QTreeWidget | QTreeWidgetItem, key: str, value: Any) -> None:
         if isinstance(value, dict):
-            item = QTreeWidgetItem([key, "object"])
+            item = QTreeWidgetItem([key, "object", "object"])
             (parent.addTopLevelItem if isinstance(parent, QTreeWidget) else parent.addChild)(item)
             for child_key, child_value in value.items():
                 self._add_json_value(item, str(child_key), child_value)
             item.setExpanded(True)
             return
         if isinstance(value, list):
-            item = QTreeWidgetItem([key, f"array · {len(value)} item(s)"])
+            item = QTreeWidgetItem([key, "array", "array"])
             (parent.addTopLevelItem if isinstance(parent, QTreeWidget) else parent.addChild)(item)
             for index, child_value in enumerate(value):
                 self._add_json_value(item, f"[{index}]", child_value)
             item.setExpanded(True)
             return
-        item = QTreeWidgetItem([key, json.dumps(value, ensure_ascii=False)])
+        item = QTreeWidgetItem([key, self._json_scalar_text(value), self._json_type_label(value)])
         (parent.addTopLevelItem if isinstance(parent, QTreeWidget) else parent.addChild)(item)
+
+    @staticmethod
+    def _json_scalar_text(value: Any) -> str:
+        if value is None:
+            return "—"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    @staticmethod
+    def _json_type_label(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)):
+            return "number"
+        return "string"
 
     def _render_json_lines(self, text: str) -> None:
         self.json_lines_preview.clear()
@@ -662,7 +978,8 @@ class ArtifactExplorerView(QWidget):
         if not path.is_file():
             self.metadata_preview.setText(
                 "In-app preview is unavailable because the file is missing.\n\n"
-                f"{record.name or record.relative_path or record.artifact_uid}"
+                f"{record.name or record.relative_path or record.artifact_uid}\n"
+                f"Path: {record.final_path or 'Full path unavailable'}"
             )
             self.preview_stack.setCurrentWidget(self.metadata_preview)
             return
@@ -670,12 +987,14 @@ class ArtifactExplorerView(QWidget):
             reader = QImageReader(str(path))
             size = reader.size()
             if size.isValid() and size.width() * size.height() > MAX_IMAGE_PIXELS:
-                self.metadata_preview.setText("Image is too large for an in-app preview.")
+                self.metadata_preview.setText(f"Image is too large for an in-app preview.\n\nPath: {record.final_path}")
                 self.preview_stack.setCurrentWidget(self.metadata_preview)
                 return
             image = reader.read()
             if image.isNull():
-                self.metadata_preview.setText("Image preview is unavailable for this file.")
+                self.metadata_preview.setText(
+                    f"Image preview is unavailable for this file.\n\nPath: {record.final_path}"
+                )
                 self.preview_stack.setCurrentWidget(self.metadata_preview)
                 return
             self.image_preview.setPixmap(QPixmap.fromImage(image).scaled(1000, 700, Qt.KeepAspectRatio))
@@ -684,7 +1003,10 @@ class ArtifactExplorerView(QWidget):
         if kind == "svg":
             raw = path.read_bytes()[:MAX_TEXT_BYTES]
             if b"<script" in raw.casefold() or b"<image" in raw.casefold() or b"<foreignobject" in raw.casefold():
-                self.metadata_preview.setText("SVG preview is blocked because it references active or external content.")
+                self.metadata_preview.setText(
+                    "SVG preview is blocked because it references active or external content.\n\n"
+                    f"Path: {record.final_path}"
+                )
                 self.preview_stack.setCurrentWidget(self.metadata_preview)
                 return
             renderer = QSvgRenderer(QByteArray(raw))
@@ -697,12 +1019,28 @@ class ArtifactExplorerView(QWidget):
                 self.svg_preview.setPixmap(QPixmap.fromImage(image))
                 self.preview_stack.setCurrentWidget(self.svg_preview)
             else:
-                self.metadata_preview.setText("SVG preview is unavailable for this file.")
+                self.metadata_preview.setText(f"SVG preview is unavailable for this file.\n\nPath: {record.final_path}")
                 self.preview_stack.setCurrentWidget(self.metadata_preview)
             return
         if kind == "pdf":
-            if path.stat().st_size > MAX_PDF_BYTES or self.pdf_document.load(str(path)) != QPdfDocument.Error.None_:
-                self.metadata_preview.setText("PDF is too large or unavailable for an in-app preview.")
+            self.pdf_document.close()
+            self._pdf_buffer.close()
+            try:
+                pdf_size = path.stat().st_size
+                pdf_data = path.read_bytes() if pdf_size <= MAX_PDF_BYTES else b""
+                if pdf_size > MAX_PDF_BYTES:
+                    pdf_error = QPdfDocument.Error.Unknown
+                else:
+                    self._pdf_buffer.setData(QByteArray(pdf_data))
+                    self._pdf_buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+                    self.pdf_document.load(self._pdf_buffer)
+                    pdf_error = self.pdf_document.error()
+            except OSError:
+                pdf_error = QPdfDocument.Error.Unknown
+            if pdf_error != QPdfDocument.Error.None_:
+                self.metadata_preview.setText(
+                    f"PDF is too large or unavailable for an in-app preview.\n\nPath: {record.final_path}"
+                )
                 self.preview_stack.setCurrentWidget(self.metadata_preview)
             else:
                 self.preview_stack.setCurrentWidget(self.pdf_view)
@@ -712,15 +1050,20 @@ class ArtifactExplorerView(QWidget):
             try:
                 if path.suffix.casefold() == ".zip":
                     with zipfile.ZipFile(path) as archive:
-                        lines = [f"{item.filename} · {item.file_size} bytes" for item in archive.infolist()[:MAX_ARCHIVE_ENTRIES]]
+                        lines = [
+                            f"{item.filename} · {item.file_size} bytes"
+                            for item in archive.infolist()[:MAX_ARCHIVE_ENTRIES]
+                        ]
                 else:
                     with tarfile.open(path, "r:*") as archive:
-                        lines = [f"{item.name} · {item.size} bytes" for item in archive.getmembers()[:MAX_ARCHIVE_ENTRIES]]
+                        lines = [
+                            f"{item.name} · {item.size} bytes" for item in archive.getmembers()[:MAX_ARCHIVE_ENTRIES]
+                        ]
             except (OSError, tarfile.TarError, zipfile.BadZipFile):
                 self.metadata_preview.setText("Archive member listing is unavailable.")
                 self.preview_stack.setCurrentWidget(self.metadata_preview)
                 return
-            self.archive_preview.setPlainText("\n".join(lines) or "Archive is empty.")
+            set_plain_text(self.archive_preview, "\n".join(lines) or "Archive is empty.")
             self.preview_stack.setCurrentWidget(self.archive_preview)
 
     def _emit_copy_path(self) -> None:

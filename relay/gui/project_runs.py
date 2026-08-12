@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextBrowser,
+    QTextEdit,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -57,7 +58,8 @@ from .artifacts import ArtifactExplorerView, ArtifactGroup, ArtifactRecord
 from .design_icons import icon
 from .design_tokens import COLORS
 from .design_typography import apply_type
-from .design_widgets import EmptyState, LabeledButton, StatusBadge, style_data_table_item
+from .design_widgets import EmptyState, LabeledButton, SegmentedControl, StatusBadge, style_data_table_item
+from .scroll_state import preserve_scroll, set_html, set_markdown, set_plain_text
 
 _ERROR_HUMANIZATION: dict[str, str] = {
     "ALL_WORKERS_FAILED": "All configured workers failed for this step.",
@@ -86,6 +88,15 @@ def _humanize_error(code: str | None) -> str:
 
 def _artifact_uid(artifact: dict[str, Any]) -> str:
     return str(artifact.get("artifact_uid") or "").strip()
+
+
+def _stable_mapping_signature(value: object) -> str:
+    """Create a cheap deterministic signature for polling no-op detection."""
+
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(value)
 
 
 def _artifact_kind(artifact: dict[str, Any]) -> str:
@@ -253,6 +264,7 @@ class ProjectRunsView(QWidget):
     """Browse Project Runs and render the selected Run beside the list."""
 
     select_run_requested = Signal(str)
+    browse_requested = Signal()
     filters_changed = Signal()
     action_requested = Signal(str, str, dict)
     open_output_requested = Signal(str)
@@ -273,6 +285,9 @@ class ProjectRunsView(QWidget):
         self.runs: dict[str, dict[str, Any]] = {}
         self.selected_run_id: str | None = None
         self._tree_expanded: dict[str, bool] = {}
+        self._group_mode = "date"
+        self._browse_panel: QWidget | None = None
+        self._runs_signature: str | None = None
 
         root = QVBoxLayout(self)
 
@@ -294,6 +309,13 @@ class ProjectRunsView(QWidget):
 
         body = QHBoxLayout()
         left = QVBoxLayout()
+        grouping = QHBoxLayout()
+        grouping.addWidget(QLabel("Group by"))
+        self.group_mode = SegmentedControl([("date", "Date"), ("project", "Project")], current="date")
+        self.group_mode.value_changed.connect(self._set_group_mode)
+        grouping.addWidget(self.group_mode)
+        grouping.addStretch(1)
+        left.addLayout(grouping)
         self.run_list = QTreeWidget()
         self.run_list.setHeaderLabels(["Project Run", "Status"])
         self.run_list.setColumnWidth(0, 260)
@@ -306,9 +328,11 @@ class ProjectRunsView(QWidget):
         left_widget = QWidget()
         left_widget.setLayout(left)
         left_widget.setMaximumWidth(380)
+        self._browse_panel = left_widget
         body.addWidget(left_widget)
 
         self.detail = ProjectRunDetailView()
+        self.detail.back_to_list_requested.connect(self._show_browser)
         self.detail.action_requested.connect(self.action_requested.emit)
         self.detail.open_output_requested.connect(self.open_output_requested.emit)
         self.detail.open_run_requested.connect(self.open_run_requested.emit)
@@ -345,15 +369,22 @@ class ProjectRunsView(QWidget):
         self, runs: list[dict[str, Any]] | dict[str, dict[str, Any]], *, selected_run_id: str | None = None
     ) -> None:
         if isinstance(runs, dict):
-            self.runs = {str(key): dict(value) for key, value in runs.items()}
+            next_runs = {str(key): dict(value) for key, value in runs.items()}
         else:
-            self.runs = {str(run.get("project_run_id")): dict(run) for run in runs if run.get("project_run_id")}
+            next_runs = {str(run.get("project_run_id")): dict(run) for run in runs if run.get("project_run_id")}
+        signature = _stable_mapping_signature(next_runs)
+        previous_selected = self.selected_run_id
+        self.runs = next_runs
         self._refresh_project_filter()
         self.selected_run_id = selected_run_id
-        self._render()
+        self._set_browse_mode(self.selected_run_id is None)
+        if signature != self._runs_signature or previous_selected != selected_run_id:
+            self._runs_signature = signature
+            self._render()
 
     def select_run(self, project_run_id: str | None) -> None:
         self.selected_run_id = str(project_run_id) if project_run_id else None
+        self._set_browse_mode(self.selected_run_id is None)
         self._render()
 
     def set_run_detail(self, project_run_id: str, detail_payload: dict[str, Any]) -> None:
@@ -405,7 +436,17 @@ class ProjectRunsView(QWidget):
 
     def clear_selection(self) -> None:
         self.selected_run_id = None
+        self._set_browse_mode(True)
         self.detail.set_run({})
+
+    def _set_browse_mode(self, browsing: bool) -> None:
+        if self._browse_panel is not None:
+            self._browse_panel.setVisible(browsing)
+        self.detail.set_browse_mode(browsing)
+
+    def _show_browser(self) -> None:
+        self.clear_selection()
+        self.browse_requested.emit()
 
     def has_live_run_selected(self) -> bool:
         if not self.selected_run_id:
@@ -440,12 +481,22 @@ class ProjectRunsView(QWidget):
         self._render()
         self.filters_changed.emit()
 
+    def _set_group_mode(self, mode: str) -> None:
+        if mode not in {"date", "project"} or mode == self._group_mode:
+            return
+        self._group_mode = mode
+        self._render()
+
     def _remember_tree_state(self, item: QTreeWidgetItem, expanded: bool) -> None:
         state_key = item.data(0, Qt.UserRole + 1)
         if state_key:
             self._tree_expanded[str(state_key)] = expanded
 
     def _render(self) -> None:
+        with preserve_scroll(self.run_list):
+            self._render_content()
+
+    def _render_content(self) -> None:
         for index in range(self.run_list.topLevelItemCount()):
             group = self.run_list.topLevelItem(index)
             state_key = group.data(0, Qt.UserRole + 1)
@@ -460,6 +511,10 @@ class ProjectRunsView(QWidget):
 
         if not self.runs:
             self.run_list.setVisible(False)
+            return
+
+        if self._group_mode == "project":
+            self._render_by_project()
             return
 
         groups = (
@@ -501,6 +556,36 @@ class ProjectRunsView(QWidget):
                     parent.setExpanded(self._tree_expanded.get(f"date:{group_name}:{date_name}", True))
             header.setExpanded(self._tree_expanded.get(group_key, True))
         self.run_list.setVisible(any_rendered)
+
+    def _render_by_project(self) -> None:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        labels: dict[str, str] = {}
+        for run in self.runs.values():
+            if not self._matches_filters(run):
+                continue
+            project_id = str(run.get("project_id") or "").strip()
+            project_name = str(run.get("project_name") or "").strip()
+            key = project_id or f"name:{project_name.casefold()}"
+            labels.setdefault(key, project_name or project_id or "Unknown project")
+            grouped.setdefault(key, []).append(run)
+        for key in sorted(grouped, key=lambda item: labels[item].casefold()):
+            rows = grouped[key]
+            rows.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
+            state_key = f"project:{key}"
+            header = QTreeWidgetItem([f"{labels[key]} · {len(rows)}", ""])
+            header.setData(0, Qt.UserRole + 1, state_key)
+            header.setFlags(Qt.ItemIsEnabled)
+            self.run_list.addTopLevelItem(header)
+            date_counts: dict[str, int] = {}
+            for run in rows:
+                date_label = _local_date(run.get("created_at"))
+                date_counts[date_label] = date_counts.get(date_label, 0) + 1
+                occurrence = date_counts[date_label]
+                row_label = date_label if occurrence == 1 else f"{date_label} ({occurrence})"
+                status_label = str(run.get("status") or "Unknown").replace("_", " ").title()
+                self._append_run_row(header, run, label=row_label, secondary=status_label)
+            header.setExpanded(self._tree_expanded.get(state_key, True))
+        self.run_list.setVisible(bool(grouped))
 
     def _matches_filters(self, run: dict[str, Any]) -> bool:
         filters = self.filters()
@@ -545,7 +630,14 @@ class ProjectRunsView(QWidget):
                 return False
         return True
 
-    def _append_run_row(self, parent: QTreeWidgetItem, run: dict[str, Any]) -> None:
+    def _append_run_row(
+        self,
+        parent: QTreeWidgetItem,
+        run: dict[str, Any],
+        *,
+        label: str | None = None,
+        secondary: str | None = None,
+    ) -> None:
         project_run_id = str(run.get("project_run_id") or "")
         project_name = str(run.get("project_name") or run.get("project_id") or "Project")
         status = str(run.get("status") or "UNKNOWN").casefold()
@@ -557,10 +649,13 @@ class ProjectRunsView(QWidget):
             suffix = f" · failed @ {run.get('failed_node_id')}"
         elif status == "awaiting_approval":
             suffix = " · awaiting"
-        title = f"{project_name} · {completed}/{step_count}{suffix}"
-        item = QTreeWidgetItem([title, relative])
+        title = label or f"{project_name} · {completed}/{step_count}{suffix}"
+        item = QTreeWidgetItem([title, secondary or relative])
         item.setData(0, Qt.UserRole, project_run_id)
-        item.setToolTip(0, _verdict(run))
+        item.setToolTip(
+            0,
+            "\n".join(part for part in (_verdict(run), str(run.get("created_at") or "")) if part),
+        )
         item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
         self._apply_status_colors(item, status)
         parent.addChild(item)
@@ -603,6 +698,10 @@ class ProjectRunDetailView(QWidget):
     artifact_preview_requested = Signal(str)
     artifact_path_open_requested = Signal(str)
     artifact_folder_open_requested = Signal(str)
+    review_confirm_requested = Signal(str)
+    review_rerun_requested = Signal(str, str)
+    review_reject_requested = Signal(str, str)
+    back_to_list_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -611,6 +710,7 @@ class ProjectRunDetailView(QWidget):
         self._task_run_details: dict[str, dict[str, Any]] = {}
         self._node_artifacts: dict[str, list[dict[str, Any]]] = {}
         self._review_details: dict[str, dict[str, Any]] = {}
+        self._run_signature: str | None = None
         self._pipeline_inspector_open = False
         self._pipeline_inspector_node_id: str | None = None
         # Nodes the Orchestrator made a repair decision on for this run, kept as
@@ -619,9 +719,22 @@ class ProjectRunDetailView(QWidget):
         # when the selected run itself changes, mirroring how receipt caching works.
         self._repaired_node_ids: set[str] = set()
 
+        self.workspace_view = ProjectRunWorkspaceView()
+        self.workspace_view.artifact_preview_requested.connect(self.artifact_preview_requested.emit)
+        self.workspace_view.open_artifact_requested.connect(self.open_output_requested.emit)
+        self.workspace_view.artifact_path_open_requested.connect(self.artifact_path_open_requested.emit)
+        self.workspace_view.artifact_folder_open_requested.connect(self.artifact_folder_open_requested.emit)
+        self.workspace_view.review_confirm_requested.connect(self.review_confirm_requested.emit)
+        self.workspace_view.review_rerun_requested.connect(self.review_rerun_requested.emit)
+        self.workspace_view.review_reject_requested.connect(self.review_reject_requested.emit)
+
         layout = QVBoxLayout(self)
 
         self.header_row = QHBoxLayout()
+        self.back_button = LabeledButton("list", "All Project Runs")
+        self.back_button.clicked.connect(self.back_to_list_requested.emit)
+        self.back_button.setVisible(False)
+        self.header_row.addWidget(self.back_button)
         self.status_badge = StatusBadge("unavailable")
         self.header_row.addWidget(self.status_badge)
         self.verdict_label = QLabel("Select a Project Run to view its overview.")
@@ -658,6 +771,23 @@ class ProjectRunDetailView(QWidget):
         self.approval_row.addWidget(self.reject_button)
         self.approval_row.addStretch(1)
         layout.addLayout(self.approval_row)
+
+        self.review_action_row = QHBoxLayout()
+        self.review_action_label = QLabel("")
+        self.review_action_label.setObjectName("mutedText")
+        self.review_action_label.setWordWrap(True)
+        self.review_action_row.addWidget(self.review_action_label, 1)
+        self.review_confirm_button = LabeledButton("check-circle", "Confirm review", tone="primary")
+        self.review_confirm_button.clicked.connect(self._emit_review_confirm)
+        self.review_rerun_button = LabeledButton("repeat", "Rerun with feedback")
+        self.review_rerun_button.clicked.connect(self._emit_review_rerun)
+        self.review_reject_button = LabeledButton("x-circle", "Reject review", tone="danger")
+        self.review_reject_button.clicked.connect(self._emit_review_reject)
+        self.review_action_row.addWidget(self.review_confirm_button)
+        self.review_action_row.addWidget(self.review_rerun_button)
+        self.review_action_row.addWidget(self.review_reject_button)
+        layout.addLayout(self.review_action_row)
+        self._pending_review_id: str | None = None
 
         # Kept as a private node-selection model for Inspector compatibility;
         # execution rows are no longer exposed as a public tab.
@@ -703,6 +833,7 @@ class ProjectRunDetailView(QWidget):
         self.orchestrator_view = ProjectRunOrchestratorView()
 
         self.run_tabs = QTabWidget()
+        self.run_tabs.addTab(self.workspace_view, "Workspace")
         self.run_tabs.addTab(self.pipeline_view, "Pipeline")
         self.run_tabs.addTab(self.artifacts_view, "Artifacts")
         self.run_tabs.addTab(self.timeline_view, "Timeline")
@@ -743,18 +874,29 @@ class ProjectRunDetailView(QWidget):
 
         self.set_run({})
 
+    def set_browse_mode(self, browsing: bool) -> None:
+        self.back_button.setVisible(not browsing and bool(self._run.get("project_run_id")))
+
     def set_run(self, run: dict[str, Any]) -> None:
         previous_run_id = str(self._run.get("project_run_id") or "")
+        signature = _stable_mapping_signature(run if isinstance(run, dict) else {})
+        if previous_run_id and previous_run_id == str((run or {}).get("project_run_id") or "") and signature == self._run_signature:
+            return
         self._run = dict(run) if isinstance(run, dict) else {}
+        self._run_signature = signature
         current_run_id = str(self._run.get("project_run_id") or "")
         if current_run_id != previous_run_id:
             self._pipeline_inspector_open = False
             self._pipeline_inspector_node_id = None
             self._repaired_node_ids = set()
             self._review_details = {}
+            self._run_signature = signature
+            if current_run_id:
+                self.run_tabs.setCurrentWidget(self.workspace_view)
         self._steps = list(self._run.get("steps") or []) if isinstance(self._run.get("steps"), list) else []
 
         if not self._run.get("project_run_id"):
+            self.set_browse_mode(True)
             self.empty.setVisible(True)
             self.status_badge.setVisible(False)
             self.verdict_label.setText("Select a Project Run to view its overview.")
@@ -765,22 +907,25 @@ class ProjectRunDetailView(QWidget):
             self.approve_button.setVisible(False)
             self.reject_button.setVisible(False)
             self.approval_label.setVisible(False)
+            self._set_review_action_state(False)
             self.inspector.clear()
             self.inspector.setVisible(False)
             self._pipeline_inspector_open = False
             self._pipeline_inspector_node_id = None
             self.pipeline_view.clear()
-            self.artifacts_view.set_run(None, [], {})
+            self.artifacts_view.set_run(None, [], {}, [])
+            self.workspace_view.set_run({}, {}, {})
             self.timeline_view.clear()
             self.orchestrator_view.set_orchestrator(None)
             return
         self.empty.setVisible(False)
+        self.set_browse_mode(False)
         self.status_badge.setVisible(True)
         self.run_tabs.setVisible(True)
         self.artifact_label.setVisible(True)
 
         status = str(self._run.get("status") or "unavailable").casefold()
-        display_status = "awaiting_review" if self._run.get("workflow_status") == "needs_review" else status
+        display_status = "needs_review" if self._run.get("workflow_status") == "needs_review" else status
         self.status_badge.set_status(display_status)
         self.verdict_label.setText(_verdict(self._run))
 
@@ -794,7 +939,9 @@ class ProjectRunDetailView(QWidget):
         self._render_steps()
         self._render_artifacts()
         self._render_artifacts_tab()
+        self._render_workspace()
         self._render_approvals()
+        self._render_review_actions()
         self._refresh_inspector_for_current_selection()
         self._render_pipeline()
         self._render_timeline()
@@ -802,6 +949,10 @@ class ProjectRunDetailView(QWidget):
         self._sync_inspector_visibility()
 
     def _render_steps(self) -> None:
+        with preserve_scroll(self.steps_table):
+            self._render_steps_content()
+
+    def _render_steps_content(self) -> None:
         steps = self._ordered_steps()
         self.steps_table.setRowCount(len(steps))
         for row, step in enumerate(steps):
@@ -1119,6 +1270,84 @@ class ProjectRunDetailView(QWidget):
         if review_id and isinstance(review, dict):
             self._review_details[str(review_id)] = dict(review)
             self._render_artifacts_tab()
+            self._render_workspace()
+            self._render_review_actions()
+
+    def _pending_review(self) -> tuple[str, dict[str, Any]] | None:
+        for review_id, review in self._review_details.items():
+            data = review.get("review") if isinstance(review.get("review"), dict) else review
+            if str(data.get("status") or "") in {"pending_human", "needs_human", "delivery_failed"}:
+                return review_id, data
+        return None
+
+    def _render_review_actions(self) -> None:
+        pending = self._pending_review()
+        if pending is None:
+            self._pending_review_id = None
+            self.review_action_label.clear()
+            self._set_review_action_state(False)
+            return
+        review_id, data = pending
+        self._pending_review_id = review_id
+        round_no = data.get("current_round") or data.get("round_no") or 1
+        max_reruns = data.get("max_reruns", 0)
+        used = data.get("reruns_used", 0)
+        self.review_action_label.setText(
+            f"Needs review · round {round_no} · reruns {used}/{max_reruns} · {data.get('reviewer') or 'human'}"
+        )
+        self.review_action_label.setToolTip(str(data.get("guidelines") or "No additional review guidelines."))
+        self._set_review_action_state(True)
+
+    def _set_review_action_state(self, enabled: bool) -> None:
+        pending = bool(self._pending_review_id) and enabled
+        busy = bool(getattr(self, "_review_action_pending", False))
+        self.review_action_label.setVisible(pending)
+        self.review_confirm_button.setVisible(pending)
+        self.review_rerun_button.setVisible(pending)
+        self.review_reject_button.setVisible(pending)
+        self.review_confirm_button.setEnabled(pending and not busy)
+        self.review_rerun_button.setEnabled(pending and not busy)
+        self.review_reject_button.setEnabled(pending and not busy)
+        self.workspace_view.set_review_action_pending(busy, self._pending_review_id if pending else None)
+
+    def set_review_action_pending(self, pending: bool, review_id: str | None = None) -> None:
+        if review_id and self._pending_review_id and review_id != self._pending_review_id:
+            return
+        self._review_action_pending = pending
+        self._set_review_action_state(bool(self._pending_review_id))
+
+    def review_action_completed(self, review_id: str) -> None:
+        if review_id == self._pending_review_id:
+            self._pending_review_id = None
+        self._review_action_pending = False
+        self.workspace_view.review_action_completed(review_id)
+        self._set_review_action_state(bool(self._pending_review_id))
+
+    def _emit_review_confirm(self) -> None:
+        if self._pending_review_id:
+            self.set_review_action_pending(True)
+            self.review_confirm_requested.emit(self._pending_review_id)
+
+    def _emit_review_rerun(self) -> None:
+        if not self._pending_review_id:
+            return
+        comment, accepted = QInputDialog.getMultiLineText(
+            self, "Rerun with feedback", "What should change in the next attempt?", ""
+        )
+        if accepted and comment.strip():
+            self.set_review_action_pending(True)
+            self.review_rerun_requested.emit(self._pending_review_id, comment.strip())
+
+    def _emit_review_reject(self) -> None:
+        if not self._pending_review_id:
+            return
+        reason, accepted = QInputDialog.getMultiLineText(self, "Reject review", "Reason", "")
+        if accepted and reason.strip():
+            self.set_review_action_pending(True)
+            self.review_reject_requested.emit(self._pending_review_id, reason.strip())
+
+    def _render_workspace(self) -> None:
+        self.workspace_view.set_run(self._run, self._node_artifacts, self._review_details)
 
     def cache_orchestrator(self, data: dict[str, Any]) -> None:
         if isinstance(data, dict):
@@ -1150,6 +1379,7 @@ class ProjectRunDetailView(QWidget):
     def cache_node_artifacts(self, node_id: str, artifacts: list[dict[str, Any]]) -> None:
         self._node_artifacts[str(node_id)] = [item for item in artifacts if isinstance(item, dict)]
         self._render_artifacts_tab()
+        self._render_workspace()
         self._render_pipeline()
         self._refresh_inspector_for_current_selection()
 
@@ -1475,6 +1705,10 @@ class ProjectRunInspectorView(QWidget):
         self._render_actions()
 
     def _render_attempts(self) -> None:
+        with preserve_scroll(self.attempts_table):
+            self._render_attempts_content()
+
+    def _render_attempts_content(self) -> None:
         attempts = list(self._receipt_step.get("task_runs") or [])
         if not attempts:
             attempts = [
@@ -1566,6 +1800,10 @@ class ProjectRunInspectorView(QWidget):
         self.inputs_label.setText("\n".join(parts) if parts else "No inputs recorded.")
 
     def _render_outputs(self) -> None:
+        with preserve_scroll(self.outputs_table):
+            self._render_outputs_content()
+
+    def _render_outputs_content(self) -> None:
         artifacts = self._artifacts
         self.outputs_table.setRowCount(len(artifacts))
         for row, artifact in enumerate(artifacts):
@@ -1782,6 +2020,10 @@ class _LegacyProjectRunArtifactsView(QWidget):
                 self.artifact_preview_requested.emit(uid)
 
     def _render_tree(self) -> None:
+        with preserve_scroll(self.artifact_tree):
+            self._render_tree_content()
+
+    def _render_tree_content(self) -> None:
         self.artifact_tree.clear()
         for group_name, items in self._groups:
             group = QTreeWidgetItem([group_name, f"{len(items)} item(s)"])
@@ -1875,11 +2117,11 @@ class _LegacyProjectRunArtifactsView(QWidget):
         if kind in {"html", "markdown", "text"} and isinstance(content, dict) and content.get("available"):
             text = str(content.get("text") or "")
             if kind == "html":
-                self.text_preview.setHtml(text)
+                set_html(self.text_preview, text)
             elif kind == "markdown":
-                self.text_preview.document().setMarkdown(text)
+                set_markdown(self.text_preview, text)
             else:
-                self.text_preview.setPlainText(text)
+                set_plain_text(self.text_preview, text)
             self.preview_stack.setCurrentWidget(self.text_preview)
             return
         if kind in {"pdf", "unsupported"}:
@@ -1896,6 +2138,10 @@ class _LegacyProjectRunArtifactsView(QWidget):
         self.preview_stack.setCurrentWidget(self.metadata_preview)
 
     def _populate_json(self, value: Any) -> None:
+        with preserve_scroll(self.json_preview):
+            self._populate_json_content(value)
+
+    def _populate_json_content(self, value: Any) -> None:
         self.json_preview.clear()
 
         def add_value(parent: QTreeWidget | QTreeWidgetItem, key: str, current: Any) -> None:
@@ -1906,7 +2152,7 @@ class _LegacyProjectRunArtifactsView(QWidget):
                     add_value(item, str(child_key), child_value)
                 item.setExpanded(True)
             elif isinstance(current, list):
-                item = QTreeWidgetItem([key, f"array · {len(current)} item(s)"])
+                item = QTreeWidgetItem([key, "array"])
                 parent.addTopLevelItem(item) if isinstance(parent, QTreeWidget) else parent.addChild(item)
                 for index, child_value in enumerate(current):
                     add_value(item, f"[{index}]", child_value)
@@ -1938,9 +2184,7 @@ class ProjectRunArtifactsView(ArtifactExplorerView):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.preview_requested.connect(
-            lambda uid, _review_id: self.artifact_preview_requested.emit(uid)
-        )
+        self.preview_requested.connect(lambda uid, _review_id: self.artifact_preview_requested.emit(uid))
         self.open_file_requested.connect(self._handle_open_file)
         self.open_folder_requested.connect(self.artifact_folder_open_requested.emit)
 
@@ -1985,10 +2229,7 @@ class ProjectRunArtifactsView(ArtifactExplorerView):
             )
             if records:
                 groups.append(ArtifactGroup(str(node_id), records))
-        merged_groups = [
-            ArtifactGroup(group.label, tuple(ArtifactRecord.merge(group.records)))
-            for group in groups
-        ]
+        merged_groups = [ArtifactGroup(group.label, tuple(ArtifactRecord.merge(group.records))) for group in groups]
         self.set_groups(merged_groups, auto_select_primary=True)
 
     def cache_artifact_content(self, artifact_uid: str, content: dict[str, Any]) -> None:
@@ -2116,11 +2357,20 @@ class ProjectRunPipelineView(QWidget):
         legend.setObjectName("mutedText")
         legend_layout = QHBoxLayout(legend)
         legend_layout.setContentsMargins(0, 0, 0, 0)
-        for label in ("Completed", "Running", "Failed", "Blocked", "Awaiting review", "Awaiting approval", "Cancelled"):
+        legend_items = (
+            ("Completed", "completed"),
+            ("Running", "running"),
+            ("Failed", "failed"),
+            ("Blocked", "blocked"),
+            ("Awaiting review", "needs_review"),
+            ("Awaiting approval", "needs_approval"),
+            ("Cancelled", "cancelled"),
+        )
+        for label, state in legend_items:
             chip = QLabel(label)
             chip.setObjectName("statusBadge")
             apply_type(chip, "caption")
-            chip.setProperty("state", _PIPELINE_STATUS_COLORS.get(label.lower().replace(" ", "_"), "unavailable"))
+            chip.setProperty("state", state)
             legend_layout.addWidget(chip)
         row.addWidget(legend)
         row.addStretch(1)
@@ -2180,6 +2430,10 @@ class ProjectRunPipelineView(QWidget):
             child.set_selected(child.node_id == node_id)
 
     def _render(self) -> None:
+        with preserve_scroll(self.pipeline_scroll):
+            self._render_content()
+
+    def _render_content(self) -> None:
         # Clear previous cards and their edges.
         while self.cards_container_layout.count():
             item = self.cards_container_layout.takeAt(0)
@@ -2835,6 +3089,10 @@ class ProjectRunOrchestratorView(QWidget):
         self.set_orchestrator(None)
 
     def set_orchestrator(self, data: dict[str, Any] | None) -> None:
+        with preserve_scroll(self.event_tree):
+            self._set_orchestrator_content(data)
+
+    def _set_orchestrator_content(self, data: dict[str, Any] | None) -> None:
         self._data = data
         self.unavailable_label.setVisible(False)
         enabled = bool(data and data.get("enabled"))
@@ -2864,7 +3122,491 @@ class ProjectRunOrchestratorView(QWidget):
         self._data = None
         self.disabled_state.setVisible(False)
         self.event_tree.setVisible(False)
-        self.event_tree.clear()
+        with preserve_scroll(self.event_tree):
+            self.event_tree.clear()
         self.budget_label.setVisible(False)
         self.unavailable_label.setText(message)
         self.unavailable_label.setVisible(True)
+
+
+class ProjectRunWorkspaceView(QWidget):
+    """Action-oriented first surface for a selected Project Run.
+
+    The existing Pipeline, Artifacts, Timeline, and Orchestrator tabs remain
+    the detailed evidence views. This surface composes the same artifact data
+    with a compact stage rail and an inline review panel so a normal Run can be
+    understood and resolved without navigating away from its result.
+    """
+
+    artifact_preview_requested = Signal(str)
+    open_artifact_requested = Signal(str)
+    artifact_path_open_requested = Signal(str)
+    artifact_folder_open_requested = Signal(str)
+    review_confirm_requested = Signal(str)
+    review_rerun_requested = Signal(str, str)
+    review_reject_requested = Signal(str, str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._run: dict[str, Any] = {}
+        self._pending_review_id: str | None = None
+        self._review_action_pending = False
+        self._run_signature: str | None = None
+        self._pending_update: tuple[dict[str, Any], dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]] | None = None
+        self._pending_update_count = 0
+        self._rendering = False
+        self._user_reading = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        self.update_notice = QFrame()
+        self.update_notice.setObjectName("inlineNotice")
+        update_layout = QHBoxLayout(self.update_notice)
+        self.update_notice_label = QLabel()
+        self.update_notice_label.setObjectName("mutedText")
+        update_layout.addWidget(self.update_notice_label, 1)
+        self.apply_update_button = LabeledButton("refresh", "Apply updates")
+        self.apply_update_button.clicked.connect(self._apply_pending_update)
+        update_layout.addWidget(self.apply_update_button)
+        self.update_notice.setVisible(False)
+        root.addWidget(self.update_notice)
+
+        self.next_action = QFrame()
+        self.next_action.setObjectName("inlineNotice")
+        action_layout = QHBoxLayout(self.next_action)
+        self.next_action_label = QLabel()
+        self.next_action_label.setWordWrap(True)
+        self.next_action_label.setObjectName("projectRunVerdict")
+        action_layout.addWidget(self.next_action_label, 1)
+        self.review_now_button = LabeledButton("search", "Review now", tone="primary")
+        self.review_now_button.clicked.connect(self._focus_review)
+        action_layout.addWidget(self.review_now_button)
+        root.addWidget(self.next_action)
+
+        self.stage_scroll = QScrollArea()
+        self.stage_scroll.setWidgetResizable(True)
+        self.stage_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.stage_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.stage_host = QWidget()
+        self.stage_layout = QHBoxLayout(self.stage_host)
+        self.stage_layout.setContentsMargins(2, 4, 2, 8)
+        self.stage_scroll.setWidget(self.stage_host)
+        root.addWidget(self.stage_scroll)
+
+        self.surface = QFrame()
+        self.surface.setObjectName("artifactMetadata")
+        surface_layout = QHBoxLayout(self.surface)
+        surface_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.artifacts_view = ProjectRunArtifactsView()
+        self.artifacts_view.artifact_preview_requested.connect(self.artifact_preview_requested.emit)
+        self.artifacts_view.open_artifact_requested.connect(self.open_artifact_requested.emit)
+        self.artifacts_view.artifact_path_open_requested.connect(self.artifact_path_open_requested.emit)
+        self.artifacts_view.artifact_folder_open_requested.connect(self.artifact_folder_open_requested.emit)
+        self.artifacts_view.artifact_tree.itemSelectionChanged.connect(self._mark_artifact_reading)
+        surface_layout.addWidget(self.artifacts_view, 3)
+
+        self.review_panel = QFrame()
+        self.review_panel.setObjectName("inlineNotice")
+        review_layout = QVBoxLayout(self.review_panel)
+        self.review_title = QLabel("Review")
+        self.review_title.setObjectName("sectionTitle")
+        review_layout.addWidget(self.review_title)
+        self.review_meta = QLabel()
+        self.review_meta.setObjectName("mutedText")
+        self.review_meta.setWordWrap(True)
+        review_layout.addWidget(self.review_meta)
+        self.review_guidelines = QLabel()
+        self.review_guidelines.setWordWrap(True)
+        self.review_guidelines.setObjectName("mutedText")
+        review_layout.addWidget(self.review_guidelines)
+        self.review_checklist = QLabel()
+        self.review_checklist.setWordWrap(True)
+        review_layout.addWidget(self.review_checklist)
+        self.review_evaluation = QLabel()
+        self.review_evaluation.setWordWrap(True)
+        self.review_evaluation.setObjectName("mutedText")
+        review_layout.addWidget(self.review_evaluation)
+        self.review_handoff = QLabel()
+        self.review_handoff.setWordWrap(True)
+        self.review_handoff.setObjectName("mutedText")
+        review_layout.addWidget(self.review_handoff)
+        self.review_rounds = QTreeWidget()
+        self.review_rounds.setHeaderLabels(["Round", "Status", "Evidence / decision"])
+        self.review_rounds.setRootIsDecorated(False)
+        self.review_rounds.setMaximumHeight(132)
+        self.review_rounds.setVisible(False)
+        review_layout.addWidget(self.review_rounds)
+        self.review_comment = QTextEdit()
+        self.review_comment.setPlaceholderText("What should change before the next attempt?")
+        self.review_comment.setMaximumHeight(84)
+        self.review_comment.setObjectName("reviewComment")
+        self.review_comment.textChanged.connect(lambda: self._set_review_controls(bool(self._pending_review_id)))
+        self.review_comment.textChanged.connect(self._mark_user_reading)
+        review_layout.addWidget(self.review_comment)
+        review_actions = QHBoxLayout()
+        self.review_confirm = LabeledButton("check-circle", "Confirm", tone="primary")
+        self.review_rerun = LabeledButton("repeat", "Rerun")
+        self.review_reject = LabeledButton("x-circle", "Reject", tone="danger")
+        self.review_confirm.clicked.connect(self._emit_confirm)
+        self.review_rerun.clicked.connect(self._emit_rerun)
+        self.review_reject.clicked.connect(self._emit_reject)
+        review_actions.addWidget(self.review_confirm)
+        review_actions.addWidget(self.review_rerun)
+        review_actions.addWidget(self.review_reject)
+        review_layout.addLayout(review_actions)
+        review_layout.addStretch(1)
+        surface_layout.addWidget(self.review_panel, 1)
+        root.addWidget(self.surface, 1)
+
+        self.set_run({}, {}, {})
+
+    def set_run(
+        self,
+        run: dict[str, Any],
+        node_artifacts: dict[str, list[dict[str, Any]]],
+        review_details: dict[str, dict[str, Any]],
+    ) -> None:
+        next_run = dict(run) if isinstance(run, dict) else {}
+        run_id = str(next_run.get("project_run_id") or "")
+        signature = _stable_mapping_signature(
+            {
+                "run": next_run,
+                "artifacts": node_artifacts,
+                "reviews": review_details,
+            }
+        )
+        if (
+            run_id
+            and str(self._run.get("project_run_id") or "") == run_id
+            and self._run_signature
+            and signature != self._run_signature
+            and self._user_reading
+        ):
+            self._pending_update = (next_run, dict(node_artifacts), dict(review_details))
+            self._pending_update_count += 1
+            self.update_notice_label.setText(
+                f"{self._pending_update_count} new update{'s' if self._pending_update_count != 1 else ''} available"
+            )
+            self.update_notice.setVisible(True)
+            return
+        self._apply_run(next_run, node_artifacts, review_details, signature)
+
+    def _apply_run(
+        self,
+        run: dict[str, Any],
+        node_artifacts: dict[str, list[dict[str, Any]]],
+        review_details: dict[str, dict[str, Any]],
+        signature: str | None = None,
+    ) -> None:
+        previous_run_id = str(self._run.get("project_run_id") or "")
+        next_run_id = str(run.get("project_run_id") or "")
+        if previous_run_id != next_run_id:
+            self._user_reading = False
+        self._rendering = True
+        self._run = dict(run)
+        self._run_signature = signature or _stable_mapping_signature(
+            {"run": run, "artifacts": node_artifacts, "reviews": review_details}
+        )
+        self._pending_update = None
+        self._pending_update_count = 0
+        self.update_notice.setVisible(False)
+        self._render_run(node_artifacts, review_details)
+        self._rendering = False
+
+    def _render_run(
+        self,
+        node_artifacts: dict[str, list[dict[str, Any]]],
+        review_details: dict[str, dict[str, Any]],
+    ) -> None:
+        run_id = str(self._run.get("project_run_id") or "")
+        if not run_id:
+            self.next_action_label.setText("Select a Project Run to see its next action and results.")
+            self.review_now_button.setVisible(False)
+            self.review_panel.setVisible(False)
+            self._clear_stages()
+            self.artifacts_view.set_run(None, [], {}, [])
+            return
+
+        self.review_now_button.setVisible(False)
+        self.review_panel.setVisible(True)
+        self._render_stages()
+        review_artifacts = self._review_artifacts(review_details)
+        self.artifacts_view.set_run(
+            run_id,
+            self._run.get("final_artifact_ids") or [],
+            node_artifacts,
+            review_artifacts,
+        )
+        review = self._workspace_review(review_details)
+        self._render_next_action(review)
+        self._render_review(review)
+
+    def _apply_pending_update(self) -> None:
+        pending = self._pending_update
+        if pending is None:
+            return
+        run, artifacts, reviews = pending
+        self._apply_run(
+            run,
+            artifacts,
+            reviews,
+            _stable_mapping_signature({"run": run, "artifacts": artifacts, "reviews": reviews}),
+        )
+
+    def _mark_user_reading(self) -> None:
+        if not self._rendering and self.review_comment.toPlainText().strip():
+            self._user_reading = True
+
+    def _mark_artifact_reading(self, *_args) -> None:
+        if not self._rendering:
+            self._user_reading = True
+
+    def acknowledge_updates(self) -> None:
+        self._apply_pending_update()
+
+    def _render_next_action(self, pending: tuple[str, dict[str, Any], dict[str, Any]] | None) -> None:
+        status = str(self._run.get("status") or "").casefold()
+        workflow = str(self._run.get("workflow_status") or "").casefold()
+        review_status = str(pending[1].get("status") or "").casefold() if pending else ""
+        if review_status == "evaluating":
+            self.next_action_label.setText("Orchestrator is evaluating the candidate — the result will appear here when ready.")
+            self.review_now_button.setVisible(False)
+        elif workflow == "needs_review" or review_status in {"pending_human", "needs_human", "delivery_failed"}:
+            self.next_action_label.setText(
+                "검수 필요 — 결과물을 확인한 뒤 Confirm 하거나 코멘트를 남기고 Rerun 하세요."
+            )
+            self.review_now_button.setVisible(True)
+        elif status == "failed":
+            self.next_action_label.setText("실패한 단계가 있습니다 — Pipeline에서 원인을 확인하고 Retry 하세요.")
+        elif status in {"running", "queued", "pending"}:
+            self.next_action_label.setText("실행 중 — 현재 단계와 최근 활동은 Pipeline과 Timeline에서 확인할 수 있습니다.")
+        elif status == "completed":
+            self.next_action_label.setText("실행 완료 — 최종 Artifact를 확인하거나 Open output으로 결과 폴더를 여세요.")
+        else:
+            self.next_action_label.setText("이 Run의 상태와 결과물을 확인하세요.")
+
+    def _clear_stages(self) -> None:
+        while self.stage_layout.count():
+            item = self.stage_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def _render_stages(self) -> None:
+        self._clear_stages()
+        steps = self._run.get("steps") or []
+        if not isinstance(steps, list) or not steps:
+            label = QLabel("No step status available yet")
+            label.setObjectName("mutedText")
+            self.stage_layout.addWidget(label)
+            self.stage_layout.addStretch(1)
+            return
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            node = str(step.get("node_id") or step.get("task_id") or "Step")
+            status = str(step.get("status") or "pending").casefold()
+            frame = QFrame()
+            frame.setObjectName("inlineNotice")
+            frame.setMinimumWidth(125)
+            layout = QVBoxLayout(frame)
+            title = QLabel(node)
+            title.setObjectName("sectionTitle")
+            title.setWordWrap(True)
+            state = QLabel(_workspace_status_text(status))
+            state.setObjectName("mutedText")
+            layout.addWidget(title)
+            layout.addWidget(state)
+            self.stage_layout.addWidget(frame)
+        self.stage_layout.addStretch(1)
+
+    def _workspace_review(
+        self, review_details: dict[str, dict[str, Any]]
+    ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
+        actionable = {"pending_human", "needs_human", "delivery_failed", "evaluating"}
+        for review_id, review in review_details.items():
+            data = review.get("review") if isinstance(review.get("review"), dict) else review
+            if str(data.get("status") or "") in actionable:
+                return str(review_id), data, review
+        for review_id, review in review_details.items():
+            data = review.get("review") if isinstance(review.get("review"), dict) else review
+            return str(review_id), data, review
+        return None
+
+    def _review_artifacts(self, review_details: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for review_id, review in review_details.items():
+            data = review.get("review") if isinstance(review.get("review"), dict) else review
+            if str(data.get("status") or "") not in {
+                "pending_human",
+                "needs_human",
+                "delivery_failed",
+                "evaluating",
+            }:
+                continue
+            for artifact in review.get("artifacts") or []:
+                if isinstance(artifact, dict):
+                    records.append({**artifact, "review_id": review_id, "is_primary": True})
+        return records
+
+    def _render_review(self, pending: tuple[str, dict[str, Any], dict[str, Any]] | None) -> None:
+        self._pending_review_id = pending[0] if pending else None
+        if not pending:
+            self.review_title.setText("Review")
+            self.review_meta.setText("No review gate is waiting for action.")
+            self.review_guidelines.clear()
+            self.review_checklist.setText("✓ Execution status and delivered Artifacts remain available in the tabs above.")
+            self.review_evaluation.clear()
+            self.review_handoff.clear()
+            self.review_rounds.clear()
+            self.review_rounds.setVisible(False)
+            self._set_review_controls(False)
+            return
+        review_id, data, detail = pending
+        round_no = data.get("current_round") or data.get("round_no") or 1
+        used = data.get("reruns_used", 0)
+        maximum = data.get("max_reruns", 0)
+        status = str(data.get("status") or "").casefold()
+        self.review_title.setText("Review needed")
+        self.review_meta.setText(
+            f"Reviewer: {data.get('reviewer') or 'human'} · Status: {_review_status_text(status)} · "
+            f"Round {round_no} · Reruns {used}/{maximum}\n{review_id[:16]}"
+        )
+        self.review_guidelines.setText(
+            f"<b>Guidelines</b><br>{_escape_review_text(data.get('guidelines') or 'Inspect the candidate result and decide whether it is ready.') }"
+        )
+        self.review_checklist.setText(
+            "✓ Upstream steps available\n✓ Candidate Artifact selected\n"
+            + ("○ Content quality requires your decision" if status != "evaluating" else "○ Orchestrator evaluation in progress")
+        )
+        evaluation = _decode_review_evaluation(data.get("evaluation_json"))
+        if evaluation:
+            decision = _review_decision_text(evaluation.get("decision"))
+            reason = str(evaluation.get("reason") or evaluation.get("comment") or "No reason recorded.")
+            self.review_evaluation.setText(f"<b>Orchestrator evaluation:</b> {decision}<br>{_escape_review_text(reason)}")
+        elif status == "evaluating":
+            self.review_evaluation.setText("<b>Orchestrator evaluation:</b> In progress…")
+        else:
+            self.review_evaluation.clear()
+        handoff_reason = str(data.get("comment") or "")
+        if status in {"needs_human", "delivery_failed"} and handoff_reason:
+            self.review_handoff.setText(f"<b>Human handoff:</b> {_escape_review_text(handoff_reason)}")
+        else:
+            self.review_handoff.clear()
+        self._render_review_rounds(detail.get("rounds") or [])
+        self._set_review_controls(status in {"pending_human", "needs_human", "delivery_failed"})
+
+    def _render_review_rounds(self, rounds: list[dict[str, Any]]) -> None:
+        self.review_rounds.clear()
+        for round_data in rounds:
+            if not isinstance(round_data, dict):
+                continue
+            evaluation = _decode_review_evaluation(round_data.get("evaluation_json"))
+            decision = _review_decision_text(evaluation.get("decision")) if evaluation else ""
+            detail = decision or str(round_data.get("comment") or round_data.get("task_run_id") or "—")
+            item = QTreeWidgetItem(
+                [
+                    str(round_data.get("round_no") or "—"),
+                    _review_status_text(str(round_data.get("status") or "")),
+                    detail,
+                ]
+            )
+            item.setToolTip(2, str(round_data.get("task_run_id") or ""))
+            self.review_rounds.addTopLevelItem(item)
+        self.review_rounds.setVisible(self.review_rounds.topLevelItemCount() > 0)
+
+    def _set_review_controls(self, enabled: bool) -> None:
+        busy = self._review_action_pending
+        has_comment = bool(self.review_comment.toPlainText().strip())
+        self.review_confirm.setEnabled(enabled and not busy)
+        self.review_rerun.setEnabled(enabled and has_comment and not busy)
+        self.review_reject.setEnabled(enabled and has_comment and not busy)
+
+    def set_review_action_pending(self, pending: bool, review_id: str | None = None) -> None:
+        if review_id and self._pending_review_id and review_id != self._pending_review_id:
+            return
+        self._review_action_pending = pending
+        self._set_review_controls(bool(self._pending_review_id))
+
+    def review_action_completed(self, review_id: str) -> None:
+        if review_id == self._pending_review_id:
+            self._pending_review_id = None
+            self.review_comment.blockSignals(True)
+            self.review_comment.clear()
+            self.review_comment.blockSignals(False)
+        self._review_action_pending = False
+        self._set_review_controls(bool(self._pending_review_id))
+
+    def _focus_review(self) -> None:
+        self.review_comment.setFocus()
+
+    def _emit_confirm(self) -> None:
+        if self._pending_review_id and not self._review_action_pending:
+            self.set_review_action_pending(True)
+            self.review_confirm_requested.emit(self._pending_review_id)
+
+    def _emit_rerun(self) -> None:
+        comment = self.review_comment.toPlainText().strip()
+        if self._pending_review_id and comment and not self._review_action_pending:
+            self.set_review_action_pending(True)
+            self.review_rerun_requested.emit(self._pending_review_id, comment)
+
+    def _emit_reject(self) -> None:
+        comment = self.review_comment.toPlainText().strip()
+        if self._pending_review_id and comment and not self._review_action_pending:
+            self.set_review_action_pending(True)
+            self.review_reject_requested.emit(self._pending_review_id, comment)
+
+
+def _workspace_status_text(status: str) -> str:
+    return {
+        "completed": "Complete",
+        "succeeded": "Complete",
+        "failed": "Failed",
+        "running": "Running",
+        "queued": "Queued",
+        "pending": "Not started",
+        "blocked": "Blocked",
+        "awaiting_review": "Needs review",
+    }.get(status, status.replace("_", " ").title() or "Unknown")
+
+
+def _escape_review_text(value: object) -> str:
+    from html import escape
+
+    return escape(str(value)).replace("\n", "<br>")
+
+
+def _decode_review_evaluation(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _review_decision_text(value: object) -> str:
+    return {
+        "approve": "Confirmed",
+        "rerun": "Rerun requested",
+        "human_review": "Human review required",
+    }.get(str(value or "").casefold(), str(value or "Evaluation recorded"))
+
+
+def _review_status_text(value: str) -> str:
+    return {
+        "pending_human": "Needs review",
+        "needs_human": "Human handoff",
+        "delivery_failed": "Delivery needs attention",
+        "evaluating": "Evaluating",
+        "approved": "Confirmed",
+        "rerun_requested": "Rerun requested",
+        "rejected": "Rejected",
+        "pending": "Pending",
+    }.get(value.casefold(), value.replace("_", " ").title() or "Unknown")

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .scroll_state import preserve_scroll
 
 
 class ProfilesView(QWidget):
@@ -78,11 +79,12 @@ class ProfilesView(QWidget):
 
     def set_profiles(self, profiles: list[dict]) -> None:
         self.profiles = {str(p["profile_id"]): p for p in profiles}
-        self.list.clear()
-        for profile in profiles:
-            item = QListWidgetItem(f"{profile['name']} {'· Built-in' if profile.get('builtin') else ''}")
-            item.setData(32, profile["profile_id"])
-            self.list.addItem(item)
+        with preserve_scroll(self.list):
+            self.list.clear()
+            for profile in profiles:
+                item = QListWidgetItem(f"{profile['name']} {'· Built-in' if profile.get('builtin') else ''}")
+                item.setData(32, profile["profile_id"])
+                self.list.addItem(item)
 
     def _set_editable(self, editable: bool) -> None:
         for widget in (self.name, self.description, self.instructions, self.save, self.delete):

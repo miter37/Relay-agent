@@ -10,6 +10,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import QUrl
     from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QMessageBox
 except ModuleNotFoundError as exc:
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
@@ -90,6 +91,14 @@ class ProjectsWidgetTests(unittest.TestCase):
         view._item_activated(view.list_widget.item(0))
 
         self.assertEqual(seen, ["p-1"])
+
+    def test_project_detail_run_history_opens_project_run_link(self):
+        view = ProjectDetailView()
+        view.set_project({"project_id": "p-1", "name": "One"}, [{"project_run_id": "pr-1"}])
+        seen = []
+        view.run_link_requested.connect(seen.append)
+        view._on_run_link(QUrl("relay://project-run/pr-1"))
+        self.assertEqual(seen, ["pr-1"])
 
     def test_project_editor_payload_round_trip(self):
         dialog = ProjectEditorDialog(

@@ -88,6 +88,11 @@ def application_stylesheet() -> str:
         }}
         QPushButton:hover {{ border-color: {color["border.strong"]}; background: {color["bg.hover"]}; }}
         QPushButton:pressed {{ background: {color["bg.pressed"]}; }}
+        QPushButton#jsonModeToggle:checked {{ background: {color["bg.selected"]}; border-color: {color["accent.primary"]}; color: {color["text.primary"]}; }}
+        QFrame#segmentedControl {{ background: {color["bg.input"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["control"]}px; }}
+        QPushButton#segmentedButton {{ background: transparent; border: 0; border-radius: {RADIUS["control"] - 2}px; color: {color["text.secondary"]}; padding: 4px 12px; min-height: 22px; }}
+        QPushButton#segmentedButton:hover {{ background: {color["bg.hover"]}; color: {color["text.primary"]}; }}
+        QPushButton#segmentedButton:checked {{ background: {color["bg.surfaceRaised"]}; color: {color["text.primary"]}; border: 1px solid {color["border.strong"]}; }}
         QPushButton:disabled {{ color: {color["text.muted"]}; background: {color["bg.input"]}; }}
         QPushButton#primaryAction {{ background: {color["action.primaryBg"]}; border-color: {color["action.primaryBg"]}; color: {color["action.primaryFg"]}; }}
         QPushButton#primaryAction:hover {{ background: {color["action.primaryBg"]}; border-color: {color["border.focus"]}; }}
@@ -143,12 +148,22 @@ def application_stylesheet() -> str:
         QTabBar::tab:selected {{ color: {color["text.primary"]}; border-bottom: 2px solid {color["accent.primary"]}; }}
         QTabWidget::pane {{ background: {color["bg.surface"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["panel"]}px; }}
         QTextBrowser#evidencePane {{ background: {color["bg.surface"]}; border: 0; padding: {SPACING["md"]}px; }}
+        QWidget#artifactListPanel {{ background: {color["bg.surface"]}; border-right: 1px solid {color["border.subtle"]}; padding-right: {SPACING["md"]}px; }}
+        QFrame#artifactMetadata {{ background: {color["bg.input"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["control"]}px; }}
+        QLabel#artifactPath {{ color: {color["text.secondary"]}; }}
+        QLabel#artifactFormat {{ color: {color["text.muted"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["badge"]}px; padding: 2px 6px; }}
+        QLabel#artifactStatus {{ border-radius: {RADIUS["badge"]}px; padding: 2px 7px; border: 1px solid {color["border.subtle"]}; }}
+        QLabel#artifactStatus[state="candidate"] {{ color: {color["state.warning"]}; border-color: {color["state.warning"]}; }}
+        QLabel#artifactStatus[state="completed"] {{ color: {color["state.success"]}; border-color: {color["state.success"]}; }}
+        QLabel#artifactStatus[state="failed"] {{ color: {color["state.danger"]}; border-color: {color["state.danger"]}; }}
+        QLabel#artifactStatus[state="muted"] {{ color: {color["text.muted"]}; border-color: {color["border.subtle"]}; }}
+        QStackedWidget#artifactPreviewSurface {{ background: {color["bg.surface"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["panel"]}px; }}
         QLabel#statusBadge {{
             border-radius: {RADIUS["badge"]}px; padding: 2px {SPACING["sm"]}px 2px {SPACING["md"]}px;
             background: {color["bg.surface"]}; border: 0; border-left: 3px solid {color["border.subtle"]};
         }}
         QLabel#statusBadge[state="running"] {{ color: {color["state.info"]}; border-left-color: {color["state.info"]}; }}
-        QLabel#statusBadge[state="queued"], QLabel#statusBadge[state="partial"], QLabel#statusBadge[state="needs_approval"] {{ color: {color["state.warning"]}; border-left-color: {color["state.warning"]}; }}
+        QLabel#statusBadge[state="queued"], QLabel#statusBadge[state="partial"], QLabel#statusBadge[state="needs_approval"], QLabel#statusBadge[state="needs_review"] {{ color: {color["state.warning"]}; border-left-color: {color["state.warning"]}; }}
         QLabel#statusBadge[state="completed"] {{ color: {color["state.success"]}; border-left-color: {color["state.success"]}; }}
         QLabel#statusBadge[state="failed"] {{ color: {color["state.danger"]}; border-left-color: {color["state.danger"]}; }}
         QLabel#statusBadge[state="cancelled"], QLabel#statusBadge[state="unavailable"] {{ color: {color["text.muted"]}; border-left-color: {color["border.subtle"]}; }}

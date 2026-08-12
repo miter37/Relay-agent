@@ -45,6 +45,56 @@ class ReviewsArtifactExplorerTests(unittest.TestCase):
         self.assertEqual(view.artifacts_view.preview_stack.currentWidget(), view.artifacts_view.metadata_preview)
         self.assertIn("Loading", view.artifacts_view.metadata_preview.text())
 
+    def test_review_feedback_is_scoped_and_actions_need_feedback(self):
+        view = ReviewsView()
+        view.set_reviews(
+            [
+                {"review_id": "review-1", "scope_type": "task", "task_title": "First"},
+                {"review_id": "review-2", "scope_type": "task", "task_title": "Second"},
+            ]
+        )
+        view.set_review({"review": {"review_id": "review-1", "status": "pending_human"}})
+        view.comment.setPlainText("Add a source")
+        self.assertTrue(view.rerun.isEnabled())
+        view.list.setCurrentRow(1)
+        self.assertEqual(view.comment.toPlainText(), "")
+        self.assertFalse(view.rerun.isEnabled())
+        view.list.setCurrentRow(0)
+        self.assertEqual(view.comment.toPlainText(), "Add a source")
+        view.set_action_pending(True)
+        self.assertFalse(view.confirm.isEnabled())
+        view.set_action_pending(False)
+        view.action_completed("review-1")
+        self.assertEqual(view.comment.toPlainText(), "")
+
+    def test_review_detail_exposes_orchestrator_evaluation_handoff_and_rounds(self):
+        view = ReviewsView()
+        view.set_review(
+            {
+                "review": {
+                    "review_id": "review-1",
+                    "status": "needs_human",
+                    "reviewer": "orchestrator",
+                    "comment": "The evidence was incomplete; human decision required.",
+                    "evaluation_json": '{"decision":"human_review","reason":"Missing source trace"}',
+                },
+                "rounds": [
+                    {
+                        "round_no": 1,
+                        "task_run_id": "job-1",
+                        "status": "needs_human",
+                        "evaluation_json": '{"decision":"human_review","reason":"Missing source trace"}',
+                    }
+                ],
+                "current_round": {"round_no": 1, "task_run_id": "job-1"},
+            }
+        )
+        rendered = view.detail.toHtml()
+        self.assertIn("Orchestrator evaluation", rendered)
+        self.assertIn("Human handoff", rendered)
+        self.assertIn("Round history", rendered)
+        self.assertIn("Missing source trace", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

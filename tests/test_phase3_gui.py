@@ -14,6 +14,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
@@ -60,6 +61,15 @@ class TasksWidgetTests(unittest.TestCase):
         view.search_edit.setText("missing")
         self.assertFalse(view.empty_label.isHidden())
         self.assertIn("match", view.empty_label.text())
+
+    def test_task_list_selects_on_single_click_and_keyboard_current_item(self):
+        view = TaskListView()
+        view.set_tasks([{"task_id": "alpha", "name": "Weekly HBM"}])
+        seen = []
+        view.select_task_requested.connect(seen.append)
+        view.list_widget.setCurrentRow(0)
+        self.assertEqual(seen, ["alpha"])
+        self.assertTrue(view.list_widget.item(0).flags() & Qt.ItemIsSelectable)
 
     def test_task_detail_renders_definition_and_runs(self):
         view = TaskDetailView()
@@ -144,6 +154,19 @@ class TasksWidgetTests(unittest.TestCase):
         # eight scalar fields above it happened not to use.
         self.assertGreaterEqual(dialog.width(), 900)
         self.assertGreaterEqual(dialog.instructions_edit.minimumHeight(), 260)
+
+    def test_task_editor_save_stays_open_until_result(self):
+        dialog = TaskEditorDialog()
+        dialog.name_edit.setText("Weekly Report")
+        dialog.instructions_edit.setPlainText("Produce the report")
+        submitted = []
+        dialog.accepted_payload.connect(submitted.append)
+        dialog._on_save()
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(dialog._saving)
+        dialog.report_save_error("TASK_NAME_CONFLICT")
+        self.assertFalse(dialog._saving)
+        self.assertEqual(dialog.name_edit.text(), "Weekly Report")
 
     def test_task_run_dialog_builds_schema_validated_inputs_and_overrides(self):
         dialog = TaskRunDialog(

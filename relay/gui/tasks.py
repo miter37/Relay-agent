@@ -9,6 +9,7 @@ widgets never delete or rerun a Task silently.
 from __future__ import annotations
 
 import json
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -36,6 +37,7 @@ from ..task_inputs import compile_definitions, extract_definitions, normalize_de
 from .design_html import kv_row, td, th_row
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .scroll_state import preserve_scroll, set_html, set_plain_text
 
 _WORKER_CHOICES: tuple[str, ...] = ("auto", "claude", "codex", "antigravity")
 _RESULT_FORMATS: tuple[str, ...] = ("json", "txt")
@@ -210,11 +212,12 @@ class InputDefinitionsEditor(QWidget):
         return json.dumps(compile_definitions(self.definitions), ensure_ascii=False) if self.definitions else None
 
     def _render(self) -> None:
-        self.list.clear()
-        for item in self.definitions:
-            self.list.addItem(
-                f"{item['name']} · {item['value_type']} · {item['cardinality']} · {'required' if item['required'] else 'optional'}"
-            )
+        with preserve_scroll(self.list):
+            self.list.clear()
+            for item in self.definitions:
+                self.list.addItem(
+                    f"{item['name']} · {item['value_type']} · {item['cardinality']} · {'required' if item['required'] else 'optional'}"
+                )
 
     def _add(self) -> None:
         dialog = InputDefinitionDialog(parent=self)
@@ -301,7 +304,7 @@ class TaskListView(QWidget):
         # fills the column instead of both sharing it.
         layout.addWidget(self.empty_label, 1)
         self.list_widget = QListWidget()
-        self.list_widget.itemActivated.connect(self._item_activated)
+        self.list_widget.currentItemChanged.connect(self._item_changed)
         layout.addWidget(self.list_widget, 1)
 
     def set_tasks(self, tasks: list[dict]) -> None:
@@ -314,6 +317,10 @@ class TaskListView(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def _rerender(self) -> None:
+        with preserve_scroll(self.list_widget):
+            self._rerender_content()
+
+    def _rerender_content(self) -> None:
         query = self.search_edit.text().strip().casefold()
         self.list_widget.clear()
         visible = 0
@@ -351,12 +358,17 @@ class TaskListView(QWidget):
         if task_id:
             self.select_task_requested.emit(str(task_id))
 
+    def _item_changed(self, item: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        if item is not None:
+            self._item_activated(item)
+
 
 class TaskDetailView(QWidget):
     edit_requested = Signal(str)
     delete_requested = Signal(str)
     run_requested = Signal(str)
     refresh_requested = Signal(str)
+    run_link_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -394,6 +406,8 @@ class TaskDetailView(QWidget):
         self.instructions_browser = QTextBrowser()
         self.policy_browser = QTextBrowser()
         self.run_browser = QTextBrowser()
+        self.run_browser.setOpenLinks(False)
+        self.run_browser.anchorClicked.connect(self._on_run_link)
         self.tabs.addTab(self.overview_browser, "Overview")
         self.tabs.addTab(self.instructions_browser, "Instructions")
         self.tabs.addTab(self.policy_browser, "Policies")
@@ -409,7 +423,8 @@ class TaskDetailView(QWidget):
         self.status_label.setText(f"v{int(task.get('version') or 1)} · {task.get('default_worker') or 'auto'}")
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(self.task_id is not None)
-        self.overview_browser.setHtml(
+        set_html(
+            self.overview_browser,
             _format_fields(
                 {
                     "Task ID": task.get("task_id"),
@@ -424,45 +439,61 @@ class TaskDetailView(QWidget):
                     "Updated": task.get("updated_at"),
                     "Created": task.get("created_at"),
                 }
-            )
+            ),
         )
-        self.instructions_browser.setPlainText(str(task.get("instructions") or ""))
-        self.policy_browser.setHtml(
+        set_plain_text(self.instructions_browser, str(task.get("instructions") or ""))
+        set_html(
+            self.policy_browser,
             _format_fields(
                 {
                     "Input schema": task.get("input_schema"),
                     "Output contract": task.get("output_contract"),
                     "Validation policy": task.get("validation_policy"),
                 }
-            )
+            ),
         )
-        self.run_browser.setHtml(self._format_runs(runs or []))
+        set_html(self.run_browser, self._format_runs(runs or []))
 
     def clear(self) -> None:
         self.task_id = None
         self.title_label.setText("Task")
         self.status_label.setText("")
-        self.overview_browser.setHtml("<p>No Task selected. Choose a Task from the list.</p>")
-        self.instructions_browser.clear()
-        self.policy_browser.clear()
-        self.run_browser.setHtml("<p>No Runs are available until a Task is selected.</p>")
+        set_html(self.overview_browser, "<p>No Task selected. Choose a Task from the list.</p>")
+        with preserve_scroll(self.instructions_browser):
+            self.instructions_browser.clear()
+        with preserve_scroll(self.policy_browser):
+            self.policy_browser.clear()
+        set_html(self.run_browser, "<p>No Runs are available until a Task is selected.</p>")
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(False)
 
     def set_runs(self, runs) -> None:
-        self.run_browser.setHtml(self._format_runs(runs))
+        set_html(self.run_browser, self._format_runs(runs))
 
     @staticmethod
     def _format_runs(runs) -> str:
         if not runs:
             return "<i>No Runs recorded for this Task yet.</i>"
         rows = "".join(
-            f"<tr>{td(run.get('task_run_id') or run.get('job_id') or run.get('run_id') or '—')}"
+            f"<tr>{td(TaskDetailView._run_link(run))}"
             f"{td(run.get('status') or '—')}{td(run.get('completed_at') or run.get('created_at') or '—')}"
             f"{td(run.get('actual_worker') or run.get('requested_worker') or '—')}</tr>"
             for run in runs
         )
         return f"<table>{th_row(['Run', 'Status', 'When', 'Worker'])}{rows}</table>"
+
+    @staticmethod
+    def _run_link(run) -> str:
+        run_id = str(run.get("task_run_id") or run.get("job_id") or run.get("run_id") or "—")
+        if run_id == "—":
+            return escape(run_id)
+        return f'<a href="relay://task-run/{escape(run_id)}">{escape(run_id)}</a>'
+
+    def _on_run_link(self, url) -> None:
+        if url.scheme() == "relay" and url.host() == "task-run":
+            run_id = url.path().lstrip("/")
+            if run_id:
+                self.run_link_requested.emit(run_id)
 
     def _on_refresh(self) -> None:
         if self.task_id:
@@ -493,6 +524,7 @@ class TaskEditorDialog(QDialog):
         # of one long stack so Instructions isn't left with whatever is left over.
         self.resize(920, 720)
         self._task_id = str(task.get("task_id") or "") if task else ""
+        self._saving = False
 
         root = QVBoxLayout(self)
         fields_row = QHBoxLayout()
@@ -579,12 +611,28 @@ class TaskEditorDialog(QDialog):
         root.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+        self.buttons = buttons
+        self.save_button = buttons.button(QDialogButtonBox.Save)
+        self.cancel_button = buttons.button(QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
         if task:
             self._populate(task)
+
+    def set_saving(self, saving: bool) -> None:
+        self._saving = saving
+        self.save_button.setEnabled(not saving)
+        self.save_button.setText("Saving..." if saving else "Save")
+        self.cancel_button.setEnabled(not saving)
+
+    def report_save_error(self, message: str) -> None:
+        self.set_saving(False)
+        self.show_error(message)
+
+    def close_after_save(self) -> None:
+        self.accept()
 
     def show_error(self, message: str) -> None:
         self.error_label.setText(message)
@@ -621,13 +669,16 @@ class TaskEditorDialog(QDialog):
         self.review_max_reruns_spin.setValue(int(review.get("max_reruns") or 0))
 
     def _on_save(self) -> None:
+        if self._saving:
+            return
         try:
             payload = self.payload()
         except ValueError as exc:
             self.show_error(str(exc))
             return
+        self.show_error("")
+        self.set_saving(True)
         self.accepted_payload.emit(payload)
-        self.accept()
 
     def payload(self) -> dict:
         name = self.name_edit.text().strip()

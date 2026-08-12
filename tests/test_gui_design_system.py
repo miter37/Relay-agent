@@ -38,6 +38,8 @@ class DesignSystemTests(unittest.TestCase):
         self.assertEqual(badge.property("state"), "running")
         self.assertEqual(badge.styleSheet(), "")
         self.assertIn('QLabel#statusBadge[state="running"]', application_stylesheet())
+        self.assertEqual(status_presentation("awaiting_review").state, "needs_review")
+        self.assertEqual(status_presentation("awaiting_review").label, "Needs review")
         self.assertEqual(status_presentation("unknown").label, "Unavailable")
 
     def test_accent_relay_is_reserved_and_distinct_from_the_interactive_accent(self):

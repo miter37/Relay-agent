@@ -1,27 +1,29 @@
 from __future__ import annotations
 
-import json
 from html import escape
 
-from PySide6.QtCore import Signal
-from PySide6.QtGui import QTextCursor
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QTabWidget,
     QTextBrowser,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from .artifacts import ArtifactExplorerView, ArtifactGroup, ArtifactRecord
-from .design_html import kv_row
 from .design_tokens import COLORS, status_presentation
 from .design_typography import apply_type
 from .design_widgets import IconButton, StatusBadge
+from .json_display import render_json_html
+from .scroll_state import set_html, set_markdown
 
 
 class TaskRunDetailView(QWidget):
@@ -36,8 +38,20 @@ class TaskRunDetailView(QWidget):
     artifact_open_requested = Signal(str)
     artifact_folder_requested = Signal(str)
     log_options_changed = Signal()
+    review_confirm_requested = Signal(str)
+    review_rerun_requested = Signal(str, str)
+    review_reject_requested = Signal(str, str)
 
     TAB_NAMES = ("Overview", "Task", "Inputs", "Progress", "Answer", "Artifacts", "Logs", "Events")
+
+    _OVERVIEW_LABEL_STYLE = (
+        f"padding:6px 18px 6px 0; color:{COLORS['text.muted']}; "
+        "font-size:11px; font-weight:600; vertical-align:top; width:150px;"
+    )
+    _OVERVIEW_VALUE_STYLE = (
+        f"padding:6px 0; color:{COLORS['text.primary']}; vertical-align:top; "
+        "word-wrap:break-word;"
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,6 +80,21 @@ class TaskRunDetailView(QWidget):
         self.open_folder_button.clicked.connect(self._open_folder)
         header.addWidget(self.open_folder_button)
         layout.addLayout(header)
+        self.review_action_row = QHBoxLayout()
+        self.review_action_label = QLabel("")
+        self.review_action_label.setObjectName("mutedText")
+        self.review_action_row.addWidget(self.review_action_label, 1)
+        self.review_confirm_button = IconButton("check-circle", "Confirm review", tone="accent")
+        self.review_confirm_button.clicked.connect(self._emit_review_confirm)
+        self.review_rerun_button = IconButton("rerun", "Rerun with feedback")
+        self.review_rerun_button.clicked.connect(self._emit_review_rerun)
+        self.review_reject_button = IconButton("x-circle", "Reject review", tone="danger")
+        self.review_reject_button.clicked.connect(self._emit_review_reject)
+        for button in (self.review_confirm_button, self.review_rerun_button, self.review_reject_button):
+            self.review_action_row.addWidget(button)
+        layout.addLayout(self.review_action_row)
+        self._review_id: str | None = None
+        self._review_action_pending = False
         log_controls = QHBoxLayout()
         log_controls.addWidget(QLabel("Logs:"))
         self.attempt_combo = QComboBox()
@@ -89,6 +118,8 @@ class TaskRunDetailView(QWidget):
         layout.addLayout(log_controls)
         self.tabs = QTabWidget()
         self._browsers: dict[str, QTextBrowser] = {}
+        self._content_cache: dict[str, str] = {}
+        self._deferred_content: dict[str, str] = {}
         self.artifacts_view = ArtifactExplorerView()
         self.artifacts_view.preview_requested.connect(self.artifact_preview_requested.emit)
         self.artifacts_view.open_file_requested.connect(self.artifact_open_requested.emit)
@@ -102,6 +133,12 @@ class TaskRunDetailView(QWidget):
             browser = QTextBrowser()
             browser.setObjectName("evidencePane")
             browser.setOpenExternalLinks(False)
+            browser.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+            browser.selectionChanged.connect(lambda name=name: self._flush_deferred_content(name))
+            if name == "Overview":
+                browser.setLineWrapMode(QTextEdit.WidgetWidth)
+                browser.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+                browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self._browsers[name] = browser
             if name == "Answer":
                 answer_page = QWidget()
@@ -135,10 +172,15 @@ class TaskRunDetailView(QWidget):
         ):
             button.setVisible(False)
         self.set_answer(None)
+        self._set_review_action_state(False)
 
     def set_job(self, job: dict) -> None:
         job_id = str(job.get("task_run_id") or job.get("job_id") or "")
         if job_id != self.job_id:
+            self._content_cache.clear()
+            self._deferred_content.clear()
+            for browser in self._browsers.values():
+                browser.clear()
             self.set_answer(None)
             self.set_content("Logs", "")
             self._result_artifact = None
@@ -183,6 +225,7 @@ class TaskRunDetailView(QWidget):
         self.attempt_combo.blockSignals(False)
         self.open_log_button.setEnabled(self.attempt_combo.count() > 0)
         self._update_log_controls()
+        self._render_review_actions(job)
         fields = (
             ("Status", job.get("status")),
             ("Registered name", job.get("title")),
@@ -203,12 +246,16 @@ class TaskRunDetailView(QWidget):
         task_text = str(request.get("task") or job.get("task_text") or job.get("task_preview") or "").strip()
         self.task_text = task_text
         request_preview = job.get("task_preview") or task_text
+        overview_rows = "".join(self._overview_row(key, value or "—") for key, value in fields)
+        requested_task = escape(str(request_preview or "Task details are unavailable.")).replace("\n", "<br>")
         self.set_content(
             "Overview",
-            "<table>{}</table>{}".format(
-                "".join(kv_row(key, value or "—") for key, value in fields),
-                f"<p><b>Requested task</b></p><pre>{escape(str(request_preview or 'Task details are unavailable.'))}</pre>",
-            ),
+            f'<table style="width:100%; border-collapse:collapse;">{overview_rows}</table>'
+            f'<div style="margin-top:14px; padding-top:10px; border-top:1px solid {COLORS["border.subtle"]};">'
+            f'<p style="margin:0 0 6px 0; color:{COLORS["text.secondary"]}; font-size:11px; font-weight:600;">'
+            f"Requested task</p>"
+            f'<div style="color:{COLORS["text.primary"]}; white-space:pre-wrap; word-wrap:break-word;">'
+            f"{requested_task}</div></div>",
         )
         self.set_content("Task", escape(str(task_text or "Task details are hidden by your history settings.")))
         task_inputs = job.get("task_inputs") or {}
@@ -260,9 +307,7 @@ class TaskRunDetailView(QWidget):
 
     def set_artifact_rows(self, artifacts: list[dict] | None) -> None:
         self._file_artifacts = [
-            ArtifactRecord.from_mapping(item, is_primary=False)
-            for item in (artifacts or [])
-            if isinstance(item, dict)
+            ArtifactRecord.from_mapping(item, is_primary=False) for item in (artifacts or []) if isinstance(item, dict)
         ]
         self._refresh_artifacts()
 
@@ -297,24 +342,113 @@ class TaskRunDetailView(QWidget):
             groups.append(ArtifactGroup("Files", tuple(self._file_artifacts)))
         self.artifacts_view.set_groups(groups, auto_select_primary=True)
 
+    def _render_review_actions(self, job: dict) -> None:
+        review = job.get("review") or {}
+        data = review.get("review") if isinstance(review.get("review"), dict) else review
+        status = str(data.get("status") or job.get("review_status") or "")
+        self._review_id = str(data.get("review_id") or review.get("review_id") or "") or None
+        pending = bool(self._review_id and status in {"pending_human", "needs_human", "delivery_failed"})
+        if pending:
+            self.review_action_label.setText(
+                f"Needs review · reruns {data.get('reruns_used', 0)}/{data.get('max_reruns', 0)} · "
+                f"{data.get('reviewer') or 'human'}"
+            )
+            self.review_action_label.setToolTip(str(data.get("guidelines") or "No additional review guidelines."))
+        else:
+            self.review_action_label.clear()
+        self._set_review_action_state(pending)
+
+    def _set_review_action_state(self, enabled: bool) -> None:
+        visible = bool(enabled and self._review_id)
+        busy = self._review_action_pending
+        self.review_action_label.setVisible(visible)
+        for button in (self.review_confirm_button, self.review_rerun_button, self.review_reject_button):
+            button.setVisible(visible)
+            button.setEnabled(visible and not busy)
+
+    def set_review_action_pending(self, pending: bool, review_id: str | None = None) -> None:
+        if review_id and self._review_id and review_id != self._review_id:
+            return
+        self._review_action_pending = pending
+        self._set_review_action_state(bool(self._review_id))
+
+    def review_action_completed(self, review_id: str) -> None:
+        if review_id and review_id == self._review_id:
+            self._review_id = None
+        self._review_action_pending = False
+        self._set_review_action_state(False)
+
+    def _emit_review_confirm(self) -> None:
+        if self._review_id:
+            self.set_review_action_pending(True)
+            self.review_confirm_requested.emit(self._review_id)
+
+    def _emit_review_rerun(self) -> None:
+        if not self._review_id:
+            return
+        comment, accepted = QInputDialog.getMultiLineText(
+            self, "Rerun with feedback", "What should change in the next attempt?", ""
+        )
+        if accepted and comment.strip():
+            self.set_review_action_pending(True)
+            self.review_rerun_requested.emit(self._review_id, comment.strip())
+
+    def _emit_review_reject(self) -> None:
+        if not self._review_id:
+            return
+        reason, accepted = QInputDialog.getMultiLineText(self, "Reject review", "Reason", "")
+        if accepted and reason.strip():
+            self.set_review_action_pending(True)
+            self.review_reject_requested.emit(self._review_id, reason.strip())
+
     def set_content(self, tab_name: str, content: str) -> None:
+        self._set_content(tab_name, content, force=False)
+
+    def _set_content(self, tab_name: str, content: str, *, force: bool) -> None:
         browser = self._browsers.get(tab_name)
-        if browser:
+        if not browser:
+            return
+        if not force and self._content_cache.get(tab_name) == content:
+            self._deferred_content.pop(tab_name, None)
+            return
+        if not force and browser.textCursor().hasSelection():
+            self._deferred_content[tab_name] = content
+            return
+        self._deferred_content.pop(tab_name, None)
+        self._content_cache[tab_name] = content
+        bar = browser.verticalScrollBar()
+        follow_tail = tab_name == "Logs" and self.auto_scroll_check.isChecked() and bar.value() >= bar.maximum() - 2
+        if follow_tail:
             browser.setHtml(content)
-            if tab_name == "Logs" and self.auto_scroll_check.isChecked():
-                browser.moveCursor(QTextCursor.End)
+            browser.moveCursor(QTextCursor.End)
+        else:
+            set_html(browser, content)
+
+    def _flush_deferred_content(self, tab_name: str) -> None:
+        browser = self._browsers.get(tab_name)
+        content = self._deferred_content.get(tab_name)
+        if browser is None or content is None or browser.textCursor().hasSelection():
+            return
+        self._set_content(tab_name, content, force=True)
 
     def set_answer(self, answer: str | None) -> None:
         self.answer_text = answer if isinstance(answer, str) else ""
         self.copy_answer_button.setEnabled(bool(self.answer_text))
         if self.answer_text:
-            self.answer_browser.setMarkdown(self.answer_text)
+            set_markdown(self.answer_browser, self.answer_text)
         else:
-            self.answer_browser.setHtml("<i>No answer is available for this result.</i>")
+            set_html(self.answer_browser, "<i>No answer is available for this result.</i>")
 
     @staticmethod
     def _format_json(value) -> str:
-        return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
+        return render_json_html(value)
+
+    @classmethod
+    def _overview_row(cls, label: str, value: object) -> str:
+        return (
+            f'<tr><td style="{cls._OVERVIEW_LABEL_STYLE}">{escape(str(label))}</td>'
+            f'<td style="{cls._OVERVIEW_VALUE_STYLE}">{escape(str(value))}</td></tr>'
+        )
 
     def _cancel(self) -> None:
         if self.job_id:
