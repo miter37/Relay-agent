@@ -1,3 +1,4 @@
+- [x] 2026-08-12 Relay Home reset: registered Tasks/Projects, Task/Project Run history, Artifacts, lineage, logs, requests, workspaces, results, reviews, schedules, and routines were cleared. Config, Worker definitions, authentication/runtime token, and capability audit history were preserved.
 - [x] Project Run Workspace is integrated as the default detail surface: selected Runs use the full detail width, with inline stage summary, shared Artifact preview, Review Panel, and a preserved return path to the catalog.
 - [x] Workspace review actions use the existing daemon/API contract; artifact detail/content responses are mirrored into Workspace and legacy Artifacts views; 91 Project Run/Review GUI tests pass.
 - [x] GUI catalog selection is consistent: Task/Project/Routine lists now select on current-item change, matching Run behavior for mouse and keyboard navigation.

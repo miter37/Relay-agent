@@ -10,6 +10,7 @@
 - 2026-08-12 08:52 | Fixed app-wide scroll resets during polling/re-rendering across runs, projects, tasks, routines, reviews, schedules, artifacts, pipeline, tables, and event views; 122 focused GUI tests pass.
 - 2026-08-12 08:36 | Improved Artifact JSON hierarchy by removing array counts and preserving preview scroll position across refreshes; 127 related GUI tests pass.
 - 2026-08-12 08:30 | Fixed Artifact Explorer selection reset, added safe external-link labels, PDF memory loading, path fallback, and double-click file opening; 125 related GUI tests pass.
+- 2026-08-12 23:15 | Reset Relay Home execution data: cleared Tasks, Projects, Task/Project Runs, Artifacts, lineage, outputs, workspaces, requests, reviews, schedules, and routines while preserving config and Worker audits.
 - 2026-08-12 02:18 | Unified Artifact Explorer across Task Run, Project Run, and Reviews with safe format previews, path actions, review-scoped candidate reads, and 837-test verification.
 - 2026-08-11 21:15 | Reframed GitHub README and package metadata around Relay's durable Task→Project→Artifact→review workflow; synchronized repository description and discovery topics.
 - 2026-08-11 19:58 | Fixed Project Orchestrator review config invocation and added regression coverage; live run recovered after worker re-verification and reached human review at positioning.
