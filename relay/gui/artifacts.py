@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPixmap
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
@@ -32,13 +32,13 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextBrowser,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from .design_icons import icon
 from .design_typography import apply_type, font_for
 from .design_widgets import SectionHeader
 from .json_display import render_json_report_html
@@ -94,6 +94,9 @@ MAX_TABLE_COLUMNS = 100
 MAX_ARCHIVE_ENTRIES = 2_000
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_PDF_BYTES = 100 * 1024 * 1024
+MAX_SVG_BYTES = 10 * 1024 * 1024
+SVG_PREVIEW_WIDTH = 1000
+SVG_PREVIEW_HEIGHT = 700
 JSON_REPORT_STYLE_SHEET = """
 body, div, span {
     font-size: 13px;
@@ -142,6 +145,17 @@ def _artifact_status_state(status: str) -> str:
     if normalized in {"superseded", "archived"}:
         return "muted"
     return "muted"
+
+
+def _artifact_status_icon(status: str) -> tuple[str, str, str]:
+    state = _artifact_status_state(status)
+    if state == "completed":
+        return "check-circle", "success", "Ready"
+    if state == "candidate":
+        return "info", "warning", "Needs review"
+    if state == "failed":
+        return "alert-triangle", "danger", "Failed"
+    return "dot", "muted", str(status or "Unavailable").replace("_", " ").title()
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,17 +471,6 @@ class ArtifactExplorerView(QWidget):
         self.status_label.setObjectName("artifactStatus")
         apply_type(self.status_label, "overline")
         header.addWidget(self.status_label)
-        self.details_button = QToolButton()
-        self.details_button.setText("Details")
-        self.details_button.setCheckable(True)
-        self.details_button.setToolTip("Show Artifact path and metadata")
-        self.details_button.setAccessibleName("Show Artifact details")
-        self.details_button.toggled.connect(self._toggle_details)
-        header.addWidget(self.details_button)
-        self.raw_button = QPushButton("Raw")
-        self.raw_button.setToolTip("Show the unformatted text returned for this Artifact")
-        self.raw_button.clicked.connect(self._show_raw)
-        header.addWidget(self.raw_button)
         self.json_mode_button = QPushButton("Text view")
         self.json_mode_button.setObjectName("jsonModeToggle")
         self.json_mode_button.setCheckable(True)
@@ -502,11 +505,6 @@ class ArtifactExplorerView(QWidget):
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(True)
         metadata_layout.addWidget(self.path_label)
-        self.metadata_label = QLabel("")
-        self.metadata_label.setObjectName("mutedText")
-        self.metadata_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.metadata_label.setWordWrap(True)
-        metadata_layout.addWidget(self.metadata_label)
         detail_layout.addWidget(self.metadata_panel)
 
         self.preview_stack = QStackedWidget()
@@ -535,7 +533,6 @@ class ArtifactExplorerView(QWidget):
         self.json_lines_preview.setHeaderLabels(["Row", "Value"])
         self.table_preview = QTableWidget()
         self.text_preview = _SafeTextBrowser()
-        self.raw_preview = _SafeTextBrowser()
         self.image_preview = QLabel("Image preview unavailable.")
         self.image_preview.setAlignment(Qt.AlignCenter)
         self.svg_preview = QLabel("SVG preview unavailable.")
@@ -553,7 +550,6 @@ class ArtifactExplorerView(QWidget):
             self.json_lines_preview,
             self.table_preview,
             self.text_preview,
-            self.raw_preview,
             self.image_preview,
             self.svg_preview,
             self.pdf_view,
@@ -562,11 +558,8 @@ class ArtifactExplorerView(QWidget):
             self.preview_stack.addWidget(widget)
         detail_layout.addWidget(self.preview_stack, 1)
         root.addWidget(detail, 1)
-        self._raw_text = ""
         self._json_view_mode = "outline"
         self._json_value: Any | None = None
-        self._details_expanded = False
-        self.raw_button.setEnabled(False)
         self._set_json_mode_available(False)
         self._show_empty()
 
@@ -770,21 +763,18 @@ class ArtifactExplorerView(QWidget):
         self.preview_header.setText(f"{record.role} · {record.name or record.relative_path or record.artifact_uid}")
         self.format_label.setText(_artifact_kind_label(record))
         self.status_label.setProperty("state", _artifact_status_state(record.publication_status))
-        self.status_label.setText(record.publication_status.replace("_", " ").title())
+        status_icon, status_tone, status_description = _artifact_status_icon(record.publication_status)
+        self.status_label.setText("")
+        self.status_label.setPixmap(icon(status_icon, status_tone).pixmap(16, 16))
+        self.status_label.setToolTip(status_description)
+        self.status_label.setAccessibleName(status_description)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
         self.path_label.setText(record.final_path or "Full path unavailable")
-        size = "—" if record.size is None else f"{record.size} bytes"
-        self.metadata_label.setText(
-            f"Status: {record.publication_status} · MIME: {record.mime_type or 'unknown'} · "
-            f"Size: {size} · SHA-256: {record.sha256 or '—'}"
-        )
         self.open_file_button.setEnabled(bool(record.final_path))
         self.open_folder_button.setEnabled(bool(record.final_path))
         self.copy_path_button.setEnabled(bool(record.final_path))
-        self.raw_button.setEnabled(False)
         self._set_json_mode_available(False)
-        self._raw_text = ""
         kind = artifact_kind(record)
         cached = self._content_by_uid.get(record.artifact_uid)
         if cached and cached.get("error"):
@@ -812,11 +802,6 @@ class ArtifactExplorerView(QWidget):
             self.preview_stack.setCurrentWidget(self.metadata_preview)
             return
         text = str(cached.get("text") or "")
-        self._raw_text = text
-        set_plain_text(self.raw_preview, text)
-        self.raw_button.setEnabled(True)
-        if bool(cached.get("truncated")):
-            self.metadata_label.setText(self.metadata_label.text() + " · Preview truncated")
         if kind == "json":
             self._render_json(text)
         elif kind == "json_lines":
@@ -839,27 +824,11 @@ class ArtifactExplorerView(QWidget):
         self.format_label.clear()
         self.status_label.clear()
         self.path_label.clear()
-        self.metadata_label.clear()
-        self.details_button.setChecked(False)
         self.open_file_button.setEnabled(False)
         self.open_folder_button.setEnabled(False)
         self.copy_path_button.setEnabled(False)
-        self.raw_button.setEnabled(False)
         self._set_json_mode_available(False)
-        self._raw_text = ""
         self.preview_stack.setCurrentWidget(self.empty_preview)
-
-    def _toggle_details(self, expanded: bool) -> None:
-        self._details_expanded = expanded
-        self.metadata_panel.setVisible(expanded)
-        self.details_button.setText("Hide details" if expanded else "Details")
-        self.details_button.setToolTip(
-            "Hide Artifact path and metadata" if expanded else "Show Artifact path and metadata"
-        )
-
-    def _show_raw(self) -> None:
-        if self._raw_text:
-            self.preview_stack.setCurrentWidget(self.raw_preview)
 
     def _set_json_mode_available(self, available: bool) -> None:
         self.json_mode_button.blockSignals(True)
@@ -1001,8 +970,27 @@ class ArtifactExplorerView(QWidget):
             self.preview_stack.setCurrentWidget(self.image_preview)
             return
         if kind == "svg":
-            raw = path.read_bytes()[:MAX_TEXT_BYTES]
-            if b"<script" in raw.casefold() or b"<image" in raw.casefold() or b"<foreignobject" in raw.casefold():
+            try:
+                svg_size = path.stat().st_size
+                raw = path.read_bytes() if svg_size <= MAX_SVG_BYTES else b""
+            except OSError:
+                svg_size = -1
+                raw = b""
+            if svg_size > MAX_SVG_BYTES:
+                self.metadata_preview.setText(
+                    "SVG is too large for an in-app preview.\n\n"
+                    f"Path: {record.final_path}"
+                )
+                self.preview_stack.setCurrentWidget(self.metadata_preview)
+                return
+            if not raw:
+                self.metadata_preview.setText(
+                    f"SVG preview is unavailable for this file.\n\nPath: {record.final_path}"
+                )
+                self.preview_stack.setCurrentWidget(self.metadata_preview)
+                return
+            lowered = raw.lower()
+            if b"<script" in lowered or b"<image" in lowered or b"<foreignobject" in lowered:
                 self.metadata_preview.setText(
                     "SVG preview is blocked because it references active or external content.\n\n"
                     f"Path: {record.final_path}"
@@ -1010,12 +998,35 @@ class ArtifactExplorerView(QWidget):
                 self.preview_stack.setCurrentWidget(self.metadata_preview)
                 return
             renderer = QSvgRenderer(QByteArray(raw))
-            image = QImage(1000, 700, QImage.Format_ARGB32)
+            if not renderer.isValid():
+                self.metadata_preview.setText(
+                    "SVG preview is unavailable because the SVG is invalid or uses unsupported content.\n\n"
+                    f"Path: {record.final_path}"
+                )
+                self.preview_stack.setCurrentWidget(self.metadata_preview)
+                return
+            view_box = renderer.viewBoxF()
+            if not view_box.isValid() or view_box.width() <= 0 or view_box.height() <= 0:
+                default_size = renderer.defaultSize()
+                view_width = max(1, default_size.width())
+                view_height = max(1, default_size.height())
+            else:
+                view_width = view_box.width()
+                view_height = view_box.height()
+            aspect_ratio = view_width / view_height
+            image_width = SVG_PREVIEW_WIDTH
+            image_height = max(1, round(image_width / aspect_ratio))
+            if image_height > SVG_PREVIEW_HEIGHT:
+                image_height = SVG_PREVIEW_HEIGHT
+                image_width = max(1, round(image_height * aspect_ratio))
+            image = QImage(image_width, image_height, QImage.Format_ARGB32_Premultiplied)
             image.fill(Qt.transparent)
             painter = QPainter(image)
-            renderer.render(painter)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            renderer.render(painter, QRectF(0, 0, image_width, image_height))
             painter.end()
-            if renderer.isValid():
+            if not image.isNull():
                 self.svg_preview.setPixmap(QPixmap.fromImage(image))
                 self.preview_stack.setCurrentWidget(self.svg_preview)
             else:

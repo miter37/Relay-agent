@@ -54,6 +54,15 @@ class G1GuiTests(unittest.TestCase):
         self.assertIs(self.window.runs_view.detail, self.window.job_detail_view)
         self.assertIs(self.window.detail_stack.currentWidget(), self.window.runs_view)
 
+    def test_global_navigation_is_top_aligned_and_content_uses_full_splitter(self):
+        self.assertFalse(self.window.sidebar.isVisible())
+        self.assertEqual(self.window.splitter.count(), 1)
+        self.assertFalse(self.window.page_title_label.isVisible())
+        self.assertEqual(self.window.runs_button.property("placement"), "top")
+        self.assertEqual(self.window.settings_button.property("placement"), "top")
+        self.assertEqual(self.window.schedules_button.property("placement"), "top")
+        self.assertIs(self.window.navigation_scroll.widget(), self.window.navigation_host)
+
     def test_health_status_is_visible_and_uses_manual_refresh(self):
         self.window._set_connection(
             "normal",

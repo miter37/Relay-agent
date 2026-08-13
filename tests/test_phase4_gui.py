@@ -127,6 +127,47 @@ class ProjectsWidgetTests(unittest.TestCase):
         self.assertEqual(payload["connections"][0]["from_node"], "collect")
         self.assertEqual(payload["output_selection"][0]["role"], "final")
 
+    def test_declared_tasks_use_named_output_and_input_pickers(self):
+        tasks = [
+            {
+                "name": "Research",
+                "task_id": "research",
+                "output_contract": json.dumps(
+                    {"interface_version": 1, "outputs": [{"role": "report", "produces": ["text/html"]}]}
+                ),
+            },
+            {
+                "name": "Writer",
+                "task_id": "writer",
+                "output_contract": json.dumps(
+                    {"interface_version": 1, "artifact_inputs": [{"name": "research", "accepts": ["text/html"]}]}
+                ),
+            },
+        ]
+        dialog = ProjectEditorDialog(available_tasks=tasks, delivery_roots=[])
+        dialog.name_edit.setText("Pipeline")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 0, 0, "source")
+        _select_task(dialog, 0, "research")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 1, 0, "target")
+        _select_task(dialog, 1, "writer")
+        dialog._on_add_connection()
+        _select_node(dialog.connections_table, 0, 0, "source")
+        _select_node(dialog.connections_table, 0, 2, "target")
+        output = dialog.connections_table.cellWidget(0, 1)
+        artifact_input = dialog.connections_table.cellWidget(0, 3)
+        self.assertIsInstance(output, QComboBox)
+        self.assertIsInstance(artifact_input, QComboBox)
+        output.setCurrentText("report")
+        artifact_input.setCurrentText("research")
+        payload = dialog.payload()
+        self.assertEqual(
+            payload["connections"][0],
+            {"from_node": "source", "from_output": "report", "to_node": "target", "to_input": "research"},
+        )
+        self.assertIn("compatible", dialog.readiness_label.text().casefold())
+
     def test_project_editor_omits_orchestrator_when_never_enabled(self):
         dialog = ProjectEditorDialog(available_tasks=[{"name": "TA", "task_id": "ta"}], delivery_roots=[])
         dialog.name_edit.setText("Solo")
@@ -137,6 +178,19 @@ class ProjectsWidgetTests(unittest.TestCase):
         payload = dialog.payload()
 
         self.assertNotIn("orchestrator", payload)
+
+    def test_project_editor_can_add_a_manual_wait_node_without_a_task(self):
+        dialog = ProjectEditorDialog(available_tasks=[], delivery_roots=[])
+        dialog.name_edit.setText("Pause pipeline")
+        dialog._on_add_node()
+        dialog._set_cell(dialog.nodes_table, 0, 0, "pause")
+        node_type = dialog.nodes_table.cellWidget(0, 4)
+        node_type.setCurrentIndex(node_type.findData("wait_manual"))
+        payload = dialog.payload()
+        self.assertEqual(
+            payload["nodes"],
+            [{"node_id": "pause", "type": "wait", "wait": {"mode": "manual"}}],
+        )
 
     def test_project_editor_orchestrator_round_trip(self):
         dialog = ProjectEditorDialog(available_tasks=[{"name": "TA", "task_id": "ta"}], delivery_roots=[])

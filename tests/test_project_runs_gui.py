@@ -1475,6 +1475,29 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
         self.assertEqual(groups, ["Final Artifacts", "research", "render"])
         self.assertEqual(view._selected_artifact_uid, "a-final")
         self.assertFalse(view.empty_preview.isVisibleTo(view))
+        self.assertEqual(view.artifact_tree.topLevelItem(0).text(1), "")
+        self.assertFalse(view.artifact_tree.topLevelItem(0).icon(1).isNull())
+
+    def test_artifact_sidebar_uses_task_state_icons_instead_of_counts_or_publication_words(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [],
+            {
+                "research": [{"artifact_uid": "a-ok", "relative_path": "notes.md"}],
+                "render": [{"artifact_uid": "a-failed", "relative_path": "image.svg", "publication_status": "published"}],
+            },
+            task_statuses={"research": "completed", "render": "failed"},
+        )
+
+        research = view.artifact_tree.topLevelItem(0)
+        render = view.artifact_tree.topLevelItem(1)
+        self.assertEqual(research.text(1), "")
+        self.assertEqual(render.text(1), "")
+        self.assertFalse(research.icon(1).isNull())
+        self.assertFalse(render.icon(1).isNull())
+        self.assertEqual(render.child(0).text(1), "")
+        self.assertEqual(render.child(0).toolTip(1), "Ready")
 
     def test_json_artifact_renders_as_expandable_structure(self):
         view = ProjectRunArtifactsView()

@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtGui import QImage, QPainter, QPdfWriter
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QPushButton
 except ModuleNotFoundError as exc:  # pragma: no cover - GUI extra is optional
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
@@ -158,7 +158,7 @@ class ArtifactExplorerShellTests(unittest.TestCase):
         self.assertEqual(view.open_file_button.text(), "Open")
         self.assertEqual(folders, [str(Path("/relay") / "review")])
 
-    def test_artifact_surface_surfaces_status_format_and_collapsible_details(self):
+    def test_artifact_surface_keeps_path_visible_without_extra_detail_controls(self):
         view = ArtifactExplorerView()
         view.resize(900, 480)
         view.show()
@@ -186,16 +186,14 @@ class ArtifactExplorerShellTests(unittest.TestCase):
         self.assertEqual(item.text(1), "Candidate")
         self.assertEqual(item.text(2), "HTML · 2.0 KB")
         self.assertEqual(view.format_label.text(), "HTML")
-        self.assertEqual(view.status_label.text(), "Candidate")
-        self.assertFalse(view.details_button.isChecked())
-
-        view.details_button.click()
-        self.assertTrue(view.details_button.isChecked())
+        self.assertEqual(view.status_label.text(), "")
+        self.assertEqual(view.status_label.toolTip(), "Needs review")
         self.assertTrue(view.metadata_panel.isVisible())
         self.assertIn("/relay/review/proposal.html", view.path_label.text())
-
-        view.details_button.click()
-        self.assertFalse(view.metadata_panel.isVisible())
+        button_texts = {button.text() for button in view.findChildren(QPushButton)}
+        self.assertNotIn("Details", button_texts)
+        self.assertNotIn("Hide details", button_texts)
+        self.assertNotIn("Raw", button_texts)
         view.close()
 
     def test_refresh_preserves_selected_artifact_and_cached_preview(self):
@@ -286,7 +284,7 @@ class ArtifactRendererTests(unittest.TestCase):
         view.set_groups([ArtifactGroup("Result", (record,))], auto_select_primary=True)
         return view
 
-    def test_json_renders_as_structure_and_keeps_raw_toggle(self):
+    def test_json_renders_as_structure_without_raw_toggle(self):
         view = self._view("result.json")
         view.cache_content("result.json", {"available": True, "text": '{"headline":"Relay","items":[1,2]}'})
 
@@ -298,7 +296,8 @@ class ArtifactRendererTests(unittest.TestCase):
         self.assertEqual(view.json_mode_button.text(), "Tree view")
         self.assertEqual(view.json_preview.topLevelItem(0).text(0), "headline")
         self.assertGreater(view.json_preview.topLevelItem(1).childCount(), 0)
-        self.assertIn('"headline"', view.raw_preview.toPlainText())
+        button_texts = {button.text() for button in view.findChildren(QPushButton)}
+        self.assertNotIn("Raw", button_texts)
 
     def test_json_arrays_show_children_without_item_count_label(self):
         view = self._view("result.json")
@@ -422,6 +421,22 @@ class ArtifactRendererTests(unittest.TestCase):
         self.assertNotIn("javascript:", rendered)
 
     def test_image_pdf_archive_and_unsupported_have_bounded_preview_states(self):
+        with self.subTest(kind="svg"):
+            svg_path = Path(self.id().replace(".", "_") + ".svg")
+            try:
+                svg_path.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400" '
+                    'viewBox="0 0 800 400"><rect width="800" height="400" fill="#336699"/>'
+                    + (" " * 300_000)
+                    + "</svg>",
+                    encoding="utf-8",
+                )
+                view = self._view("drawing.svg", final_path=str(svg_path))
+                self.assertIs(view.preview_stack.currentWidget(), view.svg_preview)
+                self.assertFalse(view.svg_preview.pixmap().isNull())
+            finally:
+                svg_path.unlink(missing_ok=True)
+
         with self.subTest(kind="image"):
             image_path = Path(self.id().replace(".", "_") + ".png")
             try:

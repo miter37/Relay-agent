@@ -1,3 +1,7 @@
+- 2026-08-13 | Moved global navigation from the left rail into a scrollable top menu, removed the Relay-adjacent page title and routine refresh banners, and gave the detail panel the full width.
+- 2026-08-13 | Project Run Workspace compacted: removed stage card strip, replaced Artifact counts/publication text with semantic state icons, and kept only the selectable path; removed Details and Raw controls.
+- 2026-08-13 | Fixed SVG Artifact preview for large files: read complete bounded SVG content, validate before rendering, preserve aspect ratio, and add regression coverage.
+- 2026-08-13  | Task Interface v1 vertical slices: shared diagnostics, CLI/API authoring, Task/Project pickers, runtime contract checks, health, Wait, and post-review Delivery; 327 impacted tests pass.
 - 2026-08-13 10:48 | Project Runs의 레이아웃 밖에 노출되던 내부 steps_table과 불필요한 가로 스크롤바를 제거; 실제 Qt 화면 확인 및 98 GUI 테스트 통과.
 - 2026-08-13 10:42 | 정렬 기준과 간격을 다듬어 Runs Overview의 Result/See more·메타데이터·Answer·Requested Task를 일관된 좌측선과 색상으로 표시.
 - 2026-08-13 10:40 | Fixed Runs Logs polling: EOF empty chunks no longer clear visible output; new log bytes append and stream/Attempt changes reset the buffer; 213 GUI tests pass.

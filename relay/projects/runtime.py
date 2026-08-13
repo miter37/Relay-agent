@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import threading
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from ..db import Database
@@ -17,7 +20,7 @@ from ..orchestrator.narration import (
 )
 from ..orchestrator.overrides import apply_instruction_addendum, effective_output_role, parse_step_overrides
 from ..orchestrator.supervisor import Supervisor
-from ..util import utc_now
+from ..util import is_within, safe_resolve, utc_now
 from .models import ProjectSpec
 from .service import ProjectService
 
@@ -74,6 +77,33 @@ class ProjectRuntime:
     def wake(self) -> None:
         self._wake.set()
 
+    def continue_wait(self, project_run_id: str, node_id: str) -> dict[str, Any]:
+        step = self.db.get_project_step(project_run_id, node_id)
+        if not step:
+            raise RelayError("PROJECT_NOT_FOUND", f"Step not found: {project_run_id}/{node_id}")
+        if step.get("status") != "waiting":
+            raise RelayError("WAIT_NOT_ACTIVE", f"Wait node is not waiting: {node_id}")
+        run = self.db.get_project_run(project_run_id)
+        if not run:
+            raise RelayError("PROJECT_RUN_NOT_FOUND", f"Project run not found: {project_run_id}")
+        snapshot = json.loads(run["project_snapshot_json"])
+        node = next(
+            (n for n in snapshot.get("project_definition", {}).get("nodes", []) if n.get("node_id") == node_id),
+            None,
+        )
+        if not node or str((node.get("wait") or {}).get("mode") or "").lower() != "manual":
+            raise RelayError("WAIT_NOT_MANUAL", f"Wait node is not a manual wait: {node_id}")
+        self.db.update_project_step(project_run_id, node_id, status="completed", completed_at=utc_now())
+        self.db.append_project_run_event(
+            project_run_id,
+            node_id=node_id,
+            kind="wait_continued",
+            actor="human",
+            summary="Manual wait continued.",
+        )
+        self.wake()
+        return self.db.get_project_step(project_run_id, node_id) or step
+
     def tick_once(self) -> None:
         try:
             self._reconcile_all_runs()
@@ -106,6 +136,14 @@ class ProjectRuntime:
         orchestrator_config = Supervisor.config_from_snapshot(snapshot)
         steps = self.db.list_project_steps(project_run_id)
         step_by_id = {s["node_id"]: s for s in steps}
+        nodes = snapshot.get("project_definition", {}).get("nodes", [])
+        node_by_id = {str(n.get("node_id")): n for n in nodes if isinstance(n, dict)}
+
+        # Waiting is persisted in the step row, so a daemon restart simply
+        # re-evaluates the same deadline or leaves a manual wait available.
+        for step in steps:
+            if step["status"] == "waiting":
+                self._reconcile_wait(project_run_id, step, node_by_id.get(step["node_id"]) or {})
 
         # 1. Reconcile queued/running steps against Task Run status.
         for step in steps:
@@ -141,8 +179,7 @@ class ProjectRuntime:
 
                 artifacts = self.engine.db.artifacts_for_job(task_run_id)
                 # Check if step has a checkpoint
-                nodes = snapshot.get("project_definition", {}).get("nodes", [])
-                node_def = next((n for n in nodes if n["node_id"] == step["node_id"]), None)
+                node_def = node_by_id.get(step["node_id"])
                 has_checkpoint = bool(node_def and node_def.get("checkpoint", {}).get("enabled"))
 
                 if has_checkpoint:
@@ -260,6 +297,36 @@ class ProjectRuntime:
                 return False
         return True
 
+    def _reconcile_wait(self, project_run_id: str, step: dict[str, Any], node: dict[str, Any]) -> None:
+        wait = node.get("wait") if isinstance(node, dict) else None
+        if not isinstance(wait, dict) or str(wait.get("mode") or "").lower() != "duration":
+            return
+        started_at = step.get("started_at")
+        if not started_at:
+            self.db.update_project_step(project_run_id, step["node_id"], started_at=utc_now())
+            return
+        try:
+            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            elapsed = (datetime.now(UTC) - started.astimezone(UTC)).total_seconds()
+        except ValueError:
+            elapsed = 0
+        if elapsed >= int(wait.get("seconds") or 0):
+            self.db.update_project_step(
+                project_run_id,
+                step["node_id"],
+                status="completed",
+                completed_at=utc_now(),
+            )
+            self.db.append_project_run_event(
+                project_run_id,
+                node_id=step["node_id"],
+                kind="wait_completed",
+                actor="runtime",
+                summary=f"Wait completed after {int(wait.get('seconds') or 0)} seconds.",
+            )
+
     def _fail_step(
         self,
         project_run_id: str,
@@ -293,6 +360,28 @@ class ProjectRuntime:
             return
         spec = ProjectSpec.from_dict(project_snapshot["project_definition"])
         orchestrator_config = Supervisor.config_from_snapshot(project_snapshot)
+        node_def = next(
+            (n for n in project_snapshot["project_definition"].get("nodes", []) if n.get("node_id") == node_id),
+            {},
+        )
+        if node_def.get("type") == "wait":
+            self.db.update_project_step(
+                project_run_id,
+                node_id,
+                status="waiting",
+                started_at=utc_now(),
+                completed_at=None,
+            )
+            wait = node_def.get("wait") or {}
+            mode = str(wait.get("mode") or "manual")
+            self.db.append_project_run_event(
+                project_run_id,
+                node_id=node_id,
+                kind="wait_started",
+                actor="runtime",
+                summary="Waiting for manual continue." if mode == "manual" else f"Waiting for {wait.get('seconds')} seconds.",
+            )
+            return
         task_id = step["task_id"]
         task_snapshot = project_snapshot.get("task_snapshots", {}).get(task_id)
         if not task_snapshot:
@@ -481,7 +570,40 @@ class ProjectRuntime:
                 return
             uid = matches[0].get("artifact_uid") or matches[0].get("relative_path")
             final_ids.append({"node_id": node_id, "role": role, "artifact_uid": uid})
-        self._mark_run_completed(project_run_id, steps, final_ids, warnings, orchestrator_config=orchestrator_config)
+        delivery_warnings = self._deliver_final_outputs(project_run_id, spec, final_ids)
+        self._mark_run_completed(
+            project_run_id,
+            steps,
+            final_ids,
+            [*warnings, *delivery_warnings],
+            failed=any(item.get("error") == "DELIVERY_FAILED" for item in delivery_warnings),
+            orchestrator_config=orchestrator_config,
+        )
+
+    def _deliver_final_outputs(
+        self, project_run_id: str, spec: ProjectSpec, final_ids: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if not spec.delivery:
+            return []
+        try:
+            root = safe_resolve(Path(str(spec.delivery["path"]))) / project_run_id
+            root.mkdir(parents=True, exist_ok=True)
+            for selected in final_ids:
+                artifact = self.db.artifact_by_uid(str(selected.get("artifact_uid") or ""))
+                if not artifact:
+                    raise FileNotFoundError(f"Artifact not found: {selected.get('artifact_uid')}")
+                source = safe_resolve(Path(str(artifact["final_path"])))
+                if not source.is_file():
+                    raise FileNotFoundError(str(source))
+                relative = Path(str(artifact.get("relative_path") or source.name))
+                destination = safe_resolve(root / relative)
+                if not is_within(destination, root):
+                    raise ValueError("Artifact path escaped delivery folder")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            return [{"delivery": "delivered", "delivery_path": str(root)}]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return [{"error": "DELIVERY_FAILED", "message": str(exc)}]
 
     def _mark_run_completed(
         self,

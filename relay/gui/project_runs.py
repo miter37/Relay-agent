@@ -54,7 +54,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .artifacts import ArtifactExplorerView, ArtifactGroup, ArtifactRecord
+from .artifacts import (
+    ArtifactExplorerView,
+    ArtifactGroup,
+    ArtifactRecord,
+    _artifact_kind_label,
+    _format_artifact_size,
+)
 from .design_icons import icon
 from .design_tokens import COLORS
 from .design_typography import apply_type
@@ -2210,6 +2216,23 @@ class _LegacyProjectRunArtifactsView(QWidget):
             add_value(self.json_preview, "value", value)
 
 
+def _artifact_state_presentation(status: str) -> tuple[str, str, str]:
+    normalized = str(status or "unavailable").strip().casefold().replace("-", "_").replace(" ", "_")
+    if normalized in {"published", "confirmed", "approved", "complete", "completed", "success", "succeeded"}:
+        return "check-circle", "success", "Ready"
+    if normalized in {"failed", "error", "rejected", "delivery_failed"}:
+        return "alert-triangle", "danger", "Failed"
+    if normalized in {"candidate", "pending_human", "needs_human", "awaiting_review", "needs_review", "evaluating"}:
+        return "info", "warning", "Needs review"
+    if normalized in {"running", "processing"}:
+        return "activity", "accent", "Running"
+    if normalized in {"blocked", "cancelled", "canceled"}:
+        return "x-circle", "muted", "Blocked"
+    if normalized in {"queued", "pending", "not_started"}:
+        return "dot", "warning", "Queued"
+    return "dot", "muted", str(status or "Unavailable").replace("_", " ").title()
+
+
 class ProjectRunArtifactsView(ArtifactExplorerView):
     """Project Run adapter over the shared Artifact Explorer.
 
@@ -2226,6 +2249,9 @@ class ProjectRunArtifactsView(ArtifactExplorerView):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._task_statuses: dict[str, str] = {}
+        self.artifact_tree.setColumnWidth(1, 36)
+        self.artifact_tree.setHeaderLabels(["Artifact", "State", "Format"])
         self.preview_requested.connect(lambda uid, _review_id: self.artifact_preview_requested.emit(uid))
         self.open_file_requested.connect(self._handle_open_file)
         self.open_folder_requested.connect(self.artifact_folder_open_requested.emit)
@@ -2236,8 +2262,10 @@ class ProjectRunArtifactsView(ArtifactExplorerView):
         final_artifacts: list[dict[str, Any]] | None,
         task_artifacts: dict[str, list[dict[str, Any]]] | None,
         review_artifacts: list[dict[str, Any]] | None = None,
+        task_statuses: dict[str, str] | None = None,
     ) -> None:
         self.project_run_id = str(project_run_id or "")
+        self._task_statuses = {str(key): str(value) for key, value in (task_statuses or {}).items()}
         groups: list[ArtifactGroup] = []
         candidate_records = tuple(
             ArtifactRecord.from_mapping(
@@ -2273,6 +2301,67 @@ class ProjectRunArtifactsView(ArtifactExplorerView):
                 groups.append(ArtifactGroup(str(node_id), records))
         merged_groups = [ArtifactGroup(group.label, tuple(ArtifactRecord.merge(group.records))) for group in groups]
         self.set_groups(merged_groups, auto_select_primary=True)
+
+    def _render_tree_content(self) -> None:
+        """Use compact semantic state icons instead of child counts/status jargon."""
+        self.artifact_tree.clear()
+        for group in self._groups:
+            group_status = self._group_status(group)
+            icon_name, tone, label = _artifact_state_presentation(group_status)
+            parent = QTreeWidgetItem([group.label, "", ""])
+            parent.setFlags(Qt.ItemIsEnabled)
+            parent.setIcon(1, icon(icon_name, tone))
+            parent.setToolTip(1, f"{label} · {len(group.records)} Artifact(s)")
+            self.artifact_tree.addTopLevelItem(parent)
+            for record in group.records:
+                status_icon, status_tone, status_label = _artifact_state_presentation(record.publication_status)
+                kind = _artifact_kind_label(record)
+                child = QTreeWidgetItem(
+                    [
+                        f"{'★ ' if record.is_primary else ''}{record.role} · "
+                        f"{record.name or record.relative_path or 'Artifact'}",
+                        "",
+                        f"{kind} · {_format_artifact_size(record.size)}",
+                    ]
+                )
+                child.setData(0, Qt.UserRole, record.artifact_uid)
+                child.setIcon(1, icon(status_icon, status_tone))
+                child.setToolTip(
+                    0,
+                    "\n".join(
+                        item
+                        for item in (
+                            record.relative_path or record.name,
+                            f"Role: {record.role}",
+                            f"State: {status_label}",
+                            f"Format: {kind}",
+                        )
+                        if item
+                    ),
+                )
+                child.setToolTip(1, status_label)
+                child.setToolTip(2, f"{kind} · {_format_artifact_size(record.size)}")
+                parent.addChild(child)
+            parent.setExpanded(True)
+
+    def _group_status(self, group: ArtifactGroup) -> str:
+        if group.label in self._task_statuses:
+            return self._task_statuses[group.label]
+        if group.label.casefold().startswith("review candidate"):
+            return "needs_review"
+        if not group.records:
+            return "unavailable"
+        statuses = [record.publication_status for record in group.records]
+        normalized = {str(status).casefold().replace("-", "_").replace(" ", "_") for status in statuses}
+        if normalized & {"failed", "error", "rejected", "delivery_failed"}:
+            return "failed"
+        if normalized & {"candidate", "pending_human", "needs_human", "awaiting_review", "evaluating"}:
+            return "needs_review"
+        if normalized & {"running", "processing"}:
+            return "running"
+        if normalized <= {"published", "confirmed", "approved", "complete", "completed"}:
+            return "completed"
+        return statuses[0]
 
     def cache_artifact_content(self, artifact_uid: str, content: dict[str, Any]) -> None:
         self.cache_content(artifact_uid, content)
@@ -3316,16 +3405,6 @@ class ProjectRunWorkspaceView(QWidget):
         action_layout.addWidget(self.review_now_button)
         root.addWidget(self.next_action)
 
-        self.stage_scroll = QScrollArea()
-        self.stage_scroll.setWidgetResizable(True)
-        self.stage_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.stage_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.stage_host = QWidget()
-        self.stage_layout = QHBoxLayout(self.stage_host)
-        self.stage_layout.setContentsMargins(2, 4, 2, 8)
-        self.stage_scroll.setWidget(self.stage_host)
-        root.addWidget(self.stage_scroll)
-
         self.surface = QFrame()
         self.surface.setObjectName("artifactMetadata")
         surface_layout = QHBoxLayout(self.surface)
@@ -3460,19 +3539,23 @@ class ProjectRunWorkspaceView(QWidget):
             self.next_action_label.setText("Select a Project Run to see its next action and results.")
             self.review_now_button.setVisible(False)
             self.review_panel.setVisible(False)
-            self._clear_stages()
             self.artifacts_view.set_run(None, [], {}, [])
             return
 
         self.review_now_button.setVisible(False)
         self.review_panel.setVisible(True)
-        self._render_stages()
         review_artifacts = self._review_artifacts(review_details)
+        task_statuses = {
+            str(step.get("node_id") or step.get("task_id") or ""): str(step.get("status") or "pending")
+            for step in (self._run.get("steps") or [])
+            if isinstance(step, dict) and str(step.get("node_id") or step.get("task_id") or "")
+        }
         self.artifacts_view.set_run(
             run_id,
             self._run.get("final_artifact_ids") or [],
             node_artifacts,
             review_artifacts,
+            task_statuses=task_statuses,
         )
         if self._pending_artifact_uid:
             pending_uid = self._pending_artifact_uid
@@ -3551,41 +3634,6 @@ class ProjectRunWorkspaceView(QWidget):
             self.next_action_label.setText("실행 완료 — 최종 Artifact를 확인하거나 Open output으로 결과 폴더를 여세요.")
         else:
             self.next_action_label.setText("이 Run의 상태와 결과물을 확인하세요.")
-
-    def _clear_stages(self) -> None:
-        while self.stage_layout.count():
-            item = self.stage_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-
-    def _render_stages(self) -> None:
-        self._clear_stages()
-        steps = self._run.get("steps") or []
-        if not isinstance(steps, list) or not steps:
-            label = QLabel("No step status available yet")
-            label.setObjectName("mutedText")
-            self.stage_layout.addWidget(label)
-            self.stage_layout.addStretch(1)
-            return
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            node = str(step.get("node_id") or step.get("task_id") or "Step")
-            status = str(step.get("status") or "pending").casefold()
-            frame = QFrame()
-            frame.setObjectName("inlineNotice")
-            frame.setMinimumWidth(125)
-            layout = QVBoxLayout(frame)
-            title = QLabel(node)
-            title.setObjectName("sectionTitle")
-            title.setWordWrap(True)
-            state = QLabel(_workspace_status_text(status))
-            state.setObjectName("mutedText")
-            layout.addWidget(title)
-            layout.addWidget(state)
-            self.stage_layout.addWidget(frame)
-        self.stage_layout.addStretch(1)
 
     def _workspace_review(
         self, review_details: dict[str, dict[str, Any]], preferred_node_id: str | None = None

@@ -117,6 +117,20 @@ class ProjectSpecTests(unittest.TestCase):
         round = ProjectSpec.from_dict(__import__("json").loads(spec.to_snapshot()))
         self.assertEqual(round.topological_order(), ["a", "b"])
 
+    def test_manual_wait_node_does_not_require_a_registered_task(self):
+        spec = ProjectSpec.from_dict(
+            {
+                "name": "pause",
+                "nodes": [{"node_id": "pause", "type": "wait", "wait": {"mode": "manual"}}],
+                "connections": [],
+                "output_selection": [],
+            }
+        )
+        spec.validate(lambda _task: None)
+        round_trip = ProjectSpec.from_dict(__import__("json").loads(spec.to_snapshot()))
+        self.assertEqual(round_trip.nodes[0].node_type, "wait")
+        self.assertEqual(round_trip.nodes[0].wait["mode"], "manual")
+
 
 if __name__ == "__main__":
     unittest.main()

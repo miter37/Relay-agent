@@ -10,6 +10,7 @@ from ..db import Database
 from ..engine import RelayEngine
 from ..errors import RelayError
 from ..orchestrator.overrides import effective_manifest_entries, parse_step_overrides
+from ..task_interface import InterfaceDiagnostic, InterfaceValidationReport, diagnose_project_interfaces
 from ..util import canonical_json, new_job_id, sha256_file, utc_now
 from .models import (
     ProjectSpec,
@@ -33,6 +34,7 @@ class ProjectService:
     def create_project(self, definition: dict[str, Any]) -> dict[str, Any]:
         spec = ProjectSpec.from_dict(definition)
         spec.validate(self._task_snapshot, allow_roots=self._delivery_roots())
+        self._validate_interfaces(definition)
         project_id = new_job_id()
         project_row = {
             "project_id": project_id,
@@ -51,6 +53,7 @@ class ProjectService:
             raise RelayError("PROJECT_NOT_FOUND", f"Project not found: {project_id}")
         spec = ProjectSpec.from_dict(definition)
         spec.validate(self._task_snapshot, allow_roots=self._delivery_roots())
+        self._validate_interfaces(definition)
         snapshot = spec.to_snapshot()
         self.db.update_project(
             project_id,
@@ -84,6 +87,56 @@ class ProjectService:
 
     def _task_snapshot(self, task_id: str) -> dict[str, Any]:
         return self.engine.load_task_for_snapshot(task_id)
+
+    def diagnose_interfaces(self, definition: dict[str, Any]) -> InterfaceValidationReport:
+        """Return the shared, non-mutating interface diagnostics for a Project draft."""
+
+        def lookup(task_id: str) -> dict[str, Any] | None:
+            try:
+                return self._task_snapshot(task_id)
+            except RelayError:
+                return None
+
+        return diagnose_project_interfaces(definition, lookup)
+
+    def validate_project_definition(self, definition: dict[str, Any]) -> InterfaceValidationReport:
+        """Combine structural Project validation with shared interface diagnostics."""
+
+        report = self.diagnose_interfaces(definition)
+        try:
+            spec = ProjectSpec.from_dict(definition)
+            spec.validate(self._task_snapshot, allow_roots=self._delivery_roots())
+        except RelayError as exc:
+            report.diagnostics.insert(
+                0,
+                InterfaceDiagnostic(
+                    code=exc.code,
+                    severity="error",
+                    message=exc.message,
+                    blocking=True,
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            report.diagnostics.insert(
+                0,
+                InterfaceDiagnostic(
+                    code="PROJECT_INVALID",
+                    severity="error",
+                    message=str(exc),
+                    blocking=True,
+                ),
+            )
+        return report
+
+    def _validate_interfaces(self, definition: dict[str, Any]) -> None:
+        report = self.diagnose_interfaces(definition)
+        if report.errors:
+            first = report.errors[0]
+            raise RelayError(
+                "PROJECT_INTERFACE_INVALID",
+                first.message,
+                details=report.to_dict(),
+            )
 
     def _delivery_roots(self) -> list[str]:
         return [str(root) for root in self.engine.config.get("allowed_delivery_roots", [])]
@@ -138,6 +191,8 @@ class ProjectService:
         spec.validate(self._task_snapshot)
         task_snapshots: dict[str, dict[str, Any]] = {}
         for node in spec.nodes:
+            if node.node_type == "wait":
+                continue
             task_snapshots[node.task_id] = self._task_snapshot(node.task_id)
 
         project_run_id = new_job_id()
@@ -236,8 +291,8 @@ class ProjectService:
                 {
                     "project_run_id": project_run_id,
                     "node_id": node.node_id,
-                    "task_id": task_snapshots[node.task_id]["task_id"],
-                    "task_version": task_snapshots[node.task_id]["version"],
+                    "task_id": task_snapshots[node.task_id]["task_id"] if node.node_type != "wait" else "__relay_wait__",
+                    "task_version": task_snapshots[node.task_id]["version"] if node.node_type != "wait" else 1,
                     "status": status,
                     "input_manifest_json": canonical_json(inputs_by_node[node.node_id])
                     if inputs_by_node[node.node_id]

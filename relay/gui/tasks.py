@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -248,6 +249,140 @@ class InputDefinitionsEditor(QWidget):
         self.definitions[index], self.definitions[target] = self.definitions[target], self.definitions[index]
         self._render()
         self.list.setCurrentRow(target)
+
+
+class PortDefinitionDialog(QDialog):
+    """Small, human-readable editor for one Artifact input or Output port."""
+
+    def __init__(self, *, output: bool, definition: dict | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Output" if output and definition else "Add Output" if output else "Edit Artifact input" if definition else "Add Artifact input")
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("report" if output else "research")
+        form.addRow("Output role" if output else "Input name", self.name_edit)
+        self.format_edit = QLineEdit()
+        self.format_edit.setPlaceholderText("Any file, or text/html, application/json")
+        form.addRow("Produces" if output else "Accepts", self.format_edit)
+        self.required = QCheckBox("Required")
+        form.addRow("", self.required)
+        self.cardinality = QComboBox()
+        self.cardinality.addItem("One", "one")
+        self.cardinality.addItem("Many", "many")
+        form.addRow("Cardinality", self.cardinality)
+        self.description = QLineEdit()
+        self.description.setPlaceholderText("Optional short description")
+        form.addRow("Description", self.description)
+        root.addLayout(form)
+        self.error_label = QLabel()
+        self.error_label.setObjectName("errorText")
+        self.error_label.setWordWrap(True)
+        root.addWidget(self.error_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        if definition:
+            self.name_edit.setText(str(definition.get("role" if output else "name") or ""))
+            formats = definition.get("produces" if output else "accepts") or []
+            self.format_edit.setText(", ".join(formats if isinstance(formats, list) else [str(formats)]))
+            self.required.setChecked(bool(definition.get("required")))
+            self.cardinality.setCurrentText("Many" if definition.get("cardinality") == "many" else "One")
+            self.description.setText(str(definition.get("description") or ""))
+
+    def value(self) -> dict:
+        name = self.name_edit.text().strip()
+        if not name:
+            raise ValueError("A name is required.")
+        formats = [item.strip() for item in self.format_edit.text().split(",") if item.strip()]
+        result = {
+            "role" if self._is_output() else "name": name,
+            "required": self.required.isChecked(),
+            "cardinality": self.cardinality.currentData() or "one",
+        }
+        if formats:
+            result["produces" if self._is_output() else "accepts"] = formats
+        if self.description.text().strip():
+            result["description"] = self.description.text().strip()
+        return result
+
+    def _is_output(self) -> bool:
+        return "Output" in self.windowTitle() and "input" not in self.windowTitle()
+
+    def _accept(self) -> None:
+        try:
+            self.value()
+        except ValueError as exc:
+            self.error_label.setText(str(exc))
+            return
+        self.accept()
+
+
+class InterfacePortsEditor(QWidget):
+    """Row editor shared by the Artifact inputs and Outputs sections."""
+
+    def __init__(self, *, output: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.output = output
+        self.ports: list[dict] = []
+        layout = QVBoxLayout(self)
+        self.info = QLabel(
+            "Relay always provides the primary result Output. Add named Outputs when a Project should select them."
+            if output
+            else "Results from another Task or Run arrive here by name; Parameters are separate values."
+        )
+        self.info.setObjectName("mutedText")
+        self.info.setWordWrap(True)
+        layout.addWidget(self.info)
+        self.list = QListWidget()
+        layout.addWidget(self.list)
+        buttons = QHBoxLayout()
+        self.add_button = IconButton("plus", "Add an Output" if output else "Add an Artifact input")
+        self.edit_button = IconButton("pencil", "Edit selected interface port")
+        self.delete_button = IconButton("trash", "Delete selected interface port", tone="danger")
+        for button in (self.add_button, self.edit_button, self.delete_button):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.add_button.clicked.connect(self._add)
+        self.edit_button.clicked.connect(self._edit)
+        self.delete_button.clicked.connect(self._delete)
+
+    def set_ports(self, ports) -> None:
+        self.ports = [dict(item) for item in ports or [] if isinstance(item, dict)]
+        self._render()
+
+    def _render(self) -> None:
+        with preserve_scroll(self.list):
+            self.list.clear()
+            for port in self.ports:
+                key = "role" if self.output else "name"
+                formats = port.get("produces" if self.output else "accepts") or ["Any file"]
+                required = "required" if port.get("required") else "optional"
+                many = " · many" if port.get("cardinality") == "many" else ""
+                self.list.addItem(f"{port.get(key) or 'Unnamed'} · {', '.join(formats)} · {required}{many}")
+
+    def _add(self) -> None:
+        dialog = PortDefinitionDialog(output=self.output, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.ports.append(dialog.value())
+            self._render()
+
+    def _edit(self) -> None:
+        index = self.list.currentRow()
+        if index < 0:
+            return
+        dialog = PortDefinitionDialog(output=self.output, definition=self.ports[index], parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.ports[index] = dialog.value()
+            self._render()
+
+    def _delete(self) -> None:
+        index = self.list.currentRow()
+        if index >= 0:
+            self.ports.pop(index)
+            self._render()
 
 
 def _format_fields(payload: dict) -> str:
@@ -567,10 +702,10 @@ class TaskEditorDialog(QDialog):
         right_form.addRow("Validation policy", self.validation_policy_edit)
 
         self.output_contract_edit = QTextEdit()
-        self.output_contract_edit.setPlaceholderText("Optional JSON describing the expected output shape")
+        self.output_contract_edit.setPlaceholderText("Legacy or advanced JSON; normal editing uses the Interface rows below")
         self.output_contract_edit.setAcceptRichText(False)
-        self.output_contract_edit.setMinimumHeight(80)
-        right_form.addRow("Output contract", self.output_contract_edit)
+        self.output_contract_edit.setMinimumHeight(65)
+        self.output_contract_edit.setVisible(False)
 
         fields_row.addLayout(left_form, 1)
         fields_row.addLayout(right_form, 1)
@@ -578,6 +713,25 @@ class TaskEditorDialog(QDialog):
 
         self.input_definitions = InputDefinitionsEditor()
         root.addWidget(self.input_definitions)
+
+        interface_box = QGroupBox("Task Interface · Artifact inputs & Outputs")
+        interface_layout = QVBoxLayout(interface_box)
+        self.artifact_inputs_editor = InterfacePortsEditor(output=False)
+        self.outputs_editor = InterfacePortsEditor(output=True)
+        interface_layout.addWidget(QLabel("<b>Artifact inputs</b>"))
+        interface_layout.addWidget(self.artifact_inputs_editor)
+        interface_layout.addWidget(QLabel("<b>Outputs</b>"))
+        interface_layout.addWidget(self.outputs_editor)
+        self.interface_declared_checkbox = QCheckBox("Declare this Interface even if it only uses Relay's result Output")
+        self.interface_declared_checkbox.setToolTip(
+            "Leave this off for a legacy Task. Turning it on lets Projects validate named inputs and Outputs before saving."
+        )
+        interface_layout.addWidget(self.interface_declared_checkbox)
+        self.advanced_interface_checkbox = QCheckBox("Advanced / legacy JSON")
+        interface_layout.addWidget(self.advanced_interface_checkbox)
+        interface_layout.addWidget(self.output_contract_edit)
+        self.advanced_interface_checkbox.toggled.connect(self.output_contract_edit.setVisible)
+        root.addWidget(interface_box)
 
         review_box = QFormLayout()
         self.review_enabled_checkbox = QCheckBox("Require result review before publishing")
@@ -655,7 +809,22 @@ class TaskEditorDialog(QDialog):
             self.format_combo.addItem(result_format)
         self.format_combo.setCurrentText(result_format)
         self.input_definitions.set_schema(task.get("input_schema"))
-        self.output_contract_edit.setPlainText(str(task.get("output_contract") or ""))
+        raw_contract = task.get("output_contract")
+        self.output_contract_edit.setPlainText(str(raw_contract or ""))
+        self.artifact_inputs_editor.set_ports([])
+        self.outputs_editor.set_ports([])
+        self.interface_declared_checkbox.setChecked(False)
+        self.advanced_interface_checkbox.setChecked(False)
+        try:
+            contract = json.loads(raw_contract) if isinstance(raw_contract, str) and raw_contract else raw_contract
+        except (TypeError, ValueError):
+            contract = None
+        if isinstance(contract, dict) and contract.get("interface_version") == 1:
+            self.artifact_inputs_editor.set_ports(contract.get("artifact_inputs"))
+            self.outputs_editor.set_ports(contract.get("outputs"))
+            self.interface_declared_checkbox.setChecked(True)
+        elif raw_contract:
+            self.advanced_interface_checkbox.setChecked(True)
         self.validation_policy_edit.setText(str(task.get("validation_policy") or ""))
         self.instructions_edit.setPlainText(str(task.get("instructions") or ""))
         review = task.get("review_policy") or {}
@@ -701,11 +870,27 @@ class TaskEditorDialog(QDialog):
         if input_schema:
             payload["input_schema"] = input_schema
         output_contract_text = self.output_contract_edit.toPlainText().strip()
-        if output_contract_text:
+        if self.interface_declared_checkbox.isChecked():
+            from ..task_interface import normalize_interface
+
+            try:
+                payload["output_contract"] = json.dumps(
+                    normalize_interface(
+                        {
+                            "interface_version": 1,
+                            "artifact_inputs": self.artifact_inputs_editor.ports,
+                            "outputs": self.outputs_editor.ports,
+                        }
+                    ),
+                    ensure_ascii=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Task Interface is invalid: {exc}") from exc
+        elif self.advanced_interface_checkbox.isChecked() and output_contract_text:
             try:
                 json.loads(output_contract_text)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"Output contract is not valid JSON: {exc}") from exc
+                raise ValueError(f"Advanced output contract is not valid JSON: {exc}") from exc
             payload["output_contract"] = output_contract_text
         validation = self.validation_policy_edit.text().strip()
         if validation:

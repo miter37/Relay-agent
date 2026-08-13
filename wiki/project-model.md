@@ -23,6 +23,8 @@
 | Review session / round | Optional final-result gate for a Task Run or Project node; tracks reviewer, guidelines, rerun budget, candidate evidence, decisions, and revision rounds. Candidate Artifacts are not published until confirmation. |
 | Orchestrator | Optional per-Project config (`ProjectSpec.orchestrator`, absent by default) attached to a Project Run's snapshot; narrates and repairs that one Run within a budget. Never mutates the Project/Task definition. |
 | Orchestrator event | `project_run_events` row (`note`/`decision`/`report`/`fallback`), seq-ordered per Run; the narration/decision timeline the GUI Orchestrator tab reads. |
+| Task Interface | Normalized v1 view of Parameters, named Artifact inputs, declared Outputs, and Relay's system `result` Output. Stored legacy fields remain compatible. |
+| Wait node | Project node with `type=wait`, `wait.mode=manual|duration`; its `waiting` state and start time live in `project_run_steps`. |
 
 ## Execution flow
 
@@ -32,7 +34,7 @@ caller → Task Run → Attempt(s) → Artifact(s)
 Project/Routine ────┘        next Task Run input manifest + lineage
 ```
 
-Project connections are resolved strictly by `(source node, Artifact role)` and passed into child Task Runs as A1/A2-style Artifact inputs. The engine copies each input into Relay Home, verifies size and SHA-256, and records consumer lineage before a Worker receives it. Missing or ambiguous selected final Artifacts fail the Project Run.
+New Project connections use `(source node, named Output)` → `(target node, named Artifact input)` and are assigned a stable A1/A2 runtime alias. Legacy connections remain resolved by `(source node, Artifact role)` and passed into child Task Runs as A1/A2-style Artifact inputs. The engine copies each input into Relay Home, verifies size and SHA-256, and records consumer lineage before a Worker receives it. Missing or ambiguous selected final Artifacts fail the Project Run.
 
 Roles come from three places: Relay labels its own result file `result` and reserves that name; a Worker may label a file through `artifacts[].role` in its result JSON (lowercase, `^[a-z][a-z0-9_-]{0,31}$`); everything else defaults to `output`. Because both connection binding and final-output selection require exactly one match per `(node, role)`, a step that emits several files consumed separately must give each a distinct role.
 
@@ -46,7 +48,7 @@ Routine ticks execute only due occurrences. Atomic occurrence claims prevent dup
 
 All four overlap policies are honoured when a Run is still in flight: `skip` abandons the occurrence and advances, `queue` holds it without advancing and then dispatches one occurrence per tick so order is preserved, `cancel_previous` cancels the in-flight Task or Project Run before dispatching, and `allow_parallel` dispatches alongside it.
 
-Checkpoint nodes pause in `awaiting_approval`; configured result-review nodes pause in `awaiting_review`. Review confirmation resumes descendants and publishes candidate Artifacts, feedback creates a new round and re-executes the node cascade, and rejection closes the candidate (Project rejection fails the run). Human review is unlimited; Orchestrator review uses the Project's existing worker/model/profile, bounded automatic reruns, strict evidence handling, and hands off to a human on uncertainty or budget exhaustion. Folder delivery is restricted to configured `allowed_delivery_roots` at both definition and delivery time.
+Checkpoint nodes pause in `awaiting_approval`; configured result-review nodes pause in `awaiting_review`; Wait nodes pause in `waiting` and can be continued through the CLI/API when manual. Review confirmation resumes descendants and publishes candidate Artifacts, feedback creates a new round and re-executes the node cascade, and rejection closes the candidate (Project rejection fails the run). Human review is unlimited; Orchestrator review uses the Project's existing worker/model/profile, bounded automatic reruns, strict evidence handling, and hands off to a human on uncertainty or budget exhaustion. Folder delivery is restricted to configured `allowed_delivery_roots` at both definition and delivery time.
 
 FTS5 indexes are derived and rebuildable. Semantic search currently uses the pluggable embedding interface and explicitly falls back to FTS5 when no backend is configured. Quality attention covers Task and Project Runs. Export archives are deterministic, hash-manifested, redact notification secrets and local Artifact paths, and optionally round-trip Task Runs, Artifacts, and lineage.
 

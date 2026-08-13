@@ -145,6 +145,25 @@ class TaskSpec:
                 parse_schema(self.input_schema)
             except ValueError as exc:
                 raise RelayError("TASK_INVALID", str(exc)) from exc
+        if self.output_contract not in (None, ""):
+            from .task_interface import normalize_interface
+
+            try:
+                raw_contract = self.output_contract
+                if isinstance(raw_contract, str):
+                    raw_contract = json.loads(raw_contract)
+                if isinstance(raw_contract, dict) and (
+                    "interface_version" in raw_contract
+                    or "artifact_inputs" in raw_contract
+                    or "outputs" in raw_contract
+                ):
+                    self.output_contract = json.dumps(normalize_interface(raw_contract), ensure_ascii=False)
+            except json.JSONDecodeError:
+                # Keep pre-Interface legacy values loadable; the shared reader will
+                # surface them as an actionable diagnostic when they are used.
+                pass
+            except (TypeError, ValueError) as exc:
+                raise RelayError("TASK_INVALID", f"Invalid Task Interface contract: {exc}") from exc
         if self.review_policy is not None:
             if not isinstance(self.review_policy, dict):
                 raise RelayError("TASK_INVALID", "review_policy must be an object.")

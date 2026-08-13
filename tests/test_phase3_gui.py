@@ -147,6 +147,30 @@ class TasksWidgetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "[Ii]nstructions"):
             dialog.payload()
 
+    def test_task_editor_builds_named_interface_without_raw_json_authoring(self):
+        dialog = TaskEditorDialog()
+        dialog.name_edit.setText("Research")
+        dialog.instructions_edit.setPlainText("Research the topic")
+        dialog.interface_declared_checkbox.setChecked(True)
+        dialog.artifact_inputs_editor.set_ports(
+            [{"name": "references", "accepts": ["application/json"], "required": True}]
+        )
+        dialog.outputs_editor.set_ports(
+            [{"role": "report", "produces": ["text/markdown"], "required": True}]
+        )
+        payload = dialog.payload()
+        contract = json.loads(payload["output_contract"])
+        self.assertEqual(contract["interface_version"], 1)
+        self.assertEqual(contract["artifact_inputs"][0]["name"], "references")
+        self.assertEqual(contract["outputs"][0]["role"], "report")
+
+    def test_task_editor_preserves_legacy_contract_in_advanced_area(self):
+        legacy = json.dumps({"required_roles": ["output"]})
+        dialog = TaskEditorDialog(task={"name": "Legacy", "instructions": "run", "output_contract": legacy})
+        self.assertTrue(dialog.advanced_interface_checkbox.isChecked())
+        self.assertEqual(dialog.output_contract_edit.toPlainText(), legacy)
+        self.assertEqual(json.loads(dialog.payload()["output_contract"]), {"required_roles": ["output"]})
+
     def test_task_editor_gives_instructions_field_real_room(self):
         dialog = TaskEditorDialog()
         # Wide enough that long prompt text doesn't wrap constantly, and a

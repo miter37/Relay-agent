@@ -104,6 +104,8 @@ ICON_PATHS: dict[str, str] = {
 _TONE_COLOR_TOKENS = {
     "default": ("text.secondary", "text.primary", "text.muted"),
     "accent": ("accent.primary", "text.primary", "text.muted"),
+    "success": ("state.success", "text.primary", "text.muted"),
+    "warning": ("state.warning", "text.primary", "text.muted"),
     "danger": ("state.danger", "text.primary", "text.muted"),
     "muted": ("text.muted", "text.secondary", "text.muted"),
     # Sits on the light primary-action surface, but a disabled primary button

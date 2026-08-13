@@ -103,6 +103,15 @@ def application_stylesheet() -> str:
         QPushButton#sidebarButton {{ text-align: left; background: transparent; border: 0; border-left: 2px solid transparent; border-radius: 0; padding: {SPACING["sm"]}px {SPACING["md"]}px; }}
         QPushButton#sidebarButton:hover {{ background: {color["bg.hover"]}; color: {color["text.primary"]}; }}
         QPushButton#sidebarButton:checked {{ background: {color["bg.hover"]}; color: {color["text.primary"]}; border-left: 2px solid {color["accent.primary"]}; }}
+        QPushButton#sidebarButton[placement="top"] {{
+            text-align: center; border: 0; border-bottom: 2px solid transparent;
+            border-radius: {RADIUS["control"]}px; padding: {SPACING["xs"]}px {SPACING["sm"]}px;
+        }}
+        QPushButton#sidebarButton[placement="top"]:hover {{ background: {color["bg.hover"]}; color: {color["text.primary"]}; }}
+        QPushButton#sidebarButton[placement="top"]:checked {{
+            background: {color["bg.selected"]}; color: {color["text.primary"]};
+            border-bottom-color: {color["accent.primary"]};
+        }}
         QPushButton#iconAction {{
             background: transparent; border: 1px solid transparent; border-radius: {RADIUS["control"]}px;
             padding: 0; min-width: {METRICS["iconButton"]}px; max-width: {METRICS["iconButton"]}px;

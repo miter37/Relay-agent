@@ -38,6 +38,7 @@
 - On 2026-08-13, Runs Logs polling now keeps a client-side buffer per Task Run/Attempt/stream/filter. Empty EOF responses no longer erase the visible log, while newly appended bytes are added to the buffer.
 - On 2026-08-13, Task Run Overview alignment was tightened: Result/See more and the content headings use the same left inset, the metadata starts closer to the result header, and Result, Answer, and Requested Task use semantic accent colors.
 - On 2026-08-13, Project Runs hides the internal compatibility-only steps table and disables the catalog's unnecessary horizontal scrollbar; both had been visible as stray checkerboard rectangles in the GUI.
+- On 2026-08-13, the Task Interface upgrade was implemented as vertical slices: shared normalization/diagnostics, CLI/API `interface` and `project validate`, named Task GUI port rows, Project named Output/Input pickers with readiness, runtime Output contract enforcement before Review, Interface health, durable manual/timed Wait nodes, and post-review final folder delivery. The focused impacted suite (327 tests) and Ruff pass; full discovery was attempted but exceeded local execution windows without a failure report.
 
 ## Current uncertainty and deferred scope
 

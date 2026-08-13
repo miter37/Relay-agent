@@ -574,6 +574,16 @@ def _task_public(task: dict[str, Any]) -> dict[str, Any]:
                 public["review_policy"] = decoded
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
+    from .task_interface import task_interface as normalize_task_interface
+
+    try:
+        public["interface"] = normalize_task_interface(task).to_dict()
+    except (TypeError, ValueError) as exc:
+        public["interface_diagnostic"] = {
+            "code": "TASK_INTERFACE_INVALID",
+            "message": str(exc),
+            "blocking": True,
+        }
     return public
 
 
@@ -797,6 +807,64 @@ def get_task(engine, task_id: str) -> dict[str, Any]:
     if not task:
         raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
     return {"ok": True, "task": _task_public(task)}
+
+
+def task_interface(engine, task_id: str) -> dict[str, Any]:
+    from .task_interface import task_interface as normalize_task_interface
+
+    task = engine.db.get_task(task_id)
+    if not task:
+        raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+    try:
+        interface = normalize_task_interface(task)
+    except (TypeError, ValueError) as exc:
+        return {
+            "ok": True,
+            "valid": False,
+            "task_id": task_id,
+            "errors": [{"code": "TASK_INTERFACE_INVALID", "message": str(exc), "blocking": True}],
+        }
+    return {"ok": True, "valid": True, "task_id": task_id, "interface": interface.to_dict()}
+
+
+def task_interface_health(engine, task_id: str, *, limit: int = 50) -> dict[str, Any]:
+    from .task_interface import task_interface as normalize_task_interface
+
+    task = engine.db.get_task(task_id)
+    if not task:
+        raise RelayError("TASK_NOT_FOUND", f"Task not found: {task_id}")
+    try:
+        interface = normalize_task_interface(task)
+    except (TypeError, ValueError) as exc:
+        return {"ok": True, "valid": False, "task_id": task_id, "errors": [str(exc)]}
+    runs = engine.db.runs_for_task(task_id, limit=max(1, min(int(limit), 200)))
+    failures = [run for run in runs if run.get("error_code") == "OUTPUT_CONTRACT_MISMATCH"]
+    observed_roles: set[str] = set()
+    for run in runs:
+        job_id = run.get("job_id")
+        if not job_id:
+            continue
+        for artifact in engine.db.artifacts_for_job(job_id):
+            role = str(artifact.get("role") or "")
+            if role and role != "result":
+                observed_roles.add(role)
+    checked = len(runs)
+    return {
+        "ok": True,
+        "valid": True,
+        "task_id": task_id,
+        "interface": interface.to_dict(),
+        "sample_size": checked,
+        "contract_failures": len(failures),
+        "compliance_rate": round((checked - len(failures)) / checked, 4) if checked else None,
+        "observed_output_roles": sorted(observed_roles),
+        "declared_output_roles": [port.name for port in interface.outputs if not port.system],
+        "next_step": (
+            "Review failed runs and update the explicit Interface if the observed role is intentional."
+            if failures
+            else "No contract failures in the sampled runs."
+        ),
+    }
 
 
 def update_task(engine, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1076,6 +1144,11 @@ def update_project(engine, project_id: str, payload: dict[str, Any]) -> dict[str
     return {"ok": True, "project": _project_public(project)}
 
 
+def validate_project(engine, payload: dict[str, Any]) -> dict[str, Any]:
+    report = engine.project_service.validate_project_definition(payload)
+    return {"ok": True, **report.to_dict()}
+
+
 def delete_project(engine, project_id: str) -> dict[str, Any]:
     engine.project_service.soft_delete_project(project_id)
     return {"ok": True, "project_id": project_id, "deleted": True}
@@ -1203,6 +1276,16 @@ def project_run_cancel(engine, project_run_id: str) -> dict[str, Any]:
             run, json.loads(run["project_snapshot_json"]) if run.get("project_snapshot_json") else None
         ),
     }
+
+
+def continue_project_wait(engine, project_run_id: str, node_id: str) -> dict[str, Any]:
+    runtime = getattr(engine, "project_runtime", None)
+    if runtime is None:
+        from .projects.runtime import ProjectRuntime
+
+        runtime = ProjectRuntime(engine.db, engine, engine.project_service)
+    step = runtime.continue_wait(project_run_id, node_id)
+    return {"ok": True, "project_run_id": project_run_id, "node_id": node_id, "step": step}
 
 
 def _routine_public(routine):

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import (
 from ..compatibility import evaluate_compatibility
 from .agent_apps import AgentAppWizard
 from .design_icon_app import app_icon
-from .design_tokens import METRICS, SPACING
+from .design_tokens import SPACING
 from .design_typography import apply_type
 from .design_widgets import IconButton, NavButton
 from .json_display import render_json_html
@@ -194,11 +195,11 @@ class MainWindow(QMainWindow):
         self.brand_label.setObjectName("brandMark")
         apply_type(self.brand_label, "title.page")
         title_layout.addWidget(self.brand_label)
-        title_layout.addSpacing(SPACING["xl"])
+        title_layout.addSpacing(SPACING["lg"])
         self.page_title_label = QLabel("Runs")
         self.page_title_label.setObjectName("pageTitle")
         apply_type(self.page_title_label, "title.detail")
-        title_layout.addWidget(self.page_title_label)
+        self.page_title_label.hide()
         title_layout.addStretch(1)
         self.health_dot = QLabel("●")
         self.health_dot.setObjectName("healthDot")
@@ -234,37 +235,40 @@ class MainWindow(QMainWindow):
         self.banner = QLabel()
         self.banner.setWordWrap(True)
         self.banner.hide()
-        header_layout.addWidget(self.banner)
-        outer.addWidget(self.top_bar)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setObjectName("mainSplitter")
         self.sidebar = QWidget()
         self.sidebar.setObjectName("sidebarNav")
+        self.sidebar.setMinimumWidth(0)
+        self.sidebar.setVisible(False)
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
         sidebar_layout.setSpacing(1)
         self.runs_button = NavButton("list", "Runs")
+        self.runs_button.setProperty("placement", "top")
         self.runs_button.clicked.connect(self._show_runs)
-        sidebar_layout.addWidget(self.runs_button)
         self.project_runs_button = NavButton("folder-tree", "Project Runs")
+        self.project_runs_button.setProperty("placement", "top")
         self.project_runs_button.clicked.connect(self._show_project_runs)
-        sidebar_layout.addWidget(self.project_runs_button)
         self.reviews_button = NavButton("check-circle", "Reviews")
+        self.reviews_button.setProperty("placement", "top")
         self.reviews_button.clicked.connect(self._show_reviews)
-        sidebar_layout.addWidget(self.reviews_button)
         self.tasks_button = NavButton("checklist", "Tasks")
+        self.tasks_button.setProperty("placement", "top")
         self.tasks_button.clicked.connect(self._show_tasks)
-        sidebar_layout.addWidget(self.tasks_button)
         self.profiles_button = NavButton("user", "Profiles")
+        self.profiles_button.setProperty("placement", "top")
         self.profiles_button.clicked.connect(self._show_profiles)
-        sidebar_layout.addWidget(self.profiles_button)
         self.projects_button = NavButton("folder-tree", "Projects")
+        self.projects_button.setProperty("placement", "top")
         self.projects_button.clicked.connect(self._show_projects)
-        sidebar_layout.addWidget(self.projects_button)
         self.routines_button = NavButton("repeat", "Routines")
+        self.routines_button.setProperty("placement", "top")
         self.routines_button.clicked.connect(self._show_routines)
-        sidebar_layout.addWidget(self.routines_button)
+        self.schedules_button = NavButton("calendar", "Schedules")
+        self.schedules_button.setProperty("placement", "top")
+        self.schedules_button.clicked.connect(self._show_schedules)
 
         self.schedules_header = QLabel("Schedules")
         self.schedules_header.setObjectName("mutedText")
@@ -282,9 +286,36 @@ class MainWindow(QMainWindow):
 
         sidebar_layout.addStretch(1)
         self.settings_button = NavButton("gear", "Settings")
+        self.settings_button.setProperty("placement", "top")
         self.settings_button.clicked.connect(self._show_settings)
-        sidebar_layout.addWidget(self.settings_button)
-        self.splitter.addWidget(self.sidebar)
+
+        self.navigation_scroll = QScrollArea()
+        self.navigation_scroll.setObjectName("topNavigationScroll")
+        self.navigation_scroll.setFrameShape(QFrame.NoFrame)
+        self.navigation_scroll.setWidgetResizable(True)
+        self.navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.navigation_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.navigation_host = QWidget()
+        navigation_layout = QHBoxLayout(self.navigation_host)
+        navigation_layout.setContentsMargins(0, 0, 0, 0)
+        navigation_layout.setSpacing(2)
+        for button in (
+            self.runs_button,
+            self.project_runs_button,
+            self.reviews_button,
+            self.tasks_button,
+            self.profiles_button,
+            self.projects_button,
+            self.routines_button,
+            self.schedules_button,
+        ):
+            navigation_layout.addWidget(button)
+        navigation_layout.addStretch(1)
+        navigation_layout.addWidget(self.settings_button)
+        self.navigation_scroll.setWidget(self.navigation_host)
+        header_layout.addWidget(self.navigation_scroll)
+        self.statusBar().addWidget(self.banner, 1)
+        outer.addWidget(self.top_bar)
 
         self.detail_stack = QStackedWidget()
         self.empty_detail = QLabel("Select a Task Run to view its overview.")
@@ -419,7 +450,7 @@ class MainWindow(QMainWindow):
         agent_apps.delete_requested.connect(self._delete_agent_app)
         self.detail_stack.addWidget(self.settings_view)
         self.splitter.addWidget(self.detail_stack)
-        self.splitter.setSizes([METRICS["sidebarWidth"], 1280 - METRICS["sidebarWidth"]])
+        self.splitter.setSizes([1280])
         outer.addWidget(self.splitter, 1)
         self.setCentralWidget(root)
         self.statusBar().showMessage(f"Relay Home: {self.config.home}")
@@ -967,6 +998,7 @@ class MainWindow(QMainWindow):
             "profiles": self.profiles_button,
             "projects": self.projects_button,
             "routines": self.routines_button,
+            "schedules": self.schedules_button,
             "settings": self.settings_button,
         }
         for name, button in buttons.items():
@@ -1221,6 +1253,17 @@ class MainWindow(QMainWindow):
         self.routines_view.set_projects(list(self.projects_index.values()))
         if self.current_mode == "normal":
             self._refresh_routines()
+
+    def _show_schedules(self) -> None:
+        self._activate_navigation("schedules")
+        if self.current_mode == "normal":
+            self._request("schedules", "/v1/schedules")
+        schedule_id = self.selected_schedule_id or next(iter(self.schedules), None)
+        if schedule_id:
+            self._show_schedule_detail(schedule_id)
+        else:
+            self.empty_detail.setText("No Schedules have been registered yet.")
+            self.detail_stack.setCurrentWidget(self.empty_detail)
 
     def _refresh_routines(self) -> None:
         if self.current_mode != "normal":
@@ -1875,6 +1918,10 @@ class MainWindow(QMainWindow):
                 if schedule.get("schedule_id")
             }
             self._render_schedules()
+            if self.active_section == "schedules":
+                schedule_id = self.selected_schedule_id or next(iter(self.schedules), None)
+                if schedule_id:
+                    self._show_schedule_detail(schedule_id)
             return
         if kind == "schedule_detail":
             schedule = payload.get("schedule") or {}
@@ -2017,8 +2064,6 @@ class MainWindow(QMainWindow):
                     self.banner.setText(f"Task {pending_id} was not found (it may have been deleted).")
                     self.banner.show()
                 return
-            self.banner.setText(f"Registered Tasks refreshed · {len(tasks)} entries.")
-            self.banner.show()
             return
         if kind == "profiles":
             self.profiles = list((payload or {}).get("profiles") or [])
@@ -2095,15 +2140,11 @@ class MainWindow(QMainWindow):
                 self.selected_project_id = None
             if self.selected_project_id and self.selected_project_id in self.projects_index:
                 self.projects_view.set_project(self.projects_index[self.selected_project_id])
-            self.banner.setText(f"Projects refreshed - {len(projects)} entries.")
-            self.banner.show()
             return
         if kind == "project_tasks":
             tasks = (payload or {}).get("tasks", [])
             self.tasks_index = {str(t.get("task_id")): t for t in tasks if t.get("task_id")}
             self.projects_view.set_tasks(list(self.tasks_index.values()))
-            self.banner.setText(f"Project Tasks refreshed - {len(tasks)} entries.")
-            self.banner.show()
             return
         if isinstance(kind, tuple) and kind[0] == "project_detail":
             project = (payload or {}).get("project") or {}
@@ -2164,8 +2205,6 @@ class MainWindow(QMainWindow):
             elif self.selected_routine_id:
                 self.selected_routine_id = None
                 self.routines_view.detail.clear()
-            self.banner.setText(f"Routines refreshed · {len(routines)} entries.")
-            self.banner.show()
             return
         if kind == "routine_tasks":
             tasks = payload.get("tasks", [])
@@ -2481,6 +2520,7 @@ class MainWindow(QMainWindow):
             self._set_health_badge("Health: Disconnected", "disconnected", "", reason)
         self.register_task_button.setEnabled(mode == "normal")
         self.schedule_list.setEnabled(mode == "normal")
+        self.schedules_button.setEnabled(mode == "normal")
         self.settings_button.setEnabled(mode == "normal")
         if mode == "normal":
             self.banner.hide()
@@ -2569,7 +2609,7 @@ class MainWindow(QMainWindow):
         schedule_id = item.data(Qt.UserRole)
         if schedule_id:
             self.selected_schedule_id = str(schedule_id)
-            self._activate_navigation("runs")
+            self._activate_navigation("schedules")
             self._refresh_schedule(self.selected_schedule_id)
 
     def _refresh_schedule(self, schedule_id: str | None) -> None:

@@ -48,15 +48,31 @@ PROJECT_DEFINITION_SCHEMA: dict[str, Any] = {
             "description": "Shown in `relay catalog projects`; make it specific enough to choose by.",
         },
         "failure_policy": {"type": "string", "enum": sorted(_POLICY_VALUES), "default": "stop"},
+        "delivery": {
+            "type": "object",
+            "description": "Optional final-output folder delivery after all review gates pass.",
+            "required": ["kind", "path"],
+            "properties": {"kind": {"type": "string", "enum": ["folder"]}, "path": {"type": "string"}},
+        },
         "nodes": {
             "type": "array",
             "minItems": 1,
             "items": {
                 "type": "object",
-                "required": ["node_id", "task_id"],
+                "required": ["node_id"],
+                "anyOf": [{"required": ["task_id"]}, {"required": ["type", "wait"]}],
                 "properties": {
                     "node_id": {"type": "string", "minLength": 1, "description": "Unique within the Project."},
                     "task_id": {"type": "string", "description": "An existing registered Task."},
+                    "type": {"type": "string", "enum": ["task", "wait"]},
+                    "wait": {
+                        "type": "object",
+                        "description": "Optional durable pause node.",
+                        "properties": {
+                            "mode": {"type": "string", "enum": ["duration", "manual"]},
+                            "seconds": {"type": "integer", "minimum": 1, "maximum": 31536000},
+                        },
+                    },
                     "checkpoint": {
                         "type": "object",
                         "description": "Pause for human or Orchestrator review after this node.",
@@ -85,7 +101,11 @@ PROJECT_DEFINITION_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["from_node", "from_role", "to_node", "to_alias"],
+                "required": ["from_node", "to_node"],
+                "anyOf": [
+                    {"required": ["from_role", "to_alias"]},
+                    {"required": ["from_output", "to_input"]},
+                ],
                 "properties": {
                     "from_node": {"type": "string"},
                     "from_role": {
@@ -94,6 +114,14 @@ PROJECT_DEFINITION_SCHEMA: dict[str, Any] = {
                     },
                     "to_node": {"type": "string"},
                     "to_alias": {"type": "string", "pattern": _ALIAS_PATTERN.pattern},
+                    "from_output": {
+                        "type": "string",
+                        "description": "Named Output role. Preferred for new definitions; from_role remains compatible.",
+                    },
+                    "to_input": {
+                        "type": "string",
+                        "description": "Named Artifact input. Relay assigns a stable legacy alias for delivery.",
+                    },
                 },
             },
         },
@@ -146,6 +174,8 @@ class ProjectNode:
     node_id: str
     task_id: str
     checkpoint: dict[str, Any] | None = None
+    node_type: str = "task"
+    wait: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -154,6 +184,8 @@ class ProjectConnection:
     from_role: str
     to_node: str
     to_alias: str
+    from_output: str | None = None
+    to_input: str | None = None
 
 
 @dataclass(slots=True)
@@ -169,6 +201,7 @@ class ProjectSpec:
     failure_policy: str = "stop"
     notification_policy: dict[str, Any] | None = None
     orchestrator: dict[str, Any] | None = None
+    delivery: dict[str, Any] | None = None
     description: str | None = None
     project_summary: str | None = None
     name: str | None = None
@@ -187,8 +220,15 @@ class ProjectSpec:
             "failure_policy": self.failure_policy,
             **({"notification_policy": self.notification_policy} if self.notification_policy else {}),
             **({"orchestrator": self.orchestrator} if self.orchestrator else {}),
+            **({"delivery": self.delivery} if self.delivery else {}),
             "nodes": [
-                {"node_id": n.node_id, "task_id": n.task_id, **({"checkpoint": n.checkpoint} if n.checkpoint else {})}
+                {
+                    "node_id": n.node_id,
+                    **({"task_id": n.task_id} if n.node_type != "wait" else {}),
+                    **({"type": n.node_type} if n.node_type != "task" else {}),
+                    **({"wait": n.wait} if n.wait else {}),
+                    **({"checkpoint": n.checkpoint} if n.checkpoint else {}),
+                }
                 for n in self.nodes
             ],
             "connections": [
@@ -197,6 +237,8 @@ class ProjectSpec:
                     "from_role": c.from_role,
                     "to_node": c.to_node,
                     "to_alias": c.to_alias,
+                    **({"from_output": c.from_output} if c.from_output else {}),
+                    **({"to_input": c.to_input} if c.to_input else {}),
                 }
                 for c in self.connections
             ],
@@ -224,6 +266,19 @@ class ProjectSpec:
             if node.node_id in node_ids:
                 raise RelayError("PROJECT_INVALID", f"Duplicate project node id: {node.node_id}")
             node_ids.append(node.node_id)
+            if node.node_type not in {"task", "wait"}:
+                raise RelayError("PROJECT_INVALID", f"Unknown project node type: {node.node_type}")
+            if node.node_type == "wait":
+                if node.wait is None or not isinstance(node.wait, dict):
+                    raise RelayError("PROJECT_INVALID", f"Wait node requires a wait object: {node.node_id}")
+                mode = str(node.wait.get("mode") or "").strip().lower()
+                if mode not in {"duration", "manual"}:
+                    raise RelayError("PROJECT_INVALID", f"Wait mode must be duration or manual: {node.node_id}")
+                if mode == "duration":
+                    seconds = node.wait.get("seconds")
+                    if not isinstance(seconds, int) or isinstance(seconds, bool) or not 1 <= seconds <= 31536000:
+                        raise RelayError("PROJECT_INVALID", f"Wait duration must be 1..31536000 seconds: {node.node_id}")
+                continue
             if not task_lookup(node.task_id):
                 raise RelayError("PROJECT_TASK_MISSING", f"Task not found: {node.task_id}")
             if node.checkpoint:
@@ -279,6 +334,7 @@ class ProjectSpec:
             if not _ALIAS_PATTERN.match(conn.to_alias):
                 raise RelayError("PROJECT_INVALID", f"Connection to_alias must match A1 pattern: {conn.to_alias}")
         seen: set[tuple[str, str]] = set()
+        seen_inputs: set[tuple[str, str]] = set()
         for conn in self.connections:
             key = (conn.to_node, conn.to_alias)
             if key in seen:
@@ -287,6 +343,14 @@ class ProjectSpec:
                     f"Two inputs target the same ({conn.to_node}, {conn.to_alias})",
                 )
             seen.add(key)
+            if conn.to_input:
+                input_key = (conn.to_node, conn.to_input)
+                if input_key in seen_inputs:
+                    raise RelayError(
+                        "PROJECT_INPUT_CONFLICT",
+                        f"Two connections target the same named input ({conn.to_node}, {conn.to_input})",
+                    )
+                seen_inputs.add(input_key)
         self._topological_order(node_ids)
         for item in self.output_selection.items:
             nid = item.get("node_id", "")
@@ -298,6 +362,24 @@ class ProjectSpec:
         if self.failure_policy not in _POLICY_VALUES:
             raise RelayError("PROJECT_INVALID", f"Unknown failure_policy: {self.failure_policy}")
         self._validate_orchestrator()
+        self._validate_delivery(allow_roots)
+
+    def _validate_delivery(self, allow_roots: Iterable[str] | None) -> None:
+        if self.delivery is None:
+            return
+        if not isinstance(self.delivery, dict) or str(self.delivery.get("kind") or "") != "folder":
+            raise RelayError("DELIVERY_KIND_UNSUPPORTED", "Project delivery currently supports kind=folder only.")
+        target_path = str(self.delivery.get("path") or "").strip()
+        if not target_path:
+            raise RelayError("PROJECT_INVALID", "Project delivery folder path is required.")
+        if allow_roots is not None:
+            from pathlib import Path
+
+            from ..target_workspace import is_within, safe_resolve
+
+            resolved = safe_resolve(Path(target_path))
+            if not any(is_within(resolved, Path(root)) for root in allow_roots):
+                raise RelayError("DELIVERY_PATH_NOT_ALLOWED", f"Delivery path is not in allow-list: {target_path}")
 
     def _validate_orchestrator(self) -> None:
         if self.orchestrator is None:
@@ -381,19 +463,45 @@ class ProjectSpec:
         orchestrator = payload.get("orchestrator") or payload.get("orchestrator_json")
         if isinstance(orchestrator, str):
             orchestrator = json.loads(orchestrator)
-        nodes = [
-            ProjectNode(node_id=str(n["node_id"]), task_id=str(n["task_id"]), checkpoint=n.get("checkpoint"))
-            for n in payload.get("nodes", [])
-        ]
-        connections = [
-            ProjectConnection(
-                from_node=str(c["from_node"]),
-                from_role=str(c["from_role"]),
-                to_node=str(c["to_node"]),
-                to_alias=str(c["to_alias"]),
+        delivery = payload.get("delivery") or payload.get("delivery_json")
+        if isinstance(delivery, str):
+            delivery = json.loads(delivery)
+        nodes = []
+        for n in payload.get("nodes", []):
+            node_type = str(n.get("type") or "task").strip().lower()
+            nodes.append(
+                ProjectNode(
+                    node_id=str(n["node_id"]),
+                    task_id=str(n.get("task_id") or "__relay_wait__"),
+                    checkpoint=n.get("checkpoint"),
+                    node_type=node_type,
+                    wait=n.get("wait"),
+                )
             )
-            for c in payload.get("connections", [])
-        ]
+        connections: list[ProjectConnection] = []
+        aliases_by_node: dict[str, set[str]] = {}
+        for c in payload.get("connections", []):
+            from_output = str(c.get("from_output") or "").strip() or None
+            to_input = str(c.get("to_input") or "").strip() or None
+            from_role = str(c.get("from_role") or from_output or "")
+            to_alias = str(c.get("to_alias") or "").strip()
+            if not to_alias:
+                used = aliases_by_node.setdefault(str(c.get("to_node") or ""), set())
+                number = 1
+                while f"A{number}" in used:
+                    number += 1
+                to_alias = f"A{number}"
+            aliases_by_node.setdefault(str(c.get("to_node") or ""), set()).add(to_alias)
+            connections.append(
+                ProjectConnection(
+                    from_node=str(c["from_node"]),
+                    from_role=from_role,
+                    to_node=str(c["to_node"]),
+                    to_alias=to_alias,
+                    from_output=from_output,
+                    to_input=to_input,
+                )
+            )
         output_items = [
             {"node_id": str(o["node_id"]), "role": str(o["role"])} for o in payload.get("output_selection", [])
         ]
@@ -404,6 +512,7 @@ class ProjectSpec:
             failure_policy=str(payload.get("failure_policy", "stop")),
             notification_policy=notification_policy,
             orchestrator=orchestrator,
+            delivery=delivery,
             description=payload.get("description"),
             project_summary=payload.get("project_summary"),
             name=payload.get("name"),
