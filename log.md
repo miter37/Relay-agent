@@ -1,3 +1,10 @@
+- 2026-08-13 10:48 | Project Runs의 레이아웃 밖에 노출되던 내부 steps_table과 불필요한 가로 스크롤바를 제거; 실제 Qt 화면 확인 및 98 GUI 테스트 통과.
+- 2026-08-13 10:42 | 정렬 기준과 간격을 다듬어 Runs Overview의 Result/See more·메타데이터·Answer·Requested Task를 일관된 좌측선과 색상으로 표시.
+- 2026-08-13 10:40 | Fixed Runs Logs polling: EOF empty chunks no longer clear visible output; new log bytes append and stream/Attempt changes reset the buffer; 213 GUI tests pass.
+- 2026-08-13 10:45 | Fixed Overview See more/See less to update immediately even while result text is selected; added expand/collapse regression coverage.
+- 2026-08-13 10:32 | Runs 상세를 Overview·Progress 중심으로 재구성: Task/Answer 탭 제거, Answer·Requested task 통합, 핵심 메타데이터 접기, 시도별 Progress 행 렌더링; 212 GUI 테스트 통과.
+- 2026-08-13 09:22 | Removed duplicate Project Run Artifacts tab; added Pipeline Inspector Open Task/View result actions with node-focused Workspace Artifact/Review navigation; 211 GUI tests pass.
+- 2026-08-13 09:05 | Smoothed Project Run Pipeline rendering: batched graph paints, in-place Artifact card updates, semantic global card styling, and safe child deletion; 209 GUI tests pass.
 - 2026-08-12 15:37 | Completed Buzz follow-through: stable polling/scroll behavior, review evaluation-handoff-round evidence, semantic pipeline legend states, and real Qt Workspace QA; 207 GUI tests pass.
 - 2026-08-12 15:37 | Full unittest discovery rechecked and exceeded the 244-second limit without a reported failure; focused GUI suites and Ruff pass.
 - 2026-08-12 13:40 | Completed 8 proactive UX fixes: selection, safe saves, review actions, run links, guided routines, scoped polling, inline reviews, and Ctrl+K Quick find.

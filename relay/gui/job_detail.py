@@ -3,7 +3,7 @@ from __future__ import annotations
 from html import escape
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QTextCursor, QTextOption
+from PySide6.QtGui import QTextCursor, QTextDocument, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -14,16 +14,17 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextBrowser,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from .artifacts import ArtifactExplorerView, ArtifactGroup, ArtifactRecord
-from .design_tokens import COLORS, status_presentation
+from .design_tokens import COLORS, SPACING, status_presentation
 from .design_typography import apply_type
 from .design_widgets import IconButton, StatusBadge
 from .json_display import render_json_html
-from .scroll_state import set_html, set_markdown
+from .scroll_state import set_html
 
 
 class TaskRunDetailView(QWidget):
@@ -42,7 +43,7 @@ class TaskRunDetailView(QWidget):
     review_rerun_requested = Signal(str, str)
     review_reject_requested = Signal(str, str)
 
-    TAB_NAMES = ("Overview", "Task", "Inputs", "Progress", "Answer", "Artifacts", "Logs", "Events")
+    TAB_NAMES = ("Overview", "Progress", "Inputs", "Artifacts", "Logs", "Events")
 
     _OVERVIEW_LABEL_STYLE = (
         f"padding:6px 18px 6px 0; color:{COLORS['text.muted']}; "
@@ -126,12 +127,15 @@ class TaskRunDetailView(QWidget):
         self.artifacts_view.open_folder_requested.connect(self.artifact_folder_requested.emit)
         self._result_artifact: ArtifactRecord | None = None
         self._file_artifacts: list[ArtifactRecord] = []
+        self._overview_fields: tuple[tuple[str, object], ...] = ()
+        self._requested_task = ""
+        self._overview_details_expanded = False
         for name in self.TAB_NAMES:
             if name == "Artifacts":
                 self.tabs.addTab(self.artifacts_view, name)
                 continue
             browser = QTextBrowser()
-            browser.setObjectName("evidencePane")
+            browser.setObjectName("overviewEvidencePane" if name == "Overview" else "evidencePane")
             browser.setOpenExternalLinks(False)
             browser.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
             browser.selectionChanged.connect(lambda name=name: self._flush_deferred_content(name))
@@ -140,19 +144,34 @@ class TaskRunDetailView(QWidget):
                 browser.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self._browsers[name] = browser
-            if name == "Answer":
-                answer_page = QWidget()
-                answer_layout = QVBoxLayout(answer_page)
-                answer_layout.setContentsMargins(0, 0, 0, 0)
-                answer_actions = QHBoxLayout()
-                answer_actions.addStretch(1)
+            if name == "Overview":
+                overview_page = QWidget()
+                overview_layout = QVBoxLayout(overview_page)
+                overview_layout.setContentsMargins(0, 0, 0, 0)
+                overview_layout.setSpacing(0)
+                overview_actions = QHBoxLayout()
+                overview_actions.setContentsMargins(SPACING["md"], 0, SPACING["md"], 0)
+                self.overview_result_label = QLabel("Result")
+                self.overview_result_label.setObjectName("sectionTitle")
+                self.overview_result_label.setStyleSheet(
+                    f"color: {COLORS['accent.primary']}; font-weight: 700;"
+                )
+                overview_actions.addWidget(self.overview_result_label)
+                self.overview_details_button = QToolButton()
+                self.overview_details_button.setText("See more")
+                self.overview_details_button.setCheckable(True)
+                self.overview_details_button.setAutoRaise(True)
+                self.overview_details_button.setToolTip("Show the full Task Run metadata")
+                self.overview_details_button.toggled.connect(self._toggle_overview_details)
+                overview_actions.addWidget(self.overview_details_button)
+                overview_actions.addStretch(1)
                 self.copy_answer_button = IconButton("copy", "Copy the answer")
                 self.copy_answer_button.clicked.connect(self._copy_answer)
-                answer_actions.addWidget(self.copy_answer_button)
-                answer_layout.addLayout(answer_actions)
-                answer_layout.addWidget(browser, 1)
+                overview_actions.addWidget(self.copy_answer_button)
+                overview_layout.addLayout(overview_actions)
+                overview_layout.addWidget(browser, 1)
                 self.answer_browser = browser
-                self.tabs.addTab(answer_page, name)
+                self.tabs.addTab(overview_page, name)
             else:
                 self.tabs.addTab(browser, name)
         self.tabs.currentChanged.connect(lambda index: self.tab_requested.emit(self.tabs.tabText(index)))
@@ -181,6 +200,10 @@ class TaskRunDetailView(QWidget):
             self._deferred_content.clear()
             for browser in self._browsers.values():
                 browser.clear()
+            self._overview_details_expanded = False
+            self.overview_details_button.blockSignals(True)
+            self.overview_details_button.setChecked(False)
+            self.overview_details_button.blockSignals(False)
             self.set_answer(None)
             self.set_content("Logs", "")
             self._result_artifact = None
@@ -246,18 +269,9 @@ class TaskRunDetailView(QWidget):
         task_text = str(request.get("task") or job.get("task_text") or job.get("task_preview") or "").strip()
         self.task_text = task_text
         request_preview = job.get("task_preview") or task_text
-        overview_rows = "".join(self._overview_row(key, value or "—") for key, value in fields)
-        requested_task = escape(str(request_preview or "Task details are unavailable.")).replace("\n", "<br>")
-        self.set_content(
-            "Overview",
-            f'<table style="width:100%; border-collapse:collapse;">{overview_rows}</table>'
-            f'<div style="margin-top:14px; padding-top:10px; border-top:1px solid {COLORS["border.subtle"]};">'
-            f'<p style="margin:0 0 6px 0; color:{COLORS["text.secondary"]}; font-size:11px; font-weight:600;">'
-            f"Requested task</p>"
-            f'<div style="color:{COLORS["text.primary"]}; white-space:pre-wrap; word-wrap:break-word;">'
-            f"{requested_task}</div></div>",
-        )
-        self.set_content("Task", escape(str(task_text or "Task details are hidden by your history settings.")))
+        self._overview_fields = fields
+        self._requested_task = str(request_preview or "Task details are unavailable.")
+        self._render_overview()
         task_inputs = job.get("task_inputs") or {}
         warning = job.get("input_integrity_warning")
         task_input_html = (
@@ -272,7 +286,7 @@ class TaskRunDetailView(QWidget):
             + "<h3>Artifact inputs and lineage</h3>"
             + artifact_html,
         )
-        self.set_content("Progress", self._format_json(job.get("attempts", [])))
+        self.set_content("Progress", self._format_progress(job.get("attempts", [])))
         review = job.get("review") or {}
         review_data = review.get("review") if isinstance(review.get("review"), dict) else review
         if review_data:
@@ -434,14 +448,116 @@ class TaskRunDetailView(QWidget):
     def set_answer(self, answer: str | None) -> None:
         self.answer_text = answer if isinstance(answer, str) else ""
         self.copy_answer_button.setEnabled(bool(self.answer_text))
-        if self.answer_text:
-            set_markdown(self.answer_browser, self.answer_text)
-        else:
-            set_html(self.answer_browser, "<i>No answer is available for this result.</i>")
+        self._render_overview()
 
     @staticmethod
     def _format_json(value) -> str:
         return render_json_html(value)
+
+    @staticmethod
+    def _format_progress(attempts: object) -> str:
+        if not isinstance(attempts, list) or not attempts:
+            return '<i>No attempts have been recorded yet.</i>'
+        rows: list[str] = []
+        for index, attempt in enumerate(attempts, start=1):
+            if not isinstance(attempt, dict):
+                rows.append(
+                    f'<div style="padding:12px 0; border-bottom:1px solid {COLORS["border.subtle"]};">'
+                    f"{escape(str(attempt))}</div>"
+                )
+                continue
+            attempt_no = attempt.get("attempt_id") or index
+            details = (
+                ("Status", attempt.get("status")),
+                ("Agent", attempt.get("worker") or attempt.get("agent")),
+                ("Started", attempt.get("started_at")),
+                ("Finished", attempt.get("completed_at") or attempt.get("finished_at")),
+                ("Error", attempt.get("error")),
+            )
+            detail_rows = "".join(
+                f'<div style="padding-top:3px; color:{COLORS["text.secondary"]};">'
+                f'<span style="color:{COLORS["text.muted"]};">{escape(label)}:</span> '
+                f'{escape(str(value))}</div>'
+                for label, value in details
+                if value not in (None, "")
+            )
+            rows.append(
+                f'<div style="padding:12px 0; border-bottom:1px solid {COLORS["border.subtle"]};">'
+                f'<div style="color:{COLORS["text.primary"]}; font-weight:700;">Attempt {escape(str(attempt_no))}</div>'
+                f"{detail_rows}</div>"
+            )
+        return "".join(rows)
+
+    @staticmethod
+    def _markdown_fragment(content: str) -> str:
+        document = QTextDocument()
+        document.setMarkdown(content)
+        rendered = document.toHtml()
+        body_start = rendered.find("<body")
+        if body_start >= 0:
+            body_start = rendered.find(">", body_start) + 1
+            body_end = rendered.rfind("</body>")
+            if body_start > 0 and body_end > body_start:
+                return rendered[body_start:body_end]
+        return escape(content).replace("\n", "<br>")
+
+    def _render_overview(self, *, force: bool = False) -> None:
+        if not hasattr(self, "overview_details_button"):
+            return
+        summary_labels = {label: value for label, value in self._overview_fields}
+        summary_fields = (
+            ("Registered name", summary_labels.get("Registered name")),
+            ("Status", summary_labels.get("Status")),
+            ("Actual agent", summary_labels.get("Actual agent")),
+            ("Finished time", summary_labels.get("Finished")),
+        )
+        summary_cells = "".join(
+            f'<td style="width:50%; padding:10px 12px; vertical-align:top;">'
+            f'<div style="color:{COLORS["text.muted"]}; font-size:11px;">{escape(label)}</div>'
+            f'<div style="padding-top:3px; color:{COLORS["text.primary"]}; font-weight:700;">'
+            f"{escape(str(value or '—'))}</div></td>"
+            for label, value in summary_fields
+        )
+        answer_html = (
+            self._markdown_fragment(self.answer_text)
+            if self.answer_text
+            else f'<i style="color:{COLORS["text.muted"]};">No answer is available for this result.</i>'
+        )
+        details_html = ""
+        if self._overview_details_expanded:
+            detail_rows = "".join(
+                self._overview_row(label, value or "—")
+                for label, value in self._overview_fields
+                if label not in {"Registered name", "Status", "Actual agent", "Finished"}
+            )
+            details_html = (
+                f'<div style="margin-top:12px; padding:10px 0 4px 0; border-top:1px solid {COLORS["border.subtle"]};">'
+                f'<div style="color:{COLORS["text.secondary"]}; font-weight:700;">Run details</div>'
+                f'<table style="width:100%; border-collapse:collapse;">{detail_rows}</table></div>'
+            )
+        requested = escape(self._requested_task or "Task details are unavailable.").replace("\n", "<br>")
+        content = (
+            f'<div style="padding:2px 0 8px 0; border-bottom:1px solid {COLORS["border.subtle"]};">'
+            f'<table style="width:100%; border-collapse:collapse;"><tr>{summary_cells}</tr></table>{details_html}</div>'
+            f'<div style="margin-top:16px; padding-top:2px;">'
+            f'<div style="color:{COLORS["accent.relay"]}; font-weight:700;">Answer</div>'
+            f'<div style="margin-top:6px; color:{COLORS["text.primary"]};">{answer_html}</div></div>'
+            f'<div style="margin-top:18px; padding-top:14px; border-top:1px solid {COLORS["border.subtle"]};">'
+            f'<div style="color:{COLORS["state.info"]}; font-weight:700;">Requested Task</div>'
+            f'<div style="margin-top:6px; color:{COLORS["text.primary"]}; white-space:pre-wrap; word-wrap:break-word;">'
+            f"{requested}</div></div>"
+        )
+        if force:
+            self._set_content("Overview", content, force=True)
+        else:
+            self.set_content("Overview", content)
+
+    def _toggle_overview_details(self, expanded: bool) -> None:
+        self._overview_details_expanded = expanded
+        self.overview_details_button.setText("See less" if expanded else "See more")
+        # This is an explicit user action. It must win over the polling guard
+        # that otherwise defers updates while the QTextBrowser has a selection.
+        self._render_overview(force=True)
 
     @classmethod
     def _overview_row(cls, label: str, value: object) -> str:

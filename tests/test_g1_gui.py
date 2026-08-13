@@ -242,6 +242,35 @@ class G1GuiTests(unittest.TestCase):
         self.assertEqual(self.window.job_detail_view.artifacts_view.selected_record().role, "result")
         self.assertIn("available", self.window.job_detail_view.artifacts_view.json_preview.topLevelItem(0).text(0))
 
+    def test_log_polling_keeps_existing_output_when_eof_returns_empty_chunk(self):
+        self.window.current_mode = "normal"
+        self.window.selected_job_id = "job-log"
+        self.window.current_detail = {"job_id": "job-log", "status": "RUNNING"}
+        self.window.job_detail_view.set_job(
+            {
+                "job_id": "job-log",
+                "status": "RUNNING",
+                "attempts": [{"attempt_id": 7, "worker": "codex"}],
+            }
+        )
+        self.window.job_detail_view.tabs.setCurrentIndex(self.window.job_detail_view.TAB_NAMES.index("Logs"))
+        self.window.log_attempt_id = 7
+        self.window._log_buffer_key = ("job-log", 7, "stdout", False)
+
+        self.window.pending[1] = "logs"
+        self.window._handle_response(1, {"text": "first line\n", "next_offset": 11}, None)
+        self.assertIn("first line", self.window.job_detail_view._browsers["Logs"].toPlainText())
+
+        self.window.pending[2] = "logs"
+        self.window._handle_response(2, {"text": "", "next_offset": 11, "eof": True}, None)
+        self.assertIn("first line", self.window.job_detail_view._browsers["Logs"].toPlainText())
+
+        self.window.pending[3] = "logs"
+        self.window._handle_response(3, {"text": "second line\n", "next_offset": 23}, None)
+        log_text = self.window.job_detail_view._browsers["Logs"].toPlainText()
+        self.assertIn("first line", log_text)
+        self.assertIn("second line", log_text)
+
     def test_run_overview_is_copyable_and_wraps_requested_task(self):
         requested_task = "Investigate this Task and produce a detailed result " * 12
         self.window.job_detail_view.set_job(
@@ -258,7 +287,7 @@ class G1GuiTests(unittest.TestCase):
         self.assertTrue(overview.textInteractionFlags() & Qt.TextSelectableByKeyboard)
         self.assertEqual(overview.lineWrapMode(), QTextEdit.WidgetWidth)
         self.assertEqual(overview.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
-        self.assertIn("Requested task", overview.toPlainText())
+        self.assertIn("Requested Task", overview.toPlainText())
         self.assertIn("Investigate this Task", overview.toPlainText())
         self.assertNotIn("<pre>", overview.toHtml().lower())
 

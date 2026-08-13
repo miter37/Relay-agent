@@ -148,6 +148,7 @@ def application_stylesheet() -> str:
         QTabBar::tab:selected {{ color: {color["text.primary"]}; border-bottom: 2px solid {color["accent.primary"]}; }}
         QTabWidget::pane {{ background: {color["bg.surface"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["panel"]}px; }}
         QTextBrowser#evidencePane {{ background: {color["bg.surface"]}; border: 0; padding: {SPACING["md"]}px; }}
+        QTextBrowser#overviewEvidencePane {{ background: {color["bg.surface"]}; border: 0; padding: {SPACING["xs"]}px {SPACING["md"]}px {SPACING["md"]}px; }}
         QWidget#artifactListPanel {{ background: {color["bg.surface"]}; border-right: 1px solid {color["border.subtle"]}; padding-right: {SPACING["md"]}px; }}
         QFrame#artifactMetadata {{ background: {color["bg.input"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["control"]}px; }}
         QLabel#artifactPath {{ color: {color["text.secondary"]}; }}
@@ -158,6 +159,14 @@ def application_stylesheet() -> str:
         QLabel#artifactStatus[state="failed"] {{ color: {color["state.danger"]}; border-color: {color["state.danger"]}; }}
         QLabel#artifactStatus[state="muted"] {{ color: {color["text.muted"]}; border-color: {color["border.subtle"]}; }}
         QStackedWidget#artifactPreviewSurface {{ background: {color["bg.surface"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["panel"]}px; }}
+        QFrame#pipelineNodeCard {{ background: {color["bg.surface"]}; border: 1px solid {color["border.subtle"]}; border-radius: {RADIUS["control"]}px; }}
+        QFrame#pipelineNodeCard[pipelineState="completed"] {{ border-color: {color["state.success"]}; }}
+        QFrame#pipelineNodeCard[pipelineState="running"] {{ border-color: {color["accent.relay"]}; }}
+        QFrame#pipelineNodeCard[pipelineState="queued"], QFrame#pipelineNodeCard[pipelineState="accepted"], QFrame#pipelineNodeCard[pipelineState="awaiting_approval"], QFrame#pipelineNodeCard[pipelineState="awaiting_review"] {{ border-color: {color["state.warning"]}; }}
+        QFrame#pipelineNodeCard[pipelineState="failed"] {{ border-color: {color["state.danger"]}; }}
+        QFrame#pipelineNodeCard[pipelineState="blocked"] {{ border: 1px dashed {color["text.muted"]}; }}
+        QFrame#pipelineNodeCard[pipelineState="cancelled"] {{ border-color: {color["text.muted"]}; }}
+        QFrame#pipelineNodeCard[pipelineSelected="true"] {{ border-width: 2px; border-color: {color["accent.primary"]}; }}
         QLabel#statusBadge {{
             border-radius: {RADIUS["badge"]}px; padding: 2px {SPACING["sm"]}px 2px {SPACING["md"]}px;
             background: {color["bg.surface"]}; border: 0; border-left: 3px solid {color["border.subtle"]};

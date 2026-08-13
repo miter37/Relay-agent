@@ -273,6 +273,7 @@ class ProjectRunsView(QWidget):
     reject_requested = Signal(str, str)
     open_run_logs_requested = Signal(str)
     open_run_answer_requested = Signal(str)
+    open_task_requested = Signal(str)
     reexecute_from_node_requested = Signal(str)
     reexecute_with_comment_requested = Signal(str, str)
     edit_task_requested = Signal(str)
@@ -318,9 +319,13 @@ class ProjectRunsView(QWidget):
         left.addLayout(grouping)
         self.run_list = QTreeWidget()
         self.run_list.setHeaderLabels(["Project Run", "Status"])
-        self.run_list.setColumnWidth(0, 260)
         self.run_list.setRootIsDecorated(True)
         self.run_list.setAlternatingRowColors(True)
+        self.run_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        run_header = self.run_list.header()
+        run_header.setStretchLastSection(False)
+        run_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        run_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.run_list.itemClicked.connect(self._on_item_clicked)
         self.run_list.itemExpanded.connect(lambda item: self._remember_tree_state(item, True))
         self.run_list.itemCollapsed.connect(lambda item: self._remember_tree_state(item, False))
@@ -340,6 +345,7 @@ class ProjectRunsView(QWidget):
         self.detail.reject_requested.connect(self.reject_requested.emit)
         self.detail.open_run_logs_requested.connect(self.open_run_logs_requested.emit)
         self.detail.open_run_answer_requested.connect(self.open_run_answer_requested.emit)
+        self.detail.open_task_requested.connect(self.open_task_requested.emit)
         self.detail.reexecute_from_node_requested.connect(self.reexecute_from_node_requested.emit)
         self.detail.reexecute_with_comment_requested.connect(self.reexecute_with_comment_requested.emit)
         self.detail.edit_task_requested.connect(self.edit_task_requested.emit)
@@ -683,7 +689,7 @@ class ProjectRunsView(QWidget):
 
 
 class ProjectRunDetailView(QWidget):
-    """Right-hand verdict + actions + Pipeline/Artifacts/Timeline + node inspector."""
+    """Right-hand verdict + actions + Workspace/Pipeline/Timeline + inspector."""
 
     action_requested = Signal(str, str, dict)
     open_output_requested = Signal(str)
@@ -692,6 +698,7 @@ class ProjectRunDetailView(QWidget):
     reject_requested = Signal(str, str)
     open_run_logs_requested = Signal(str)
     open_run_answer_requested = Signal(str)
+    open_task_requested = Signal(str)
     reexecute_from_node_requested = Signal(str)
     reexecute_with_comment_requested = Signal(str, str)
     edit_task_requested = Signal(str)
@@ -711,6 +718,8 @@ class ProjectRunDetailView(QWidget):
         self._node_artifacts: dict[str, list[dict[str, Any]]] = {}
         self._review_details: dict[str, dict[str, Any]] = {}
         self._run_signature: str | None = None
+        self._focused_node_id: str | None = None
+        self._pending_artifact_uid: str | None = None
         self._pipeline_inspector_open = False
         self._pipeline_inspector_node_id: str | None = None
         # Nodes the Orchestrator made a repair decision on for this run, kept as
@@ -809,6 +818,10 @@ class ProjectRunDetailView(QWidget):
         self.steps_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.steps_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.steps_table.verticalHeader().setVisible(False)
+        # Steps remain an internal selection/data model for Pipeline Inspector
+        # compatibility. They are not a public tab and must never appear as a
+        # default 100x30 child widget in the detail layout.
+        self.steps_table.hide()
         header = self.steps_table.horizontalHeader()
         for column in (0, 1, 2, 3, 4, 5):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
@@ -835,7 +848,6 @@ class ProjectRunDetailView(QWidget):
         self.run_tabs = QTabWidget()
         self.run_tabs.addTab(self.workspace_view, "Workspace")
         self.run_tabs.addTab(self.pipeline_view, "Pipeline")
-        self.run_tabs.addTab(self.artifacts_view, "Artifacts")
         self.run_tabs.addTab(self.timeline_view, "Timeline")
         self.run_tabs.addTab(self.orchestrator_view, "Orchestrator")
         self.run_tabs.currentChanged.connect(self._on_run_tab_changed)
@@ -849,6 +861,8 @@ class ProjectRunDetailView(QWidget):
         self.inspector.open_run_logs_requested.connect(self.open_run_logs_requested.emit)
         self.inspector.open_run_answer_requested.connect(self.open_run_answer_requested.emit)
         self.inspector.open_artifact_requested.connect(self.open_output_requested.emit)
+        self.inspector.open_task_requested.connect(self._open_task_from_inspector)
+        self.inspector.view_result_requested.connect(self._view_result_from_inspector)
         self.inspector.reexecute_from_node_requested.connect(self.reexecute_from_node_requested.emit)
         self.inspector.reexecute_with_comment_requested.connect(self.reexecute_with_comment_requested.emit)
         self.inspector.edit_task_requested.connect(self.edit_task_requested.emit)
@@ -1148,8 +1162,15 @@ class ProjectRunDetailView(QWidget):
                 return
 
     def _on_pipeline_artifact_selected(self, artifact_uid: str) -> None:
-        self.run_tabs.setCurrentWidget(self.artifacts_view)
-        self.artifacts_view.select_artifact(artifact_uid)
+        self.run_tabs.setCurrentWidget(self.workspace_view)
+        self.workspace_view.focus_artifact(artifact_uid)
+
+    def _open_task_from_inspector(self, task_id: str) -> None:
+        self.open_task_requested.emit(task_id)
+
+    def _view_result_from_inspector(self, node_id: str) -> None:
+        self.run_tabs.setCurrentWidget(self.workspace_view)
+        self.workspace_view.focus_node_result(node_id)
 
     def _close_pipeline_inspector(self) -> None:
         self._pipeline_inspector_open = False
@@ -1380,7 +1401,7 @@ class ProjectRunDetailView(QWidget):
         self._node_artifacts[str(node_id)] = [item for item in artifacts if isinstance(item, dict)]
         self._render_artifacts_tab()
         self._render_workspace()
-        self._render_pipeline()
+        self.pipeline_view.update_node_artifacts(str(node_id), self._node_artifacts[str(node_id)])
         self._refresh_inspector_for_current_selection()
 
     def cache_node_artifact_error(self, node_id: str, message: str) -> None:
@@ -1388,7 +1409,7 @@ class ProjectRunDetailView(QWidget):
             {"role": "unavailable", "relative_path": str(message or "Artifact list is unavailable.")}
         ]
         self._render_artifacts_tab()
-        self._render_pipeline()
+        self.pipeline_view.update_node_artifacts(str(node_id), self._node_artifacts[str(node_id)])
         self._refresh_inspector_for_current_selection()
 
     def _render_approvals(self) -> None:
@@ -1477,6 +1498,8 @@ class ProjectRunInspectorView(QWidget):
     open_run_logs_requested = Signal(str)
     open_run_answer_requested = Signal(str)
     open_artifact_requested = Signal(str)
+    open_task_requested = Signal(str)
+    view_result_requested = Signal(str)
     reexecute_from_node_requested = Signal(str)
     reexecute_with_comment_requested = Signal(str, str)
     edit_task_requested = Signal(str)
@@ -1640,6 +1663,12 @@ class ProjectRunInspectorView(QWidget):
         self.open_logs_button.clicked.connect(self._emit_open_logs)
         self.open_answer_button = LabeledButton("external-link", "Open answer")
         self.open_answer_button.clicked.connect(self._emit_open_answer)
+        self.open_task_button = LabeledButton("checklist", "Open Task")
+        self.open_task_button.setToolTip("Open this registered Task in the Tasks screen.")
+        self.open_task_button.clicked.connect(self._emit_open_task)
+        self.view_result_button = LabeledButton("search", "View result", tone="primary")
+        self.view_result_button.setToolTip("Open this node's Artifacts and Review in the Project Run Workspace.")
+        self.view_result_button.clicked.connect(self._emit_view_result)
         self.reexec_button = LabeledButton("play", "Re-execute from this node")
         self.reexec_button.clicked.connect(self._emit_reexec)
         self.comment_reexec_button = LabeledButton("repeat", "Add comment & re-run")
@@ -1653,6 +1682,8 @@ class ProjectRunInspectorView(QWidget):
         self.edit_task_button.clicked.connect(self._emit_edit_task)
         actions.addWidget(self.open_logs_button)
         actions.addWidget(self.open_answer_button)
+        actions.addWidget(self.open_task_button)
+        actions.addWidget(self.view_result_button)
         actions.addWidget(self.reexec_button)
         actions.addWidget(self.comment_reexec_button)
         actions.addWidget(self.edit_task_button)
@@ -1828,6 +1859,8 @@ class ProjectRunInspectorView(QWidget):
         # The buttons stay visible but disabled when no active Task Run exists.
         self.open_logs_button.setEnabled(bool(active_task_run_id))
         self.open_answer_button.setEnabled(bool(active_task_run_id) and status in {"completed", "partial", "failed"})
+        self.open_task_button.setEnabled(bool(self._step.get("task_id")))
+        self.view_result_button.setEnabled(bool(self._node_id))
         self.reexec_button.setEnabled(bool(self._project_run_id and self._node_id))
         self.comment_reexec_button.setEnabled(bool(self._project_run_id and self._node_id))
         self.edit_task_button.setEnabled(bool(self._step.get("task_id")))
@@ -1841,6 +1874,15 @@ class ProjectRunInspectorView(QWidget):
         active_task_run_id = str(self._step.get("active_task_run_id") or "")
         if active_task_run_id:
             self.open_run_answer_requested.emit(active_task_run_id)
+
+    def _emit_open_task(self) -> None:
+        task_id = str(self._step.get("task_id") or "")
+        if task_id:
+            self.open_task_requested.emit(task_id)
+
+    def _emit_view_result(self) -> None:
+        if self._node_id:
+            self.view_result_requested.emit(self._node_id)
 
     def _emit_reexec(self) -> None:
         if self._project_run_id and self._node_id:
@@ -2238,6 +2280,16 @@ class ProjectRunArtifactsView(ArtifactExplorerView):
     def cache_artifact_error(self, artifact_uid: str, message: str) -> None:
         self.cache_error(artifact_uid, message)
 
+    def focus_node(self, node_id: str) -> bool:
+        """Select the first Artifact produced by a Project node."""
+        target = str(node_id or "")
+        for group in self._groups:
+            for record in group.records:
+                if target and record.node_id == target and record.artifact_uid:
+                    self.select_artifact(record.artifact_uid)
+                    return True
+        return False
+
     def _emit_open_uid(self) -> None:
         record = self.selected_record()
         if record and record.artifact_uid:
@@ -2321,6 +2373,7 @@ class ProjectRunPipelineView(QWidget):
         self._receipt_steps_by_id: dict[str, dict[str, Any]] = {}
         self._node_artifacts_by_id: dict[str, list[dict[str, Any]]] = {}
         self._repaired_node_ids: set[str] = set()
+        self._render_signature: str | None = None
 
         self._root_layout = QVBoxLayout(self)
         self._root_layout.setContentsMargins(0, 0, 0, 0)
@@ -2386,6 +2439,7 @@ class ProjectRunPipelineView(QWidget):
         self._receipt_steps_by_id = {}
         self._node_artifacts_by_id = {}
         self._repaired_node_ids = set()
+        self._render_signature = None
         self._render()
 
     def set_run(
@@ -2422,7 +2476,54 @@ class ProjectRunPipelineView(QWidget):
             for node_id, items in (node_artifacts or {}).items()
             if isinstance(items, list)
         }
+        render_signature = _stable_mapping_signature(
+            {
+                "project_run_id": self._project_run_id,
+                "nodes": self._nodes,
+                "connections": self._connections,
+                "steps": self._steps_by_id,
+                "receipt_steps": self._receipt_steps_by_id,
+                "node_artifacts": self._node_artifacts_by_id,
+                "repaired_node_ids": sorted(self._repaired_node_ids),
+            }
+        )
+        if render_signature == self._render_signature:
+            return
+        self._render_signature = render_signature
         self._render()
+
+    def update_node_artifacts(self, node_id: str, artifacts: list[dict[str, Any]]) -> None:
+        """Update one already-rendered card without rebuilding the whole DAG.
+
+        Node artifact requests arrive independently after the Project Run
+        detail. Rebuilding every card for each response made the graph appear
+        to flicker and caused repeated layout/paint work. Keep final artifacts
+        already attached by the detail renderer and refresh only the affected
+        card when the graph is present.
+        """
+
+        key = str(node_id or "")
+        if not key:
+            return
+        normalized = [item for item in artifacts if isinstance(item, dict)]
+        existing = self._node_artifacts_by_id.get(key, [])
+        final_items = [item for item in existing if bool(item.get("is_final"))]
+        merged = normalized + [item for item in final_items if _artifact_uid(item) not in {
+            _artifact_uid(candidate) for candidate in normalized
+        }]
+        self._node_artifacts_by_id[key] = merged
+        card = next(
+            (child for child in self.cards_container.findChildren(ProjectRunNodeCard) if child.node_id == key),
+            None,
+        )
+        if card is None:
+            self._render_signature = None
+            self._render()
+            return
+        if card.set_artifacts(merged):
+            self.cards_container_layout.activate()
+            self.cards_container.updateGeometry()
+            self.cards_container.update()
 
     def select_node(self, node_id: str) -> None:
         """Programmatically highlight a node card (does not emit a signal)."""
@@ -2434,96 +2535,110 @@ class ProjectRunPipelineView(QWidget):
             self._render_content()
 
     def _render_content(self) -> None:
-        # Clear previous cards and their edges.
-        while self.cards_container_layout.count():
-            item = self.cards_container_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-        if not self._nodes:
-            self.empty.setVisible(True)
-            self.body.setVisible(False)
-            return
-        self.empty.setVisible(False)
-        self.body.setVisible(True)
+        # Card construction changes child geometry many times. Keep the
+        # viewport frozen until the complete graph, its layout, and its edge
+        # specs are ready; otherwise Qt paints each intermediate card as a
+        # separate frame, which looks like a small window flickering on screen.
+        self.cards_container.setUpdatesEnabled(False)
+        self.pipeline_scroll.viewport().setUpdatesEnabled(False)
+        try:
+            # Clear previous cards and their edges.
+            while self.cards_container_layout.count():
+                item = self.cards_container_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    # Keep the old card parented until Qt processes deletion.
+                    # Detaching a visible QWidget first can briefly promote it
+                    # to a top-level native window on Windows.
+                    widget.hide()
+                    widget.deleteLater()
+            if not self._nodes:
+                self.empty.setVisible(True)
+                self.body.setVisible(False)
+                return
+            self.empty.setVisible(False)
+            self.body.setVisible(True)
 
-        node_ids = [str(n.get("node_id") or "") for n in self._nodes]
-        predecessors: dict[str, list[str]] = {nid: [] for nid in node_ids}
-        for conn in self._connections:
-            from_node = str(conn.get("from_node") or "")
-            to_node = str(conn.get("to_node") or "")
-            if to_node in predecessors:
-                predecessors[to_node].append(from_node)
-        levels = _level_for_nodes(node_ids, predecessors)
-        # Group nodes by level.
-        by_level: dict[int, list[str]] = {}
-        for nid in node_ids:
-            by_level.setdefault(levels.get(nid, 0), []).append(nid)
-        max_level = max(by_level.keys()) if by_level else 0
+            node_ids = [str(n.get("node_id") or "") for n in self._nodes]
+            predecessors: dict[str, list[str]] = {nid: [] for nid in node_ids}
+            for conn in self._connections:
+                from_node = str(conn.get("from_node") or "")
+                to_node = str(conn.get("to_node") or "")
+                if to_node in predecessors:
+                    predecessors[to_node].append(from_node)
+            levels = _level_for_nodes(node_ids, predecessors)
+            # Group nodes by level.
+            by_level: dict[int, list[str]] = {}
+            for nid in node_ids:
+                by_level.setdefault(levels.get(nid, 0), []).append(nid)
+            max_level = max(by_level.keys()) if by_level else 0
 
-        # Reserve a column for each level; rows = node position within the column.
-        positions: dict[str, tuple[int, int]] = {}
-        for level in range(max_level + 1):
-            members = sorted(by_level.get(level, []))
-            for row, nid in enumerate(members):
-                positions[nid] = (level, row)
+            # Reserve a column for each level; rows = node position within the column.
+            positions: dict[str, tuple[int, int]] = {}
+            for level in range(max_level + 1):
+                members = sorted(by_level.get(level, []))
+                for row, nid in enumerate(members):
+                    positions[nid] = (level, row)
 
         # Determine failed nodes so blocked descendants can dim + edges can dash.
         # (status is read directly from per-step dicts when computing edge styles
         # below; no separate index is needed here.)
 
         # Build cards first, then compute edge overlay positions.
-        for nid in node_ids:
-            level, row = positions[nid]
-            node_def = next((n for n in self._nodes if str(n.get("node_id") or "") == nid), {})
-            step = self._steps_by_id.get(nid, {})
-            card = ProjectRunNodeCard(
-                nid,
-                node_def,
-                step,
-                self._receipt_steps_by_id.get(nid),
-                self._node_artifacts_by_id.get(nid, []),
-            )
-            card.clicked.connect(self._on_card_clicked)
-            card.artifact_selected.connect(self.artifact_selected.emit)
-            self.cards_container_layout.addWidget(card, row, level)
+            for nid in node_ids:
+                level, row = positions[nid]
+                node_def = next((n for n in self._nodes if str(n.get("node_id") or "") == nid), {})
+                step = self._steps_by_id.get(nid, {})
+                card = ProjectRunNodeCard(
+                    nid,
+                    node_def,
+                    step,
+                    self._receipt_steps_by_id.get(nid),
+                    self._node_artifacts_by_id.get(nid, []),
+                )
+                card.clicked.connect(self._on_card_clicked)
+                card.artifact_selected.connect(self.artifact_selected.emit)
+                self.cards_container_layout.addWidget(card, row, level)
 
         # Edges are painted by the graph canvas from the actual card geometries.
         # This keeps arrows out of the layout and prevents zero-length/overlapped
         # lines when the scroll area or card widths change.
-        edge_specs: list[dict[str, Any]] = []
-        for conn in self._connections:
-            from_node = str(conn.get("from_node") or "")
-            to_node = str(conn.get("to_node") or "")
-            if from_node not in positions or to_node not in positions:
-                continue
-            from_step = self._steps_by_id.get(from_node, {})
-            to_step = self._steps_by_id.get(to_node, {})
-            dashed = (
-                str(from_step.get("status") or "").casefold() == "failed"
-                or str(to_step.get("status") or "").casefold() == "blocked"
+            edge_specs: list[dict[str, Any]] = []
+            for conn in self._connections:
+                from_node = str(conn.get("from_node") or "")
+                to_node = str(conn.get("to_node") or "")
+                if from_node not in positions or to_node not in positions:
+                    continue
+                from_step = self._steps_by_id.get(from_node, {})
+                to_step = self._steps_by_id.get(to_node, {})
+                dashed = (
+                    str(from_step.get("status") or "").casefold() == "failed"
+                    or str(to_step.get("status") or "").casefold() == "blocked"
+                )
+                # A quiet, one-color callout for a connection whose source node the
+                # Orchestrator actually repaired - only when that node went on to
+                # succeed; a still-failed source keeps the dashed/red failure signal,
+                # which matters more than "an attempt was made."
+                repaired = from_node in self._repaired_node_ids and not dashed
+                edge_specs.append(
+                    {
+                        "from_node": from_node,
+                        "to_node": to_node,
+                        "dashed": dashed,
+                        "repaired": repaired,
+                    }
+                )
+            self.cards_container.set_edge_specs(edge_specs)
+            self.cards_container.setMinimumSize(
+                max(260, (max_level + 1) * 220),
+                max(140, max(len(members) for members in by_level.values()) * 116),
             )
-            # A quiet, one-color callout for a connection whose source node the
-            # Orchestrator actually repaired - only when that node went on to
-            # succeed; a still-failed source keeps the dashed/red failure signal,
-            # which matters more than "an attempt was made."
-            repaired = from_node in self._repaired_node_ids and not dashed
-            edge_specs.append(
-                {
-                    "from_node": from_node,
-                    "to_node": to_node,
-                    "dashed": dashed,
-                    "repaired": repaired,
-                }
-            )
-        self.cards_container.set_edge_specs(edge_specs)
-        self.cards_container.setMinimumSize(
-            max(260, (max_level + 1) * 220),
-            max(140, max(len(members) for members in by_level.values()) * 116),
-        )
-        self.cards_container_layout.activate()
-        self.cards_container.update()
+            self.cards_container_layout.activate()
+        finally:
+            self.pipeline_scroll.viewport().setUpdatesEnabled(True)
+            self.cards_container.setUpdatesEnabled(True)
+            self.cards_container.updateGeometry()
+            self.cards_container.update()
 
     def _on_card_clicked(self, node_id: str) -> None:
         self.select_node(node_id)
@@ -2545,7 +2660,8 @@ class ProjectRunGraphCanvas(QWidget):
     def edge_segments(self) -> list[dict[str, Any]]:
         """Return actual source/target border points for geometry tests and QA."""
         cards = {card.node_id: card for card in self.findChildren(ProjectRunNodeCard)}
-        self.layout().activate() if self.layout() else None
+        # Geometry is activated after graph assembly (and on normal Qt layout
+        # passes). Avoid forcing a layout pass from every paint event.
         segments: list[dict[str, Any]] = []
         for spec in self._edge_specs:
             source = cards.get(str(spec.get("from_node") or ""))
@@ -2623,6 +2739,7 @@ class ProjectRunNodeCard(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumWidth(150)
         self.setMaximumWidth(220)
+        self._artifact_signature: str | None = None
 
         status = str(step.get("status") or "queued").casefold()
         attempts: list[dict[str, Any]] = []
@@ -2673,37 +2790,51 @@ class ProjectRunNodeCard(QFrame):
             err_label.setObjectName("pipelineErrorCode")
             layout.addWidget(err_label)
 
-        artifact_items = [item for item in (node_artifacts or []) if isinstance(item, dict)]
-        if artifact_items:
-            artifacts_row = QHBoxLayout()
-            artifacts_row.setSpacing(4)
-            for artifact in artifact_items:
-                uid = _artifact_uid(artifact)
-                if not uid:
-                    continue
-                role = str(artifact.get("role") or "output")
-                chip = ProjectRunArtifactChip(uid, role, artifact.get("relative_path"), self)
-                chip.double_clicked.connect(self.artifact_selected.emit)
-                artifacts_row.addWidget(chip)
-            artifacts_row.addStretch(1)
-            layout.addLayout(artifacts_row)
+        self.artifacts_host = QWidget(self)
+        self.artifacts_row = QHBoxLayout(self.artifacts_host)
+        self.artifacts_row.setContentsMargins(0, 0, 0, 0)
+        self.artifacts_row.setSpacing(4)
+        layout.addWidget(self.artifacts_host)
+        self._set_artifacts(node_artifacts or [])
 
         # Visual rules: status tint (color + dashed border) per design doc §5.
         color = _PIPELINE_STATUS_COLORS.get(status, COLORS["text.muted"])
         self.setProperty("pipelineState", status)
         self.setProperty("pipelineColor", color)
-        if status == "blocked":
-            # "Blocked" reads as "did not run", distinct from "Failed": dimmed +
-            # dashed border.
-            self.setStyleSheet(
-                f'QFrame#pipelineNodeCard[pipelineState="blocked"]'
-                f"{{ border: 1px dashed {COLORS['text.muted']}; background: {COLORS['bg.surface']}; }}"
-            )
-        else:
-            self.setStyleSheet(
-                f'QFrame#pipelineNodeCard[pipelineState="{status}"]'
-                f"{{ border: 1px solid {color}; background: {COLORS['bg.surface']}; }}"
-            )
+
+    def _set_artifacts(self, artifacts: list[dict[str, Any]]) -> bool:
+        normalized = [item for item in artifacts if isinstance(item, dict) and _artifact_uid(item)]
+        signature = _stable_mapping_signature(normalized)
+        if signature == self._artifact_signature:
+            return False
+        self._artifact_signature = signature
+        self.artifacts_host.setUpdatesEnabled(False)
+        try:
+            while self.artifacts_row.count():
+                item = self.artifacts_row.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.hide()
+                    widget.deleteLater()
+            for artifact in normalized:
+                uid = _artifact_uid(artifact)
+                role = str(artifact.get("role") or "output")
+                chip = ProjectRunArtifactChip(uid, role, artifact.get("relative_path"), self.artifacts_host)
+                chip.double_clicked.connect(self.artifact_selected.emit)
+                self.artifacts_row.addWidget(chip)
+            if normalized:
+                self.artifacts_row.addStretch(1)
+            self.artifacts_host.setVisible(bool(normalized))
+        finally:
+            self.artifacts_host.setUpdatesEnabled(True)
+        return True
+
+    def set_artifacts(self, artifacts: list[dict[str, Any]]) -> bool:
+        """Refresh this card's output chips without reconstructing the card."""
+        changed = self._set_artifacts(artifacts)
+        if changed:
+            self.adjustSize()
+        return changed
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt signature)
         self.clicked.emit(self.node_id)
@@ -3132,8 +3263,8 @@ class ProjectRunOrchestratorView(QWidget):
 class ProjectRunWorkspaceView(QWidget):
     """Action-oriented first surface for a selected Project Run.
 
-    The existing Pipeline, Artifacts, Timeline, and Orchestrator tabs remain
-    the detailed evidence views. This surface composes the same artifact data
+    The existing Pipeline, Timeline, and Orchestrator tabs remain the detailed
+    evidence views. This surface composes the same artifact data
     with a compact stage rail and an inline review panel so a normal Run can be
     understood and resolved without navigating away from its result.
     """
@@ -3152,6 +3283,7 @@ class ProjectRunWorkspaceView(QWidget):
         self._pending_review_id: str | None = None
         self._review_action_pending = False
         self._run_signature: str | None = None
+        self._review_details: dict[str, dict[str, Any]] = {}
         self._pending_update: tuple[dict[str, Any], dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]] | None = None
         self._pending_update_count = 0
         self._rendering = False
@@ -3304,8 +3436,11 @@ class ProjectRunWorkspaceView(QWidget):
         next_run_id = str(run.get("project_run_id") or "")
         if previous_run_id != next_run_id:
             self._user_reading = False
+            self._focused_node_id = None
+            self._pending_artifact_uid = None
         self._rendering = True
         self._run = dict(run)
+        self._review_details = dict(review_details)
         self._run_signature = signature or _stable_mapping_signature(
             {"run": run, "artifacts": node_artifacts, "reviews": review_details}
         )
@@ -3339,9 +3474,39 @@ class ProjectRunWorkspaceView(QWidget):
             node_artifacts,
             review_artifacts,
         )
-        review = self._workspace_review(review_details)
+        if self._pending_artifact_uid:
+            pending_uid = self._pending_artifact_uid
+            self.artifacts_view.select_artifact(pending_uid)
+            if self.artifacts_view.selected_record() is not None:
+                self._pending_artifact_uid = None
+                self._focused_node_id = self.artifacts_view.selected_record().node_id or self._focused_node_id
+        elif self._focused_node_id:
+            self.artifacts_view.focus_node(self._focused_node_id)
+        review = self._workspace_review(review_details, self._focused_node_id)
         self._render_next_action(review)
         self._render_review(review)
+
+    def focus_artifact(self, artifact_uid: str) -> None:
+        """Focus one Project Run Artifact in the canonical Workspace."""
+        uid = str(artifact_uid or "")
+        if not uid:
+            return
+        self._pending_artifact_uid = uid
+        self.artifacts_view.select_artifact(uid)
+        record = self.artifacts_view.selected_record()
+        if record is not None:
+            self._pending_artifact_uid = None
+            self._focused_node_id = record.node_id or self._focused_node_id
+            self._render_review(self._workspace_review(self._review_details, self._focused_node_id))
+
+    def focus_node_result(self, node_id: str) -> None:
+        """Focus a node's Artifact and matching Review without leaving the Run."""
+        target = str(node_id or "")
+        if not target:
+            return
+        self._focused_node_id = target
+        self.artifacts_view.focus_node(target)
+        self._render_review(self._workspace_review(self._review_details, target))
 
     def _apply_pending_update(self) -> None:
         pending = self._pending_update
@@ -3423,14 +3588,31 @@ class ProjectRunWorkspaceView(QWidget):
         self.stage_layout.addStretch(1)
 
     def _workspace_review(
-        self, review_details: dict[str, dict[str, Any]]
+        self, review_details: dict[str, dict[str, Any]], preferred_node_id: str | None = None
     ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
         actionable = {"pending_human", "needs_human", "delivery_failed", "evaluating"}
-        for review_id, review in review_details.items():
+        preferred = str(preferred_node_id or "")
+        candidates = list(review_details.items())
+        if preferred:
+            def review_matches_node(entry: tuple[str, dict[str, Any]]) -> bool:
+                review = entry[1]
+                data = review.get("review") if isinstance(review.get("review"), dict) else review
+                if str(data.get("node_id") or "") == preferred:
+                    return True
+                return any(
+                    isinstance(artifact, dict) and str(artifact.get("node_id") or "") == preferred
+                    for artifact in review.get("artifacts") or []
+                )
+
+            candidates = sorted(
+                candidates,
+                key=lambda entry: 0 if review_matches_node(entry) else 1,
+            )
+        for review_id, review in candidates:
             data = review.get("review") if isinstance(review.get("review"), dict) else review
             if str(data.get("status") or "") in actionable:
                 return str(review_id), data, review
-        for review_id, review in review_details.items():
+        for review_id, review in candidates:
             data = review.get("review") if isinstance(review.get("review"), dict) else review
             return str(review_id), data, review
         return None
@@ -3457,7 +3639,7 @@ class ProjectRunWorkspaceView(QWidget):
             self.review_title.setText("Review")
             self.review_meta.setText("No review gate is waiting for action.")
             self.review_guidelines.clear()
-            self.review_checklist.setText("✓ Execution status and delivered Artifacts remain available in the tabs above.")
+            self.review_checklist.setText("✓ Execution status and delivered Artifacts remain available in Workspace.")
             self.review_evaluation.clear()
             self.review_handoff.clear()
             self.review_rounds.clear()

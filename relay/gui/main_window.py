@@ -133,6 +133,8 @@ class MainWindow(QMainWindow):
         self.current_detail: dict | None = None
         self.log_attempt_id: int | None = None
         self.log_offset: int | None = None
+        self._log_buffer_key: tuple[str, int, str, bool] | None = None
+        self._log_buffer_text = ""
         self.progress_check_job_id: str | None = None
         self.health_check_request_id: int | None = None
         self.task_run_file_lookups: dict[tuple[int, str], dict] = {}
@@ -327,6 +329,7 @@ class MainWindow(QMainWindow):
         self.project_runs_view.reject_requested.connect(self._reject_project_run_checkpoint)
         self.project_runs_view.open_run_logs_requested.connect(self._open_project_run_logs)
         self.project_runs_view.open_run_answer_requested.connect(self._open_project_run_answer)
+        self.project_runs_view.open_task_requested.connect(self._open_task_from_project_run_node)
         self.project_runs_view.reexecute_from_node_requested.connect(self._reexecute_project_run_from_node)
         self.project_runs_view.reexecute_with_comment_requested.connect(self._reexecute_project_run_with_comment)
         self.project_runs_view.edit_task_requested.connect(self._edit_task_from_project_run_node)
@@ -808,6 +811,12 @@ class MainWindow(QMainWindow):
             return
         self._pending_task_edit_id = task_id
         self._show_tasks()
+
+    def _open_task_from_project_run_node(self, task_id: str) -> None:
+        if self.current_mode != "normal" or not task_id:
+            return
+        self._show_tasks()
+        self._select_task(task_id)
 
     def _open_project_run_artifact(self, artifact_uid: str) -> None:
         if self.current_mode != "normal":
@@ -1846,7 +1855,18 @@ class MainWindow(QMainWindow):
             return
         if kind == "logs":
             self.log_offset = payload.get("next_offset")
-            self.job_detail_view.set_content("Logs", f"<pre>{escape(str(payload.get('text') or ''))}</pre>")
+            text = str(payload.get("text") or "")
+            key = self._current_log_buffer_key()
+            if payload.get("reset") or key != self._log_buffer_key:
+                self._log_buffer_text = text
+                self._log_buffer_key = key
+            elif text:
+                self._log_buffer_text += text
+            # Polling reaches EOF with an empty chunk. Keep the existing
+            # buffer visible instead of replacing it with that empty chunk.
+            if text or not self._log_buffer_text:
+                rendered = self._log_buffer_text or "No log output for this stream."
+                self.job_detail_view.set_content("Logs", f"<pre>{escape(rendered)}</pre>")
             return
         if kind == "schedules":
             self.schedules = {
@@ -2584,7 +2604,12 @@ class MainWindow(QMainWindow):
         self.current_detail = job
         self.log_attempt_id = None
         self.log_offset = None
+        self._log_buffer_key = None
+        self._log_buffer_text = ""
         self.job_detail_view.set_job(job)
+        # Overview now owns the answer section, so request the result as soon
+        # as a Task Run is opened instead of waiting for a removed Answer tab.
+        self._detail_tab_requested("Overview")
         self.runs_view.select_run(self.selected_job_id)
         self.detail_stack.setCurrentWidget(self.runs_view)
 
@@ -2594,7 +2619,7 @@ class MainWindow(QMainWindow):
         job_id = self.current_detail.get("job_id")
         if not job_id:
             return
-        if tab_name == "Answer":
+        if tab_name == "Overview":
             self._request(("result", job_id), f"/v1/jobs/{job_id}/result")
             return
         paths = {
@@ -2634,15 +2659,30 @@ class MainWindow(QMainWindow):
         if self.job_detail_view.is_check_stream():
             return
         stream = self.job_detail_view.stream_combo.currentText()
+        errors_only = self.job_detail_view.errors_only_check.isChecked()
+        key = (str(self.current_detail["job_id"]), int(self.log_attempt_id), stream, errors_only)
+        if key != self._log_buffer_key:
+            self._log_buffer_key = key
+            self._log_buffer_text = ""
         query = {
             "attempt_id": str(self.log_attempt_id),
             "stream": stream,
             "limit": "16000",
-            "errors_only": "1" if self.job_detail_view.errors_only_check.isChecked() else "0",
+            "errors_only": "1" if errors_only else "0",
         }
         if self.log_offset is not None:
             query["offset"] = str(self.log_offset)
         self._request("logs", f"/v1/jobs/{self.current_detail['job_id']}/logs?{urlencode(query)}")
+
+    def _current_log_buffer_key(self) -> tuple[str, int, str, bool] | None:
+        if not self.current_detail or self.log_attempt_id is None:
+            return None
+        return (
+            str(self.current_detail.get("job_id") or ""),
+            int(self.log_attempt_id),
+            self.job_detail_view.stream_combo.currentText(),
+            self.job_detail_view.errors_only_check.isChecked(),
+        )
 
     def _show_check_events(self, events: list[dict], *, pending: bool = False) -> None:
         records: list[str] = []

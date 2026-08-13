@@ -84,7 +84,7 @@ class G2TaskRunGuiTests(unittest.TestCase):
         labels = [view.tabs.tabText(index) for index in range(view.tabs.count())]
 
         self.assertEqual(
-            labels, ["Overview", "Task", "Inputs", "Progress", "Answer", "Artifacts", "Logs", "Events"]
+            labels, ["Overview", "Progress", "Inputs", "Artifacts", "Logs", "Events"]
         )
         self.assertFalse(view.cancel_button.isEnabled())
         self.assertTrue(view.cancel_button.isHidden())
@@ -96,6 +96,45 @@ class G2TaskRunGuiTests(unittest.TestCase):
         self.assertFalse(view.open_folder_button.isEnabled())
         self.assertTrue(view.open_folder_button.isHidden())
         self.assertEqual(view.title_label.text(), "Completed task")
+
+    def test_overview_collapses_metadata_and_progress_is_attempt_by_attempt(self):
+        view = JobDetailView()
+        view.set_job(
+            {
+                "job_id": "job-2",
+                "title": "Readable task",
+                "status": "COMPLETED",
+                "actual_worker": "codex",
+                "completed_at": "2026-08-13T09:10:00+09:00",
+                "created_at": "2026-08-13T09:00:00+09:00",
+                "request": {"task": "Produce the result"},
+                "attempts": [
+                    {"attempt_id": 1, "status": "FAILED", "worker": "codex", "error": "Retryable"},
+                    {"attempt_id": 2, "status": "COMPLETED", "worker": "codex"},
+                ],
+            }
+        )
+
+        overview_text = view._browsers["Overview"].toPlainText()
+        self.assertIn("Readable task", overview_text)
+        self.assertIn("Answer", overview_text)
+        self.assertIn("Requested Task", overview_text)
+        self.assertNotIn("Task Run ID", overview_text)
+        self.assertEqual(view.overview_result_label.text(), "Result")
+        self.assertTrue(view.overview_details_button.isCheckable())
+
+        view._browsers["Overview"].selectAll()
+        view.overview_details_button.click()
+        self.assertIn("Task Run ID", view._browsers["Overview"].toPlainText())
+        self.assertEqual(view.overview_details_button.text(), "See less")
+        view.overview_details_button.click()
+        self.assertNotIn("Task Run ID", view._browsers["Overview"].toPlainText())
+        self.assertEqual(view.overview_details_button.text(), "See more")
+
+        progress_text = view._browsers["Progress"].toPlainText()
+        self.assertIn("Attempt 1", progress_text)
+        self.assertIn("Attempt 2", progress_text)
+        self.assertIn("Retryable", progress_text)
 
     def test_public_gui_labels_use_task_run_terminology(self):
         view = TaskRunDialog(task={"task_id": "weather", "name": "Weather"})
