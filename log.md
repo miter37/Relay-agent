@@ -1,3 +1,6 @@
+- 2026-08-20 | Added `StartupAuditLoop`: on daemon start, auto-run deep capability audit (up to 3 attempts, shallow-fail excluded) for enabled workers not yet verified, non-blocking background thread; 10 new tests, 47 existing daemon/engine tests, Ruff pass.
+- 2026-08-15 06:55 | Fixed Orchestrator review parsing of Relay JSON envelopes; 900 tests and Ruff pass.
+- 2026-08-13 22:28 | GUI chrome pass: readable two-row top nav, brand mark, copper active tick, grouped destinations, Logs-only log controls, quieter empty Reviews/Project Runs/Task Runs; 154 GUI tests pass.
 - 2026-08-13 | Moved global navigation from the left rail into a scrollable top menu, removed the Relay-adjacent page title and routine refresh banners, and gave the detail panel the full width.
 - 2026-08-13 | Project Run Workspace compacted: removed stage card strip, replaced Artifact counts/publication text with semantic state icons, and kept only the selectable path; removed Details and Raw controls.
 - 2026-08-13 | Fixed SVG Artifact preview for large files: read complete bounded SVG content, validate before rendering, preserve aspect ratio, and add regression coverage.

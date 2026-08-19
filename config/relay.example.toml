@@ -28,6 +28,8 @@ retention_days_cancelled = 14
 daemon_host = "127.0.0.1"
 daemon_port = 47831
 daemon_auto_start = true
+startup_audit_enabled = true
+startup_audit_max_attempts = 3
 
 [workers.claude]
 enabled = true
