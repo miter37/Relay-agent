@@ -11,35 +11,39 @@ from dataclasses import dataclass
 from .design_typography import TYPE_SCALE
 
 COLORS: dict[str, str] = {
-    # Surfaces (4-tier neutral dark)
-    "bg.canvas": "#131313",
-    "bg.sidebar": "#181818",
-    "bg.topbar": "#181818",
+    # Surfaces (4-tier graphite). Canvas is a step darker than chrome so the
+    # work surface reads as a desk, not one flat slab.
+    "bg.canvas": "#101010",
+    "bg.sidebar": "#161616",
+    "bg.topbar": "#161616",
     "bg.surface": "#1C1C1C",
-    "bg.surfaceRaised": "#242424",
-    "bg.input": "#1F1F1F",
+    "bg.surfaceRaised": "#262626",
+    "bg.input": "#181818",
     # Interactive surfaces
-    "bg.hover": "#2A2A2A",
-    "bg.pressed": "#303030",
-    "bg.selected": "#26364F",
+    "bg.hover": "#2C2C2C",
+    "bg.pressed": "#333333",
+    "bg.selected": "#243044",
     # Borders
-    "border.subtle": "#2E2E2E",
-    "border.strong": "#3D3D3D",
+    "border.subtle": "#2C2C2C",
+    "border.strong": "#3F3F3F",
     "border.focus": "#7AA2F7",
     # Text
-    "text.primary": "#EDEDED",
-    "text.secondary": "#B0B0B0",
-    "text.muted": "#999999",
-    # Accent (selection, focus, progress, active indicators)
+    "text.primary": "#F2F2F2",
+    "text.secondary": "#B4B4B4",
+    "text.muted": "#9E9E9E",
+    # Accent (focus, links, progress). Interactive chrome stays cool.
     "accent.primary": "#4C8DFF",
     "accent.onPrimary": "#0B0B0B",
+    # Brand tick for "you are here" in the shell. Warm copper, never a fill.
+    # Distinct from accent.relay so Orchestrator moments stay reserved.
+    "accent.brand": "#C9956B",
     # Reserved for Orchestrator-authored moments only (live repair, hand-off
     # narration) - never used for ordinary interactive/selection chrome, so it
     # keeps meaning "the Orchestrator did something here" wherever it appears.
     "accent.relay": "#F0A857",
     # Primary action button (neutral bright, Codex/Linear style)
     "action.primaryBg": "#EDEDED",
-    "action.primaryFg": "#131313",
+    "action.primaryFg": "#101010",
     # State
     "state.success": "#5BD48A",
     "state.warning": "#E3B341",
@@ -67,7 +71,8 @@ METRICS = {
     "navIconSize": 18,
     "rowHeight": _BODY_LINE_HEIGHT + 2 * SPACING["xs"],
     "rowPadding": SPACING["xs"] + 1,
-    "topBarHeight": 48,
+    "topBarHeight": 44,
+    "navRowHeight": 36,
     "sidebarWidth": 200,
 }
 

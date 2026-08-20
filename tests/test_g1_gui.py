@@ -62,6 +62,7 @@ class G1GuiTests(unittest.TestCase):
         self.assertEqual(self.window.settings_button.property("placement"), "top")
         self.assertEqual(self.window.schedules_button.property("placement"), "top")
         self.assertIs(self.window.navigation_scroll.widget(), self.window.navigation_host)
+        self.assertGreaterEqual(self.window.navigation_scroll.minimumHeight(), 32)
 
     def test_health_status_is_visible_and_uses_manual_refresh(self):
         self.window._set_connection(

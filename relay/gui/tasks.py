@@ -13,6 +13,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QTextBrowser,
@@ -177,6 +179,7 @@ class InputDefinitionsEditor(QWidget):
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
         self.list = QListWidget()
+        self.list.setMinimumHeight(120)
         layout.addWidget(self.list)
         row = QHBoxLayout()
         self.add_button = IconButton("plus", "Add an input")
@@ -336,6 +339,7 @@ class InterfacePortsEditor(QWidget):
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
         self.list = QListWidget()
+        self.list.setMinimumHeight(120)
         layout.addWidget(self.list)
         buttons = QHBoxLayout()
         self.add_button = IconButton("plus", "Add an Output" if output else "Add an Artifact input")
@@ -653,15 +657,27 @@ class TaskEditorDialog(QDialog):
     def __init__(self, *, task=None, available_workers=None, profiles=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Task" if task else "Register Task")
-        # Wide, not tall: Instructions routinely holds long prompt text, and it's
-        # easier to write/scan that with more horizontal room than more vertical
-        # room. The short scalar fields below are split into two columns instead
-        # of one long stack so Instructions isn't left with whatever is left over.
-        self.resize(920, 720)
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        max_width = max(640, available.width() - 32) if available is not None else 1180
+        max_height = max(420, available.height() - 32) if available is not None else 820
+        self.setMaximumSize(max_width, max_height)
+        # Instructions routinely holds long prompt text, so keep the two-column
+        # scalar form and let the body scroll when the monitor is short.
+        self.resize(min(920, max_width), min(720, max_height))
         self._task_id = str(task.get("task_id") or "") if task else ""
         self._saving = False
 
-        root = QVBoxLayout(self)
+        dialog_layout = QVBoxLayout(self)
+        self.form_scroll = QScrollArea()
+        self.form_scroll.setWidgetResizable(True)
+        self.form_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.form_body = QWidget()
+        body_layout = QVBoxLayout(self.form_body)
+        self.form_scroll.setWidget(self.form_body)
+        dialog_layout.addWidget(self.form_scroll, 1)
+
         fields_row = QHBoxLayout()
         left_form = QFormLayout()
         right_form = QFormLayout()
@@ -709,10 +725,10 @@ class TaskEditorDialog(QDialog):
 
         fields_row.addLayout(left_form, 1)
         fields_row.addLayout(right_form, 1)
-        root.addLayout(fields_row)
+        body_layout.addLayout(fields_row)
 
         self.input_definitions = InputDefinitionsEditor()
-        root.addWidget(self.input_definitions)
+        body_layout.addWidget(self.input_definitions)
 
         interface_box = QGroupBox("Task Interface · Artifact inputs & Outputs")
         interface_layout = QVBoxLayout(interface_box)
@@ -731,7 +747,7 @@ class TaskEditorDialog(QDialog):
         interface_layout.addWidget(self.advanced_interface_checkbox)
         interface_layout.addWidget(self.output_contract_edit)
         self.advanced_interface_checkbox.toggled.connect(self.output_contract_edit.setVisible)
-        root.addWidget(interface_box)
+        body_layout.addWidget(interface_box)
 
         review_box = QFormLayout()
         self.review_enabled_checkbox = QCheckBox("Require result review before publishing")
@@ -745,24 +761,26 @@ class TaskEditorDialog(QDialog):
         self.review_guidelines_edit = QTextEdit()
         self.review_guidelines_edit.setAcceptRichText(False)
         self.review_guidelines_edit.setPlaceholderText("Optional notes about what the reviewer should check")
-        self.review_guidelines_edit.setMaximumHeight(72)
+        self.review_guidelines_edit.setMinimumHeight(96)
+        self.review_guidelines_edit.setMaximumHeight(160)
         review_box.addRow("Review notes", self.review_guidelines_edit)
         self.review_max_reruns_spin = QSpinBox()
         self.review_max_reruns_spin.setRange(0, 20)
         self.review_max_reruns_spin.setSpecialValueText("Human decides")
         review_box.addRow("Automatic reruns", self.review_max_reruns_spin)
-        root.addLayout(review_box)
+        body_layout.addLayout(review_box)
 
-        root.addWidget(QLabel("<b>Instructions</b>"))
+        body_layout.addWidget(QLabel("<b>Instructions</b>"))
         self.instructions_edit = QTextEdit()
         self.instructions_edit.setAcceptRichText(False)
         self.instructions_edit.setMinimumHeight(260)
-        root.addWidget(self.instructions_edit, 1)
+        body_layout.addWidget(self.instructions_edit, 1)
+        body_layout.addStretch(1)
 
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("errorText")
-        root.addWidget(self.error_label)
+        dialog_layout.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
         self.buttons = buttons
@@ -770,7 +788,7 @@ class TaskEditorDialog(QDialog):
         self.cancel_button = buttons.button(QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        dialog_layout.addWidget(buttons)
 
         if task:
             self._populate(task)

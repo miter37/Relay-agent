@@ -53,15 +53,31 @@ def application_stylesheet() -> str:
         QMainWindow, QDialog, QMessageBox {{ background: {color["bg.canvas"]}; }}
         QLabel, QCheckBox, QRadioButton, QGroupBox, QAbstractButton {{ color: {color["text.primary"]}; }}
         QLabel {{ background: transparent; }}
-        QWidget#topBar {{ background: {color["bg.topbar"]}; border-bottom: 1px solid {color["border.subtle"]}; min-height: {METRICS["topBarHeight"]}px; }}
+        QWidget#topBar {{
+            background: {color["bg.topbar"]}; border-bottom: 1px solid {color["border.subtle"]};
+            min-height: {METRICS["topBarHeight"] + METRICS["navRowHeight"]}px;
+        }}
+        QWidget#topNavigationScroll {{
+            background: transparent; border: 0;
+            min-height: {METRICS["navRowHeight"]}px; max-height: {METRICS["navRowHeight"]}px;
+        }}
         QWidget#sidebarNav {{ background: {color["bg.sidebar"]}; border-right: 1px solid {color["border.subtle"]}; }}
+        QFrame#navDivider {{
+            background: {color["border.strong"]}; border: 0; min-width: 1px; max-width: 1px;
+            margin: 6px {SPACING["sm"]}px;
+        }}
         QFrame#surface, QFrame#metricCard, QWidget#emptyState {{
             background: {color["bg.surface"]}; border: 1px solid {color["border.subtle"]};
             border-radius: {RADIUS["panel"]}px;
         }}
         QLabel#emptyState {{ color: {color["text.secondary"]}; padding: {SPACING["xl"]}px; }}
-        QLabel#brandMark {{ color: {color["accent.primary"]}; }}
+        QLabel#brandMark {{ color: {color["text.primary"]}; }}
+        QLabel#brandIcon {{ background: transparent; }}
         QLabel#pageTitle {{ color: {color["text.secondary"]}; }}
+        QLineEdit#quickFind {{
+            min-width: 220px; padding: {SPACING["xs"]}px {SPACING["md"]}px;
+            border-radius: {RADIUS["control"]}px;
+        }}
         QLabel#detailTitle {{ color: {color["text.primary"]}; }}
         QLabel#sectionTitle {{ color: {color["text.primary"]}; }}
         QLabel#mutedText {{ color: {color["text.muted"]}; }}
@@ -104,13 +120,17 @@ def application_stylesheet() -> str:
         QPushButton#sidebarButton:hover {{ background: {color["bg.hover"]}; color: {color["text.primary"]}; }}
         QPushButton#sidebarButton:checked {{ background: {color["bg.hover"]}; color: {color["text.primary"]}; border-left: 2px solid {color["accent.primary"]}; }}
         QPushButton#sidebarButton[placement="top"] {{
-            text-align: center; border: 0; border-bottom: 2px solid transparent;
-            border-radius: {RADIUS["control"]}px; padding: {SPACING["xs"]}px {SPACING["sm"]}px;
+            text-align: left; border: 0; border-bottom: 2px solid transparent;
+            border-radius: {RADIUS["control"]}px; color: {color["text.secondary"]};
+            padding: {SPACING["xs"]}px {SPACING["md"]}px;
+            min-height: {METRICS["navRowHeight"] - 4}px; max-height: {METRICS["navRowHeight"] - 2}px;
         }}
-        QPushButton#sidebarButton[placement="top"]:hover {{ background: {color["bg.hover"]}; color: {color["text.primary"]}; }}
+        QPushButton#sidebarButton[placement="top"]:hover {{
+            background: {color["bg.hover"]}; color: {color["text.primary"]};
+        }}
         QPushButton#sidebarButton[placement="top"]:checked {{
-            background: {color["bg.selected"]}; color: {color["text.primary"]};
-            border-bottom-color: {color["accent.primary"]};
+            background: {color["bg.surfaceRaised"]}; color: {color["text.primary"]};
+            border-bottom-color: {color["accent.brand"]};
         }}
         QPushButton#iconAction {{
             background: transparent; border: 1px solid transparent; border-radius: {RADIUS["control"]}px;
@@ -177,8 +197,9 @@ def application_stylesheet() -> str:
         QFrame#pipelineNodeCard[pipelineState="cancelled"] {{ border-color: {color["text.muted"]}; }}
         QFrame#pipelineNodeCard[pipelineSelected="true"] {{ border-width: 2px; border-color: {color["accent.primary"]}; }}
         QLabel#statusBadge {{
-            border-radius: {RADIUS["badge"]}px; padding: 2px {SPACING["sm"]}px 2px {SPACING["md"]}px;
-            background: {color["bg.surface"]}; border: 0; border-left: 3px solid {color["border.subtle"]};
+            border-radius: {RADIUS["badge"]}px; padding: 3px {SPACING["sm"]}px 3px {SPACING["md"]}px;
+            background: {color["bg.input"]}; border: 1px solid {color["border.subtle"]};
+            border-left: 3px solid {color["border.subtle"]};
         }}
         QLabel#statusBadge[state="running"] {{ color: {color["state.info"]}; border-left-color: {color["state.info"]}; }}
         QLabel#statusBadge[state="queued"], QLabel#statusBadge[state="partial"], QLabel#statusBadge[state="needs_approval"], QLabel#statusBadge[state="needs_review"] {{ color: {color["state.warning"]}; border-left-color: {color["state.warning"]}; }}

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from ..compatibility import evaluate_compatibility
 from .agent_apps import AgentAppWizard
 from .design_icon_app import app_icon
-from .design_tokens import SPACING
+from .design_tokens import METRICS, SPACING
 from .design_typography import apply_type
 from .design_widgets import IconButton, NavButton
 from .json_display import render_json_html
@@ -185,17 +185,27 @@ class MainWindow(QMainWindow):
         self.top_bar = QFrame()
         self.top_bar.setObjectName("topBar")
         header_layout = QVBoxLayout(self.top_bar)
+        header_layout.setContentsMargins(SPACING["lg"], SPACING["sm"], SPACING["lg"], SPACING["sm"])
+        header_layout.setSpacing(SPACING["xs"])
         title_row = QFrame()
         title_layout = QHBoxLayout(title_row)
         title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(SPACING["sm"])
+        title_row.setFixedHeight(METRICS["topBarHeight"] - 8)
         # "Relay" is the one piece of text that never changes; the active section
         # name sits after it, separated and visually secondary, so the brand always
         # reads first regardless of which screen is open.
+        self.brand_icon = QLabel()
+        self.brand_icon.setObjectName("brandIcon")
+        self.brand_icon.setPixmap(app_icon().pixmap(20, 20))
+        self.brand_icon.setFixedSize(20, 20)
+        self.brand_icon.setToolTip("Relay")
+        title_layout.addWidget(self.brand_icon)
         self.brand_label = QLabel("Relay")
         self.brand_label.setObjectName("brandMark")
         apply_type(self.brand_label, "title.page")
         title_layout.addWidget(self.brand_label)
-        title_layout.addSpacing(SPACING["lg"])
+        title_layout.addSpacing(SPACING["md"])
         self.page_title_label = QLabel("Runs")
         self.page_title_label.setObjectName("pageTitle")
         apply_type(self.page_title_label, "title.detail")
@@ -219,8 +229,10 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(self.health_refresh_button)
         self.quick_find_edit = QLineEdit()
         self.quick_find_edit.setObjectName("quickFind")
-        self.quick_find_edit.setPlaceholderText("Quick find…  Ctrl+K")
-        self.quick_find_edit.setMaximumWidth(250)
+        self.quick_find_edit.setPlaceholderText("Find work…  Ctrl+K")
+        self.quick_find_edit.setMinimumWidth(220)
+        self.quick_find_edit.setMaximumWidth(280)
+        apply_type(self.quick_find_edit, "caption")
         self.quick_find_edit.returnPressed.connect(self._quick_find)
         title_layout.addWidget(self.quick_find_edit)
         self.quick_find_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
@@ -295,20 +307,26 @@ class MainWindow(QMainWindow):
         self.navigation_scroll.setWidgetResizable(True)
         self.navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.navigation_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.navigation_scroll.setFixedHeight(METRICS["navRowHeight"])
         self.navigation_host = QWidget()
         navigation_layout = QHBoxLayout(self.navigation_host)
         navigation_layout.setContentsMargins(0, 0, 0, 0)
         navigation_layout.setSpacing(2)
-        for button in (
-            self.runs_button,
-            self.project_runs_button,
-            self.reviews_button,
-            self.tasks_button,
-            self.profiles_button,
-            self.projects_button,
-            self.routines_button,
-            self.schedules_button,
-        ):
+        inspect_buttons = (self.runs_button, self.project_runs_button, self.reviews_button)
+        design_buttons = (self.tasks_button, self.projects_button, self.routines_button)
+        system_buttons = (self.profiles_button, self.schedules_button)
+        # Profiles sits with Schedules as system config; the inspect/design
+        # groups stay left-aligned so the destination is readable at a glance.
+        for button in (*inspect_buttons, *design_buttons, *system_buttons, self.settings_button):
+            button.setProperty("placement", "top")
+            apply_type(button, "caption")
+        for button in inspect_buttons:
+            navigation_layout.addWidget(button)
+        navigation_layout.addWidget(self._nav_divider())
+        for button in design_buttons:
+            navigation_layout.addWidget(button)
+        navigation_layout.addWidget(self._nav_divider())
+        for button in system_buttons:
             navigation_layout.addWidget(button)
         navigation_layout.addStretch(1)
         navigation_layout.addWidget(self.settings_button)
@@ -457,6 +475,14 @@ class MainWindow(QMainWindow):
         self._set_connection("checking", "waiting for daemon health check")
         self._activate_navigation("runs")
         self.detail_stack.setCurrentWidget(self.runs_view)
+
+    @staticmethod
+    def _nav_divider() -> QFrame:
+        divider = QFrame()
+        divider.setObjectName("navDivider")
+        divider.setFrameShape(QFrame.NoFrame)
+        divider.setFixedWidth(1)
+        return divider
 
     def _restore_state(self) -> None:
         geometry = self.state.value("window/geometry")

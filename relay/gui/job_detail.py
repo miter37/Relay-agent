@@ -96,8 +96,14 @@ class TaskRunDetailView(QWidget):
         layout.addLayout(self.review_action_row)
         self._review_id: str | None = None
         self._review_action_pending = False
-        log_controls = QHBoxLayout()
-        log_controls.addWidget(QLabel("Logs:"))
+        self.log_controls_host = QWidget()
+        self.log_controls_host.setObjectName("logControls")
+        log_controls = QHBoxLayout(self.log_controls_host)
+        log_controls.setContentsMargins(0, 0, 0, 0)
+        log_label = QLabel("Logs")
+        log_label.setObjectName("mutedText")
+        apply_type(log_label, "caption")
+        log_controls.addWidget(log_label)
         self.attempt_combo = QComboBox()
         self.attempt_combo.setMinimumWidth(160)
         log_controls.addWidget(self.attempt_combo)
@@ -116,7 +122,8 @@ class TaskRunDetailView(QWidget):
         self.attempt_combo.currentIndexChanged.connect(lambda _index: self.log_options_changed.emit())
         self.stream_combo.currentIndexChanged.connect(self._stream_changed)
         self.errors_only_check.stateChanged.connect(lambda _state: self.log_options_changed.emit())
-        layout.addLayout(log_controls)
+        self.log_controls_host.hide()
+        layout.addWidget(self.log_controls_host)
         self.tabs = QTabWidget()
         self._browsers: dict[str, QTextBrowser] = {}
         self._content_cache: dict[str, str] = {}
@@ -174,7 +181,7 @@ class TaskRunDetailView(QWidget):
                 self.tabs.addTab(overview_page, name)
             else:
                 self.tabs.addTab(browser, name)
-        self.tabs.currentChanged.connect(lambda index: self.tab_requested.emit(self.tabs.tabText(index)))
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
         self.answer_text = ""
         self.task_text = ""
@@ -589,6 +596,11 @@ class TaskRunDetailView(QWidget):
     def _open_log(self) -> None:
         if self.job_id:
             self.open_log_requested.emit(self.job_id)
+
+    def _on_tab_changed(self, index: int) -> None:
+        name = self.tabs.tabText(index)
+        self.log_controls_host.setVisible(name == "Logs")
+        self.tab_requested.emit(name)
 
     def _stream_changed(self, _index: int) -> None:
         self._update_log_controls()

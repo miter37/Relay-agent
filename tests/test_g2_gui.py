@@ -194,6 +194,9 @@ class G2TaskRunGuiTests(unittest.TestCase):
         self.assertEqual(view.attempt_combo.currentData(), 7)
         self.assertEqual(view.stream_combo.currentText(), "stdout")
         self.assertTrue(view.open_log_button.isEnabled())
+        self.assertTrue(view.log_controls_host.isHidden())
+        view.tabs.setCurrentIndex(view.TAB_NAMES.index("Logs"))
+        self.assertFalse(view.log_controls_host.isHidden())
         view.set_content("Logs", "<pre>ERROR failed</pre>")
 
     def test_running_job_exposes_check_button_and_separate_check_stream(self):

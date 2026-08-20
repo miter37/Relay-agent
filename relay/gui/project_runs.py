@@ -919,6 +919,7 @@ class ProjectRunDetailView(QWidget):
             self.set_browse_mode(True)
             self.empty.setVisible(True)
             self.status_badge.setVisible(False)
+            self.verdict_label.setVisible(False)
             self.verdict_label.setText("Select a Project Run to view its overview.")
             self.run_tabs.setVisible(False)
             self.artifact_label.setVisible(False)
@@ -947,6 +948,7 @@ class ProjectRunDetailView(QWidget):
         status = str(self._run.get("status") or "unavailable").casefold()
         display_status = "needs_review" if self._run.get("workflow_status") == "needs_review" else status
         self.status_badge.set_status(display_status)
+        self.verdict_label.setVisible(True)
         self.verdict_label.setText(_verdict(self._run))
 
         is_failed = status == "failed"

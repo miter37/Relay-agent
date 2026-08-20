@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QScrollArea
 except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
@@ -173,11 +173,24 @@ class TasksWidgetTests(unittest.TestCase):
 
     def test_task_editor_gives_instructions_field_real_room(self):
         dialog = TaskEditorDialog()
-        # Wide enough that long prompt text doesn't wrap constantly, and a
-        # generous minimum height so Instructions isn't left with whatever the
-        # eight scalar fields above it happened not to use.
-        self.assertGreaterEqual(dialog.width(), 900)
+        # Wide enough for normal desktop editing, while still respecting a
+        # smaller monitor's available work area.
+        self.assertGreaterEqual(dialog.width(), 720)
+        self.assertLessEqual(dialog.width(), dialog.maximumWidth())
         self.assertGreaterEqual(dialog.instructions_edit.minimumHeight(), 260)
+
+    def test_task_editor_scrolls_body_and_keeps_footer_reachable(self):
+        dialog = TaskEditorDialog()
+
+        self.assertIsInstance(dialog.form_scroll, QScrollArea)
+        self.assertIs(dialog.form_scroll.widget(), dialog.form_body)
+        self.assertIs(dialog.error_label.parentWidget(), dialog)
+        self.assertIs(dialog.buttons.parentWidget(), dialog)
+        self.assertGreaterEqual(dialog.input_definitions.list.minimumHeight(), 120)
+        self.assertGreaterEqual(dialog.artifact_inputs_editor.list.minimumHeight(), 120)
+        self.assertGreaterEqual(dialog.outputs_editor.list.minimumHeight(), 120)
+        self.assertGreaterEqual(dialog.review_guidelines_edit.minimumHeight(), 96)
+        self.assertLessEqual(dialog.height(), dialog.maximumHeight())
 
     def test_task_editor_save_stays_open_until_result(self):
         dialog = TaskEditorDialog()

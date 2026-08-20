@@ -78,6 +78,12 @@ class RunsView(QWidget):
         self.run_list.itemExpanded.connect(lambda item: self._remember_tree_state(item, True))
         self.run_list.itemCollapsed.connect(lambda item: self._remember_tree_state(item, False))
         left.addWidget(self.run_list, 1)
+        self.empty_hint = QLabel("No Task Runs yet.\nRun a registered Task to create the first traceable execution.")
+        self.empty_hint.setObjectName("emptyHint")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        self.empty_hint.setWordWrap(True)
+        left.addWidget(self.empty_hint, 1)
+        self.run_list.hide()
         self.load_more_button = QPushButton("Load more")
         self.load_more_button.clicked.connect(self.load_more_requested.emit)
         self.load_more_button.setEnabled(False)
@@ -148,6 +154,9 @@ class RunsView(QWidget):
     def _render(self) -> None:
         with preserve_scroll(self.run_list):
             self._render_content()
+        empty = self.run_list.topLevelItemCount() == 0
+        self.run_list.setVisible(not empty)
+        self.empty_hint.setVisible(empty)
 
     def _render_content(self) -> None:
         for index in range(self.run_list.topLevelItemCount()):

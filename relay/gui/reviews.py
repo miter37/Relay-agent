@@ -56,7 +56,7 @@ class ReviewsView(QWidget):
         self.artifacts_view.open_folder_requested.connect(lambda path: self.open_artifact_folder_requested.emit(path))
         panel.addWidget(self.artifacts_view, 2)
         self.comment = QTextEdit()
-        self.comment.setPlaceholderText("Optional feedback for a rerun")
+        self.comment.setPlaceholderText("Say what should change on the next attempt")
         self.comment.setMaximumHeight(84)
         self.comment.textChanged.connect(self._draft_changed)
         panel.addWidget(self.comment)
@@ -80,6 +80,7 @@ class ReviewsView(QWidget):
         panel.addLayout(actions)
         root.addLayout(panel, 1)
         self._set_action_state(False)
+        self._set_inbox_chrome(False)
 
     def set_reviews(self, reviews: list[dict]) -> None:
         self._reviews = {str(item.get("review_id")): item for item in reviews if item.get("review_id")}
@@ -103,10 +104,14 @@ class ReviewsView(QWidget):
         if not self.list.count():
             self._current_id = None
             self.title.setText("No reviews waiting")
-            set_html(self.detail, "<p>When a Task or Project result needs review, it will appear here.</p>")
+            set_html(
+                self.detail,
+                "<p>When a Task or Project result needs a decision, it will appear in the list.</p>",
+            )
             self.artifacts_view.set_groups([], auto_select_primary=False)
             self._review_actionable = False
             self._set_action_state(False)
+            self._set_inbox_chrome(False)
 
     def set_review(self, review: dict) -> None:
         data = review.get("review") if isinstance(review.get("review"), dict) else review
@@ -194,6 +199,7 @@ class ReviewsView(QWidget):
             )
         self._review_actionable = str(data.get("status")) in {"pending_human", "needs_human", "delivery_failed"}
         self._set_action_state(self._review_actionable)
+        self._set_inbox_chrome(True)
 
     def _select_item(self, item, _previous) -> None:
         if item:
@@ -201,6 +207,16 @@ class ReviewsView(QWidget):
             self._current_id = str(item.data(256))
             self._load_current_draft()
             self.select_review_requested.emit(self._current_id)
+
+    def _set_inbox_chrome(self, selected: bool) -> None:
+        """Hide decision chrome until a review is actually selected."""
+        self.artifacts_view.setVisible(selected)
+        self.comment.setVisible(selected)
+        self.confirm.setVisible(selected)
+        self.rerun.setVisible(selected)
+        self.reject.setVisible(selected)
+        if not selected:
+            self.comment_hint.setVisible(False)
 
     def _set_action_state(self, enabled: bool) -> None:
         self._review_actionable = enabled
