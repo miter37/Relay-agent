@@ -38,6 +38,53 @@ class RunsWidgetTests(unittest.TestCase):
         view._on_item_clicked(completed)
         self.assertEqual(selected, ["done"])
 
+    def test_group_by_task_toggle_lists_run_dates_with_occurrence_suffixes(self):
+        view = RunsView()
+        view.set_runs(
+            {
+                "first": {
+                    "job_id": "first",
+                    "task_id": "task-a",
+                    "status": "COMPLETED",
+                    "title": "AAA task",
+                    "created_at": "2026-08-07T08:00:00+00:00",
+                },
+                "second": {
+                    "job_id": "second",
+                    "task_id": "task-a",
+                    "status": "FAILED",
+                    "title": "AAA task",
+                    "created_at": "2026-08-07T09:00:00+00:00",
+                },
+                "third": {
+                    "job_id": "third",
+                    "task_id": "task-b",
+                    "status": "COMPLETED",
+                    "title": "BBB task",
+                    "created_at": "2026-08-06T08:00:00+00:00",
+                },
+            },
+            selected_run_id="second",
+        )
+
+        self.assertEqual(view.group_mode.value(), "date")
+        task_button = view.group_mode.button("task")
+        self.assertTrue(task_button.isCheckable())
+        task_button.click()
+
+        self.assertEqual(view.group_mode.value(), "task")
+        self.assertTrue(task_button.isChecked())
+        self.assertEqual(view.run_list.topLevelItemCount(), 2)
+        aaa = view.run_list.topLevelItem(0)
+        self.assertEqual(aaa.text(0), "AAA task · 2")
+        date = view._local_date("2026-08-07T09:00:00+00:00")
+        self.assertEqual(aaa.child(0).text(0), date)
+        self.assertEqual(aaa.child(1).text(0), f"{date} (2)")
+        self.assertEqual(view.run_list.currentItem().data(0, 256), "second")
+
+        view.group_mode.button("date").click()
+        self.assertEqual(view.group_mode.value(), "date")
+
 
 if __name__ == "__main__":
     unittest.main()

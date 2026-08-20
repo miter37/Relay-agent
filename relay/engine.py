@@ -35,6 +35,7 @@ from .target_workspace import (
     validate_target_path,
 )
 from .task_inputs import validate_inputs
+from .task_interface import diagnose_output_artifacts
 from .util import (
     canonical_json,
     ensure_dir,
@@ -90,6 +91,7 @@ TECHNICAL_FALLBACK_CODES = {
     "OUTPUT_NOT_CREATED",
     "INVALID_JSON",
     "SCHEMA_MISMATCH",
+    "OUTPUT_CONTRACT_MISMATCH",
     "ARTIFACT_PATH_VIOLATION",
     "CAPABILITY_AUDIT_FAILED",
 }
@@ -702,6 +704,13 @@ class RelayEngine:
             raise RelayError("JOB_NOT_FOUND", f"Task Run not found: {job_id}")
         request = JobRequest.from_dict(json.loads(job["request_json"]))
         self._resolve_request_task(request)
+        try:
+            task_snapshot = json.loads(job.get("task_snapshot_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            task_snapshot = {}
+        task_definition = task_snapshot.get("task_definition") if isinstance(task_snapshot, dict) else None
+        if not isinstance(task_definition, dict):
+            task_definition = {}
         review_policy = _decode_json_object(job.get("review_policy_json"))
         review_enabled = bool(review_policy and review_policy.get("enabled"))
         input_manifest = json.loads(job.get("input_manifest_json") or "[]")
@@ -906,6 +915,16 @@ class RelayEngine:
                 artifact_records = scan_artifacts(
                     ctx.artifact_dir, max_artifact_files, max_artifact_bytes, declared_roles
                 )
+                contract_report = diagnose_output_artifacts(task_definition, artifact_records)
+                if contract_report.errors:
+                    details = contract_report.to_dict()
+                    self.db.add_event(job_id, "OUTPUT_CONTRACT_FAILED", details)
+                    first = contract_report.errors[0]
+                    raise RelayError(
+                        "OUTPUT_CONTRACT_MISMATCH",
+                        first.message,
+                        details=details,
+                    )
                 if value is not None:
                     value = reconcile_json_artifacts(value, artifact_records)
                     ctx.result_file.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1068,7 +1087,14 @@ class RelayEngine:
                 self.db.update_attempt(
                     attempt_id,
                     status="OUTPUT_INVALID"
-                    if err.code in {"INVALID_JSON", "SCHEMA_MISMATCH", "EMPTY_OUTPUT", "OUTPUT_NOT_CREATED"}
+                    if err.code
+                    in {
+                        "INVALID_JSON",
+                        "SCHEMA_MISMATCH",
+                        "OUTPUT_CONTRACT_MISMATCH",
+                        "EMPTY_OUTPUT",
+                        "OUTPUT_NOT_CREATED",
+                    }
                     else "FAILED",
                     completed_at=utc_now(),
                     exit_code=outcome.exit_code,

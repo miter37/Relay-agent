@@ -38,11 +38,17 @@ class DesignSystemTests(unittest.TestCase):
         self.assertEqual(badge.property("state"), "running")
         self.assertEqual(badge.styleSheet(), "")
         self.assertIn('QLabel#statusBadge[state="running"]', application_stylesheet())
+        self.assertEqual(status_presentation("awaiting_review").state, "needs_review")
+        self.assertEqual(status_presentation("awaiting_review").label, "Needs review")
+        self.assertIn('QFrame#pipelineNodeCard[pipelineState="completed"]', application_stylesheet())
         self.assertEqual(status_presentation("unknown").label, "Unavailable")
 
     def test_accent_relay_is_reserved_and_distinct_from_the_interactive_accent(self):
         self.assertIn("accent.relay", COLORS)
+        self.assertIn("accent.brand", COLORS)
         self.assertNotEqual(COLORS["accent.relay"], COLORS["accent.primary"])
+        self.assertNotEqual(COLORS["accent.brand"], COLORS["accent.primary"])
+        self.assertNotEqual(COLORS["accent.brand"], COLORS["accent.relay"])
 
     def test_control_and_row_heights_have_room_for_body_text(self):
         from relay.gui.design_tokens import METRICS, SPACING
@@ -182,6 +188,9 @@ class DesignSystemTests(unittest.TestCase):
             try:
                 self.assertEqual(window.brand_label.objectName(), "brandMark")
                 self.assertEqual(window.brand_label.text(), "Relay")
+                self.assertEqual(window.brand_icon.objectName(), "brandIcon")
+                self.assertFalse(window.brand_icon.pixmap().isNull())
+                self.assertGreaterEqual(window.navigation_scroll.height(), 32)
                 self.assertFalse(window.windowIcon().isNull())
                 window._show_tasks()
                 # The brand mark never changes; only the section label beside it does.

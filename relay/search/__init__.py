@@ -10,7 +10,42 @@ from ..errors import RelayError
 from ..util import safe_resolve
 
 _FTS_TOKEN = re.compile(r"[\w\-]+", re.UNICODE)
-_TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".xml", ".html", ".htm", ".py", ".js", ".ts"}
+_TEXT_SUFFIXES = {
+    ".bash",
+    ".bat",
+    ".cfg",
+    ".cmd",
+    ".conf",
+    ".css",
+    ".csv",
+    ".diff",
+    ".html",
+    ".htm",
+    ".ini",
+    ".js",
+    ".json",
+    ".jsonl",
+    ".log",
+    ".md",
+    ".markdown",
+    ".ndjson",
+    ".patch",
+    ".ps1",
+    ".py",
+    ".rst",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".zsh",
+}
 
 
 def normalize_limit(value: int, *, default: int = 20, maximum: int = 100) -> int:
@@ -55,7 +90,7 @@ def _read_text(path: Path, max_bytes: int) -> str | None:
         return None
     try:
         data = path.read_bytes()[:max_bytes]
-        return data.decode("utf-8")
+        return data.decode("utf-8", errors="replace")
     except (OSError, UnicodeDecodeError):
         return None
 

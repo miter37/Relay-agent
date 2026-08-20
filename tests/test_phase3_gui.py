@@ -14,7 +14,8 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QScrollArea
 except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
@@ -60,6 +61,15 @@ class TasksWidgetTests(unittest.TestCase):
         view.search_edit.setText("missing")
         self.assertFalse(view.empty_label.isHidden())
         self.assertIn("match", view.empty_label.text())
+
+    def test_task_list_selects_on_single_click_and_keyboard_current_item(self):
+        view = TaskListView()
+        view.set_tasks([{"task_id": "alpha", "name": "Weekly HBM"}])
+        seen = []
+        view.select_task_requested.connect(seen.append)
+        view.list_widget.setCurrentRow(0)
+        self.assertEqual(seen, ["alpha"])
+        self.assertTrue(view.list_widget.item(0).flags() & Qt.ItemIsSelectable)
 
     def test_task_detail_renders_definition_and_runs(self):
         view = TaskDetailView()
@@ -137,13 +147,63 @@ class TasksWidgetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "[Ii]nstructions"):
             dialog.payload()
 
+    def test_task_editor_builds_named_interface_without_raw_json_authoring(self):
+        dialog = TaskEditorDialog()
+        dialog.name_edit.setText("Research")
+        dialog.instructions_edit.setPlainText("Research the topic")
+        dialog.interface_declared_checkbox.setChecked(True)
+        dialog.artifact_inputs_editor.set_ports(
+            [{"name": "references", "accepts": ["application/json"], "required": True}]
+        )
+        dialog.outputs_editor.set_ports(
+            [{"role": "report", "produces": ["text/markdown"], "required": True}]
+        )
+        payload = dialog.payload()
+        contract = json.loads(payload["output_contract"])
+        self.assertEqual(contract["interface_version"], 1)
+        self.assertEqual(contract["artifact_inputs"][0]["name"], "references")
+        self.assertEqual(contract["outputs"][0]["role"], "report")
+
+    def test_task_editor_preserves_legacy_contract_in_advanced_area(self):
+        legacy = json.dumps({"required_roles": ["output"]})
+        dialog = TaskEditorDialog(task={"name": "Legacy", "instructions": "run", "output_contract": legacy})
+        self.assertTrue(dialog.advanced_interface_checkbox.isChecked())
+        self.assertEqual(dialog.output_contract_edit.toPlainText(), legacy)
+        self.assertEqual(json.loads(dialog.payload()["output_contract"]), {"required_roles": ["output"]})
+
     def test_task_editor_gives_instructions_field_real_room(self):
         dialog = TaskEditorDialog()
-        # Wide enough that long prompt text doesn't wrap constantly, and a
-        # generous minimum height so Instructions isn't left with whatever the
-        # eight scalar fields above it happened not to use.
-        self.assertGreaterEqual(dialog.width(), 900)
+        # Wide enough for normal desktop editing, while still respecting a
+        # smaller monitor's available work area.
+        self.assertGreaterEqual(dialog.width(), 720)
+        self.assertLessEqual(dialog.width(), dialog.maximumWidth())
         self.assertGreaterEqual(dialog.instructions_edit.minimumHeight(), 260)
+
+    def test_task_editor_scrolls_body_and_keeps_footer_reachable(self):
+        dialog = TaskEditorDialog()
+
+        self.assertIsInstance(dialog.form_scroll, QScrollArea)
+        self.assertIs(dialog.form_scroll.widget(), dialog.form_body)
+        self.assertIs(dialog.error_label.parentWidget(), dialog)
+        self.assertIs(dialog.buttons.parentWidget(), dialog)
+        self.assertGreaterEqual(dialog.input_definitions.list.minimumHeight(), 120)
+        self.assertGreaterEqual(dialog.artifact_inputs_editor.list.minimumHeight(), 120)
+        self.assertGreaterEqual(dialog.outputs_editor.list.minimumHeight(), 120)
+        self.assertGreaterEqual(dialog.review_guidelines_edit.minimumHeight(), 96)
+        self.assertLessEqual(dialog.height(), dialog.maximumHeight())
+
+    def test_task_editor_save_stays_open_until_result(self):
+        dialog = TaskEditorDialog()
+        dialog.name_edit.setText("Weekly Report")
+        dialog.instructions_edit.setPlainText("Produce the report")
+        submitted = []
+        dialog.accepted_payload.connect(submitted.append)
+        dialog._on_save()
+        self.assertEqual(len(submitted), 1)
+        self.assertTrue(dialog._saving)
+        dialog.report_save_error("TASK_NAME_CONFLICT")
+        self.assertFalse(dialog._saving)
+        self.assertEqual(dialog.name_edit.text(), "Weekly Report")
 
     def test_task_run_dialog_builds_schema_validated_inputs_and_overrides(self):
         dialog = TaskRunDialog(

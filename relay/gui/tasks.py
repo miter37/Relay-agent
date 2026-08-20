@@ -9,9 +9,11 @@ widgets never delete or rerun a Task silently.
 from __future__ import annotations
 
 import json
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,11 +21,13 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QTextBrowser,
@@ -36,6 +40,7 @@ from ..task_inputs import compile_definitions, extract_definitions, normalize_de
 from .design_html import kv_row, td, th_row
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .scroll_state import preserve_scroll, set_html, set_plain_text
 
 _WORKER_CHOICES: tuple[str, ...] = ("auto", "claude", "codex", "antigravity")
 _RESULT_FORMATS: tuple[str, ...] = ("json", "txt")
@@ -174,6 +179,7 @@ class InputDefinitionsEditor(QWidget):
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
         self.list = QListWidget()
+        self.list.setMinimumHeight(120)
         layout.addWidget(self.list)
         row = QHBoxLayout()
         self.add_button = IconButton("plus", "Add an input")
@@ -210,11 +216,12 @@ class InputDefinitionsEditor(QWidget):
         return json.dumps(compile_definitions(self.definitions), ensure_ascii=False) if self.definitions else None
 
     def _render(self) -> None:
-        self.list.clear()
-        for item in self.definitions:
-            self.list.addItem(
-                f"{item['name']} · {item['value_type']} · {item['cardinality']} · {'required' if item['required'] else 'optional'}"
-            )
+        with preserve_scroll(self.list):
+            self.list.clear()
+            for item in self.definitions:
+                self.list.addItem(
+                    f"{item['name']} · {item['value_type']} · {item['cardinality']} · {'required' if item['required'] else 'optional'}"
+                )
 
     def _add(self) -> None:
         dialog = InputDefinitionDialog(parent=self)
@@ -245,6 +252,141 @@ class InputDefinitionsEditor(QWidget):
         self.definitions[index], self.definitions[target] = self.definitions[target], self.definitions[index]
         self._render()
         self.list.setCurrentRow(target)
+
+
+class PortDefinitionDialog(QDialog):
+    """Small, human-readable editor for one Artifact input or Output port."""
+
+    def __init__(self, *, output: bool, definition: dict | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Output" if output and definition else "Add Output" if output else "Edit Artifact input" if definition else "Add Artifact input")
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("report" if output else "research")
+        form.addRow("Output role" if output else "Input name", self.name_edit)
+        self.format_edit = QLineEdit()
+        self.format_edit.setPlaceholderText("Any file, or text/html, application/json")
+        form.addRow("Produces" if output else "Accepts", self.format_edit)
+        self.required = QCheckBox("Required")
+        form.addRow("", self.required)
+        self.cardinality = QComboBox()
+        self.cardinality.addItem("One", "one")
+        self.cardinality.addItem("Many", "many")
+        form.addRow("Cardinality", self.cardinality)
+        self.description = QLineEdit()
+        self.description.setPlaceholderText("Optional short description")
+        form.addRow("Description", self.description)
+        root.addLayout(form)
+        self.error_label = QLabel()
+        self.error_label.setObjectName("errorText")
+        self.error_label.setWordWrap(True)
+        root.addWidget(self.error_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+        if definition:
+            self.name_edit.setText(str(definition.get("role" if output else "name") or ""))
+            formats = definition.get("produces" if output else "accepts") or []
+            self.format_edit.setText(", ".join(formats if isinstance(formats, list) else [str(formats)]))
+            self.required.setChecked(bool(definition.get("required")))
+            self.cardinality.setCurrentText("Many" if definition.get("cardinality") == "many" else "One")
+            self.description.setText(str(definition.get("description") or ""))
+
+    def value(self) -> dict:
+        name = self.name_edit.text().strip()
+        if not name:
+            raise ValueError("A name is required.")
+        formats = [item.strip() for item in self.format_edit.text().split(",") if item.strip()]
+        result = {
+            "role" if self._is_output() else "name": name,
+            "required": self.required.isChecked(),
+            "cardinality": self.cardinality.currentData() or "one",
+        }
+        if formats:
+            result["produces" if self._is_output() else "accepts"] = formats
+        if self.description.text().strip():
+            result["description"] = self.description.text().strip()
+        return result
+
+    def _is_output(self) -> bool:
+        return "Output" in self.windowTitle() and "input" not in self.windowTitle()
+
+    def _accept(self) -> None:
+        try:
+            self.value()
+        except ValueError as exc:
+            self.error_label.setText(str(exc))
+            return
+        self.accept()
+
+
+class InterfacePortsEditor(QWidget):
+    """Row editor shared by the Artifact inputs and Outputs sections."""
+
+    def __init__(self, *, output: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.output = output
+        self.ports: list[dict] = []
+        layout = QVBoxLayout(self)
+        self.info = QLabel(
+            "Relay always provides the primary result Output. Add named Outputs when a Project should select them."
+            if output
+            else "Results from another Task or Run arrive here by name; Parameters are separate values."
+        )
+        self.info.setObjectName("mutedText")
+        self.info.setWordWrap(True)
+        layout.addWidget(self.info)
+        self.list = QListWidget()
+        self.list.setMinimumHeight(120)
+        layout.addWidget(self.list)
+        buttons = QHBoxLayout()
+        self.add_button = IconButton("plus", "Add an Output" if output else "Add an Artifact input")
+        self.edit_button = IconButton("pencil", "Edit selected interface port")
+        self.delete_button = IconButton("trash", "Delete selected interface port", tone="danger")
+        for button in (self.add_button, self.edit_button, self.delete_button):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.add_button.clicked.connect(self._add)
+        self.edit_button.clicked.connect(self._edit)
+        self.delete_button.clicked.connect(self._delete)
+
+    def set_ports(self, ports) -> None:
+        self.ports = [dict(item) for item in ports or [] if isinstance(item, dict)]
+        self._render()
+
+    def _render(self) -> None:
+        with preserve_scroll(self.list):
+            self.list.clear()
+            for port in self.ports:
+                key = "role" if self.output else "name"
+                formats = port.get("produces" if self.output else "accepts") or ["Any file"]
+                required = "required" if port.get("required") else "optional"
+                many = " · many" if port.get("cardinality") == "many" else ""
+                self.list.addItem(f"{port.get(key) or 'Unnamed'} · {', '.join(formats)} · {required}{many}")
+
+    def _add(self) -> None:
+        dialog = PortDefinitionDialog(output=self.output, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.ports.append(dialog.value())
+            self._render()
+
+    def _edit(self) -> None:
+        index = self.list.currentRow()
+        if index < 0:
+            return
+        dialog = PortDefinitionDialog(output=self.output, definition=self.ports[index], parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.ports[index] = dialog.value()
+            self._render()
+
+    def _delete(self) -> None:
+        index = self.list.currentRow()
+        if index >= 0:
+            self.ports.pop(index)
+            self._render()
 
 
 def _format_fields(payload: dict) -> str:
@@ -301,7 +443,7 @@ class TaskListView(QWidget):
         # fills the column instead of both sharing it.
         layout.addWidget(self.empty_label, 1)
         self.list_widget = QListWidget()
-        self.list_widget.itemActivated.connect(self._item_activated)
+        self.list_widget.currentItemChanged.connect(self._item_changed)
         layout.addWidget(self.list_widget, 1)
 
     def set_tasks(self, tasks: list[dict]) -> None:
@@ -314,6 +456,10 @@ class TaskListView(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def _rerender(self) -> None:
+        with preserve_scroll(self.list_widget):
+            self._rerender_content()
+
+    def _rerender_content(self) -> None:
         query = self.search_edit.text().strip().casefold()
         self.list_widget.clear()
         visible = 0
@@ -351,12 +497,17 @@ class TaskListView(QWidget):
         if task_id:
             self.select_task_requested.emit(str(task_id))
 
+    def _item_changed(self, item: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        if item is not None:
+            self._item_activated(item)
+
 
 class TaskDetailView(QWidget):
     edit_requested = Signal(str)
     delete_requested = Signal(str)
     run_requested = Signal(str)
     refresh_requested = Signal(str)
+    run_link_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -394,6 +545,8 @@ class TaskDetailView(QWidget):
         self.instructions_browser = QTextBrowser()
         self.policy_browser = QTextBrowser()
         self.run_browser = QTextBrowser()
+        self.run_browser.setOpenLinks(False)
+        self.run_browser.anchorClicked.connect(self._on_run_link)
         self.tabs.addTab(self.overview_browser, "Overview")
         self.tabs.addTab(self.instructions_browser, "Instructions")
         self.tabs.addTab(self.policy_browser, "Policies")
@@ -409,7 +562,8 @@ class TaskDetailView(QWidget):
         self.status_label.setText(f"v{int(task.get('version') or 1)} · {task.get('default_worker') or 'auto'}")
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(self.task_id is not None)
-        self.overview_browser.setHtml(
+        set_html(
+            self.overview_browser,
             _format_fields(
                 {
                     "Task ID": task.get("task_id"),
@@ -424,45 +578,61 @@ class TaskDetailView(QWidget):
                     "Updated": task.get("updated_at"),
                     "Created": task.get("created_at"),
                 }
-            )
+            ),
         )
-        self.instructions_browser.setPlainText(str(task.get("instructions") or ""))
-        self.policy_browser.setHtml(
+        set_plain_text(self.instructions_browser, str(task.get("instructions") or ""))
+        set_html(
+            self.policy_browser,
             _format_fields(
                 {
                     "Input schema": task.get("input_schema"),
                     "Output contract": task.get("output_contract"),
                     "Validation policy": task.get("validation_policy"),
                 }
-            )
+            ),
         )
-        self.run_browser.setHtml(self._format_runs(runs or []))
+        set_html(self.run_browser, self._format_runs(runs or []))
 
     def clear(self) -> None:
         self.task_id = None
         self.title_label.setText("Task")
         self.status_label.setText("")
-        self.overview_browser.setHtml("<p>No Task selected. Choose a Task from the list.</p>")
-        self.instructions_browser.clear()
-        self.policy_browser.clear()
-        self.run_browser.setHtml("<p>No Runs are available until a Task is selected.</p>")
+        set_html(self.overview_browser, "<p>No Task selected. Choose a Task from the list.</p>")
+        with preserve_scroll(self.instructions_browser):
+            self.instructions_browser.clear()
+        with preserve_scroll(self.policy_browser):
+            self.policy_browser.clear()
+        set_html(self.run_browser, "<p>No Runs are available until a Task is selected.</p>")
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(False)
 
     def set_runs(self, runs) -> None:
-        self.run_browser.setHtml(self._format_runs(runs))
+        set_html(self.run_browser, self._format_runs(runs))
 
     @staticmethod
     def _format_runs(runs) -> str:
         if not runs:
             return "<i>No Runs recorded for this Task yet.</i>"
         rows = "".join(
-            f"<tr>{td(run.get('task_run_id') or run.get('job_id') or run.get('run_id') or '—')}"
+            f"<tr>{td(TaskDetailView._run_link(run))}"
             f"{td(run.get('status') or '—')}{td(run.get('completed_at') or run.get('created_at') or '—')}"
             f"{td(run.get('actual_worker') or run.get('requested_worker') or '—')}</tr>"
             for run in runs
         )
         return f"<table>{th_row(['Run', 'Status', 'When', 'Worker'])}{rows}</table>"
+
+    @staticmethod
+    def _run_link(run) -> str:
+        run_id = str(run.get("task_run_id") or run.get("job_id") or run.get("run_id") or "—")
+        if run_id == "—":
+            return escape(run_id)
+        return f'<a href="relay://task-run/{escape(run_id)}">{escape(run_id)}</a>'
+
+    def _on_run_link(self, url) -> None:
+        if url.scheme() == "relay" and url.host() == "task-run":
+            run_id = url.path().lstrip("/")
+            if run_id:
+                self.run_link_requested.emit(run_id)
 
     def _on_refresh(self) -> None:
         if self.task_id:
@@ -487,14 +657,27 @@ class TaskEditorDialog(QDialog):
     def __init__(self, *, task=None, available_workers=None, profiles=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Edit Task" if task else "Register Task")
-        # Wide, not tall: Instructions routinely holds long prompt text, and it's
-        # easier to write/scan that with more horizontal room than more vertical
-        # room. The short scalar fields below are split into two columns instead
-        # of one long stack so Instructions isn't left with whatever is left over.
-        self.resize(920, 720)
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        max_width = max(640, available.width() - 32) if available is not None else 1180
+        max_height = max(420, available.height() - 32) if available is not None else 820
+        self.setMaximumSize(max_width, max_height)
+        # Instructions routinely holds long prompt text, so keep the two-column
+        # scalar form and let the body scroll when the monitor is short.
+        self.resize(min(920, max_width), min(720, max_height))
         self._task_id = str(task.get("task_id") or "") if task else ""
+        self._saving = False
 
-        root = QVBoxLayout(self)
+        dialog_layout = QVBoxLayout(self)
+        self.form_scroll = QScrollArea()
+        self.form_scroll.setWidgetResizable(True)
+        self.form_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.form_body = QWidget()
+        body_layout = QVBoxLayout(self.form_body)
+        self.form_scroll.setWidget(self.form_body)
+        dialog_layout.addWidget(self.form_scroll, 1)
+
         fields_row = QHBoxLayout()
         left_form = QFormLayout()
         right_form = QFormLayout()
@@ -535,17 +718,36 @@ class TaskEditorDialog(QDialog):
         right_form.addRow("Validation policy", self.validation_policy_edit)
 
         self.output_contract_edit = QTextEdit()
-        self.output_contract_edit.setPlaceholderText("Optional JSON describing the expected output shape")
+        self.output_contract_edit.setPlaceholderText("Legacy or advanced JSON; normal editing uses the Interface rows below")
         self.output_contract_edit.setAcceptRichText(False)
-        self.output_contract_edit.setMinimumHeight(80)
-        right_form.addRow("Output contract", self.output_contract_edit)
+        self.output_contract_edit.setMinimumHeight(65)
+        self.output_contract_edit.setVisible(False)
 
         fields_row.addLayout(left_form, 1)
         fields_row.addLayout(right_form, 1)
-        root.addLayout(fields_row)
+        body_layout.addLayout(fields_row)
 
         self.input_definitions = InputDefinitionsEditor()
-        root.addWidget(self.input_definitions)
+        body_layout.addWidget(self.input_definitions)
+
+        interface_box = QGroupBox("Task Interface · Artifact inputs & Outputs")
+        interface_layout = QVBoxLayout(interface_box)
+        self.artifact_inputs_editor = InterfacePortsEditor(output=False)
+        self.outputs_editor = InterfacePortsEditor(output=True)
+        interface_layout.addWidget(QLabel("<b>Artifact inputs</b>"))
+        interface_layout.addWidget(self.artifact_inputs_editor)
+        interface_layout.addWidget(QLabel("<b>Outputs</b>"))
+        interface_layout.addWidget(self.outputs_editor)
+        self.interface_declared_checkbox = QCheckBox("Declare this Interface even if it only uses Relay's result Output")
+        self.interface_declared_checkbox.setToolTip(
+            "Leave this off for a legacy Task. Turning it on lets Projects validate named inputs and Outputs before saving."
+        )
+        interface_layout.addWidget(self.interface_declared_checkbox)
+        self.advanced_interface_checkbox = QCheckBox("Advanced / legacy JSON")
+        interface_layout.addWidget(self.advanced_interface_checkbox)
+        interface_layout.addWidget(self.output_contract_edit)
+        self.advanced_interface_checkbox.toggled.connect(self.output_contract_edit.setVisible)
+        body_layout.addWidget(interface_box)
 
         review_box = QFormLayout()
         self.review_enabled_checkbox = QCheckBox("Require result review before publishing")
@@ -559,32 +761,50 @@ class TaskEditorDialog(QDialog):
         self.review_guidelines_edit = QTextEdit()
         self.review_guidelines_edit.setAcceptRichText(False)
         self.review_guidelines_edit.setPlaceholderText("Optional notes about what the reviewer should check")
-        self.review_guidelines_edit.setMaximumHeight(72)
+        self.review_guidelines_edit.setMinimumHeight(96)
+        self.review_guidelines_edit.setMaximumHeight(160)
         review_box.addRow("Review notes", self.review_guidelines_edit)
         self.review_max_reruns_spin = QSpinBox()
         self.review_max_reruns_spin.setRange(0, 20)
         self.review_max_reruns_spin.setSpecialValueText("Human decides")
         review_box.addRow("Automatic reruns", self.review_max_reruns_spin)
-        root.addLayout(review_box)
+        body_layout.addLayout(review_box)
 
-        root.addWidget(QLabel("<b>Instructions</b>"))
+        body_layout.addWidget(QLabel("<b>Instructions</b>"))
         self.instructions_edit = QTextEdit()
         self.instructions_edit.setAcceptRichText(False)
         self.instructions_edit.setMinimumHeight(260)
-        root.addWidget(self.instructions_edit, 1)
+        body_layout.addWidget(self.instructions_edit, 1)
+        body_layout.addStretch(1)
 
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
         self.error_label.setObjectName("errorText")
-        root.addWidget(self.error_label)
+        dialog_layout.addWidget(self.error_label)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+        self.buttons = buttons
+        self.save_button = buttons.button(QDialogButtonBox.Save)
+        self.cancel_button = buttons.button(QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        dialog_layout.addWidget(buttons)
 
         if task:
             self._populate(task)
+
+    def set_saving(self, saving: bool) -> None:
+        self._saving = saving
+        self.save_button.setEnabled(not saving)
+        self.save_button.setText("Saving..." if saving else "Save")
+        self.cancel_button.setEnabled(not saving)
+
+    def report_save_error(self, message: str) -> None:
+        self.set_saving(False)
+        self.show_error(message)
+
+    def close_after_save(self) -> None:
+        self.accept()
 
     def show_error(self, message: str) -> None:
         self.error_label.setText(message)
@@ -607,7 +827,22 @@ class TaskEditorDialog(QDialog):
             self.format_combo.addItem(result_format)
         self.format_combo.setCurrentText(result_format)
         self.input_definitions.set_schema(task.get("input_schema"))
-        self.output_contract_edit.setPlainText(str(task.get("output_contract") or ""))
+        raw_contract = task.get("output_contract")
+        self.output_contract_edit.setPlainText(str(raw_contract or ""))
+        self.artifact_inputs_editor.set_ports([])
+        self.outputs_editor.set_ports([])
+        self.interface_declared_checkbox.setChecked(False)
+        self.advanced_interface_checkbox.setChecked(False)
+        try:
+            contract = json.loads(raw_contract) if isinstance(raw_contract, str) and raw_contract else raw_contract
+        except (TypeError, ValueError):
+            contract = None
+        if isinstance(contract, dict) and contract.get("interface_version") == 1:
+            self.artifact_inputs_editor.set_ports(contract.get("artifact_inputs"))
+            self.outputs_editor.set_ports(contract.get("outputs"))
+            self.interface_declared_checkbox.setChecked(True)
+        elif raw_contract:
+            self.advanced_interface_checkbox.setChecked(True)
         self.validation_policy_edit.setText(str(task.get("validation_policy") or ""))
         self.instructions_edit.setPlainText(str(task.get("instructions") or ""))
         review = task.get("review_policy") or {}
@@ -621,13 +856,16 @@ class TaskEditorDialog(QDialog):
         self.review_max_reruns_spin.setValue(int(review.get("max_reruns") or 0))
 
     def _on_save(self) -> None:
+        if self._saving:
+            return
         try:
             payload = self.payload()
         except ValueError as exc:
             self.show_error(str(exc))
             return
+        self.show_error("")
+        self.set_saving(True)
         self.accepted_payload.emit(payload)
-        self.accept()
 
     def payload(self) -> dict:
         name = self.name_edit.text().strip()
@@ -650,11 +888,27 @@ class TaskEditorDialog(QDialog):
         if input_schema:
             payload["input_schema"] = input_schema
         output_contract_text = self.output_contract_edit.toPlainText().strip()
-        if output_contract_text:
+        if self.interface_declared_checkbox.isChecked():
+            from ..task_interface import normalize_interface
+
+            try:
+                payload["output_contract"] = json.dumps(
+                    normalize_interface(
+                        {
+                            "interface_version": 1,
+                            "artifact_inputs": self.artifact_inputs_editor.ports,
+                            "outputs": self.outputs_editor.ports,
+                        }
+                    ),
+                    ensure_ascii=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Task Interface is invalid: {exc}") from exc
+        elif self.advanced_interface_checkbox.isChecked() and output_contract_text:
             try:
                 json.loads(output_contract_text)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"Output contract is not valid JSON: {exc}") from exc
+                raise ValueError(f"Advanced output contract is not valid JSON: {exc}") from exc
             payload["output_contract"] = output_contract_text
         validation = self.validation_policy_edit.text().strip()
         if validation:

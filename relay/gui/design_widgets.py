@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .design_icons import icon
 from .design_tokens import COLORS, METRICS, SPACING, status_presentation
@@ -43,6 +52,55 @@ def apply_elevation(widget: QWidget) -> None:
     effect.setOffset(0, 2)
     effect.setColor(QColor(0, 0, 0, 110))
     widget.setGraphicsEffect(effect)
+
+
+class SegmentedControl(QFrame):
+    """An exclusive, visually joined choice between a few view modes."""
+
+    value_changed = Signal(str)
+
+    def __init__(
+        self,
+        options: list[tuple[str, str]],
+        *,
+        current: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("segmentedControl")
+        self._buttons: dict[str, QPushButton] = {}
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(0)
+        for index, (value, label) in enumerate(options):
+            button = QPushButton(label)
+            button.setObjectName("segmentedButton")
+            button.setProperty("edge", "first" if index == 0 else "last" if index == len(options) - 1 else "middle")
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setAccessibleName(f"Group by {label}")
+            apply_type(button, "caption")
+            button.clicked.connect(lambda checked, value=value: checked and self.value_changed.emit(value))
+            self._group.addButton(button)
+            self._buttons[value] = button
+            layout.addWidget(button)
+        self.set_value(current, emit=False)
+
+    def value(self) -> str:
+        return next((value for value, button in self._buttons.items() if button.isChecked()), "")
+
+    def set_value(self, value: str, *, emit: bool = True) -> None:
+        button = self._buttons.get(value)
+        if button is None or button.isChecked():
+            return
+        button.setChecked(True)
+        if emit:
+            self.value_changed.emit(value)
+
+    def button(self, value: str) -> QPushButton | None:
+        return self._buttons.get(value)
 
 
 class StatusBadge(QLabel):

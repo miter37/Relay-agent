@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-from html import escape
-
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -16,6 +13,8 @@ from PySide6.QtWidgets import (
 from .design_html import kv_row
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .json_display import render_json_html
+from .scroll_state import set_html
 
 
 class ScheduleDetailView(QWidget):
@@ -93,13 +92,13 @@ class ScheduleDetailView(QWidget):
             ("Output folder", schedule.get("output_root")),
             ("Attention", schedule.get("attention_code")),
         )
-        self.overview.setHtml(f"<table>{''.join(kv_row(key, value or '—') for key, value in fields)}</table>")
-        self.task_settings.setHtml(self._format(schedule.get("task_settings") or schedule.get("rule") or {}))
-        self.run_history.setHtml(self._format(runs))
+        set_html(self.overview, f"<table>{''.join(kv_row(key, value or '—') for key, value in fields)}</table>")
+        set_html(self.task_settings, self._format(schedule.get("task_settings") or schedule.get("rule") or {}))
+        set_html(self.run_history, self._format(runs))
 
     @staticmethod
     def _format(value) -> str:
-        return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
+        return render_json_html(value)
 
     def _run_now(self) -> None:
         if self.schedule_id:

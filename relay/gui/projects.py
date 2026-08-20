@@ -32,11 +32,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..task_interface import diagnose_project_interfaces, task_interface
 from .design_html import td as _td
 from .design_html import th_row as _th_row
 from .design_tokens import COLORS, METRICS
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .json_display import render_json_html
+from .scroll_state import preserve_scroll, set_html
 
 # Every row in the Nodes/Connections/Final-outputs tables below can hold a live
 # QComboBox picker in at least one column. Qt sizes a row from its tallest cell,
@@ -49,6 +52,10 @@ _PICKER_ROW_HEIGHT = METRICS["controlHeight"] + 8
 
 
 def _format_json(value):
+    return render_json_html(value)
+
+
+def _format_raw_json(value) -> str:
     return f"<pre>{escape(json.dumps(value, ensure_ascii=False, indent=2, default=str))}</pre>"
 
 
@@ -152,7 +159,7 @@ class ProjectsListView(QWidget):
         self.search_edit.textChanged.connect(self._rerender)
         layout.addWidget(self.search_edit)
         self.list_widget = QListWidget()
-        self.list_widget.itemActivated.connect(self._item_activated)
+        self.list_widget.currentItemChanged.connect(self._item_changed)
         layout.addWidget(self.list_widget, 1)
 
     def set_projects(self, projects):
@@ -165,6 +172,10 @@ class ProjectsListView(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def _rerender(self):
+        with preserve_scroll(self.list_widget):
+            self._rerender_content()
+
+    def _rerender_content(self):
         query = self.search_edit.text().strip().casefold()
         self.list_widget.clear()
         visible = 0
@@ -194,12 +205,17 @@ class ProjectsListView(QWidget):
         if project_id:
             self.select_project_requested.emit(str(project_id))
 
+    def _item_changed(self, item, _previous):
+        if item is not None:
+            self._item_activated(item)
+
 
 class ProjectDetailView(QWidget):
     edit_requested = Signal(str)
     delete_requested = Signal(str)
     run_requested = Signal(str)
     refresh_requested = Signal(str)
+    run_link_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -242,6 +258,8 @@ class ProjectDetailView(QWidget):
         self.definition_browser = QTextBrowser()
         definition_layout.addWidget(self.definition_browser, 1)
         self.runs_browser = QTextBrowser()
+        self.runs_browser.setOpenLinks(False)
+        self.runs_browser.anchorClicked.connect(self._on_run_link)
         self.tabs.addTab(self.overview_browser, "Overview")
         self.tabs.addTab(definition_tab, "Definition")
         self.tabs.addTab(self.runs_browser, "Runs")
@@ -262,7 +280,8 @@ class ProjectDetailView(QWidget):
             button.setEnabled(self.project_id is not None and not deleted_at)
         self._current_definition = _definition_from_project(project)
         self._render_definition_view()
-        self.overview_browser.setHtml(
+        set_html(
+            self.overview_browser,
             _format_json(
                 {
                     "Project ID": project.get("project_id"),
@@ -273,9 +292,9 @@ class ProjectDetailView(QWidget):
                     "Updated": project.get("updated_at"),
                     "Deleted": deleted_at,
                 }
-            )
+            ),
         )
-        self.runs_browser.setHtml(self._format_runs(runs or []))
+        set_html(self.runs_browser, self._format_runs(runs or []))
 
     def clear(self):
         self.project_id = None
@@ -285,18 +304,19 @@ class ProjectDetailView(QWidget):
         self._definition_raw = False
         self.definition_view_toggle.setText("View raw JSON")
         for browser in (self.overview_browser, self.definition_browser, self.runs_browser):
-            browser.clear()
+            with preserve_scroll(browser):
+                browser.clear()
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(False)
 
     def set_runs(self, runs):
-        self.runs_browser.setHtml(self._format_runs(runs))
+        set_html(self.runs_browser, self._format_runs(runs))
 
     def _render_definition_view(self):
         if self._definition_raw:
-            self.definition_browser.setHtml(_format_json(self._current_definition))
+            set_html(self.definition_browser, _format_raw_json(self._current_definition))
         else:
-            self.definition_browser.setHtml(_render_definition_structured(self._current_definition))
+            set_html(self.definition_browser, _render_definition_structured(self._current_definition))
 
     def _on_toggle_definition_view(self):
         self._definition_raw = not self._definition_raw
@@ -308,11 +328,24 @@ class ProjectDetailView(QWidget):
         if not runs:
             return "<i>No Project Runs recorded for this Project yet.</i>"
         rows = "".join(
-            f"<tr>{_td(run.get('project_run_id') or '—')}{_td(run.get('status') or '—')}"
+            f"<tr>{_td(ProjectDetailView._run_link(run))}{_td(run.get('status') or '—')}"
             f"{_td(run.get('created_at') or '—')}{_td(run.get('trigger_type') or '—')}</tr>"
             for run in runs
         )
         return f"<table>{_th_row(['Run', 'Status', 'Created', 'Trigger'])}{rows}</table>"
+
+    @staticmethod
+    def _run_link(run) -> str:
+        run_id = str(run.get("project_run_id") or "—")
+        if run_id == "—":
+            return escape(run_id)
+        return f'<a href="relay://project-run/{escape(run_id)}">{escape(run_id)}</a>'
+
+    def _on_run_link(self, url) -> None:
+        if url.scheme() == "relay" and url.host() == "project-run":
+            run_id = url.path().lstrip("/")
+            if run_id:
+                self.run_link_requested.emit(run_id)
 
     def _on_refresh(self):
         if self.project_id:
@@ -443,6 +476,11 @@ class ProjectEditorDialog(QDialog):
             ),
             key=lambda pair: pair[1].casefold(),
         )
+        self._tasks_by_id = {
+            str(task.get("task_id")): dict(task)
+            for task in (available_tasks or [])
+            if task.get("task_id")
+        }
         self._delivery_roots = delivery_roots or []
         self._saving = False
 
@@ -470,16 +508,22 @@ class ProjectEditorDialog(QDialog):
             root.addWidget(no_tasks_hint)
 
         root.addWidget(QLabel("<b>Nodes</b>"))
-        self.nodes_table = QTableWidget(0, 4)
-        self.nodes_table.setHorizontalHeaderLabels(["Node ID", "Task", "Checkpoint (JSON)", "Review gate"])
+        self.nodes_table = QTableWidget(0, 6)
+        self.nodes_table.setHorizontalHeaderLabels(
+            ["Node ID", "Task", "Checkpoint (JSON)", "Review gate", "Type", "Wait"]
+        )
         nodes_header = self.nodes_table.horizontalHeader()
         nodes_header.setSectionResizeMode(0, QHeaderView.Interactive)
         nodes_header.setSectionResizeMode(1, QHeaderView.Stretch)
         nodes_header.setSectionResizeMode(2, QHeaderView.Interactive)
         nodes_header.setSectionResizeMode(3, QHeaderView.Fixed)
+        nodes_header.setSectionResizeMode(4, QHeaderView.Fixed)
+        nodes_header.setSectionResizeMode(5, QHeaderView.Fixed)
         self.nodes_table.setColumnWidth(0, 180)
         self.nodes_table.setColumnWidth(2, 220)
         self.nodes_table.setColumnWidth(3, 116)
+        self.nodes_table.setColumnWidth(4, 90)
+        self.nodes_table.setColumnWidth(5, 110)
         self.nodes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.nodes_table.setMinimumHeight(140)
         self.nodes_table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
@@ -498,15 +542,15 @@ class ProjectEditorDialog(QDialog):
 
         root.addWidget(QLabel("<b>Connections</b> (from node, role -> to node, alias A1/A2/...)"))
         conn_hint = QLabel(
-            "Role is the Artifact role the source node's Task declares (its own output, "
-            "or the reserved name <code>result</code>). Alias must look like A1, A2, ..."
+            "Choose a named Output and Artifact input when the Tasks declare them. "
+            "Older Tasks continue to use their legacy role and A1/A2 alias bindings."
         )
         conn_hint.setWordWrap(True)
         conn_hint.setObjectName("mutedText")
         apply_type(conn_hint, "caption")
         root.addWidget(conn_hint)
         self.connections_table = QTableWidget(0, 4)
-        self.connections_table.setHorizontalHeaderLabels(["From node", "Role", "To node", "Alias"])
+        self.connections_table.setHorizontalHeaderLabels(["From node", "Output", "To node", "Artifact input"])
         conn_header = self.connections_table.horizontalHeader()
         conn_header.setSectionResizeMode(0, QHeaderView.Interactive)
         conn_header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -521,6 +565,10 @@ class ProjectEditorDialog(QDialog):
         self.connections_table.verticalHeader().setDefaultSectionSize(_PICKER_ROW_HEIGHT)
         self.connections_table.itemChanged.connect(lambda item: item.setToolTip(item.text()))
         root.addWidget(self.connections_table)
+        self.readiness_label = QLabel("Interface readiness: add nodes and connections to check compatibility.")
+        self.readiness_label.setObjectName("mutedText")
+        self.readiness_label.setWordWrap(True)
+        root.addWidget(self.readiness_label)
         conn_buttons = QHBoxLayout()
         self.add_conn_button = IconButton("plus", "Add a connection")
         self.add_conn_button.clicked.connect(self._on_add_connection)
@@ -553,6 +601,12 @@ class ProjectEditorDialog(QDialog):
         output_buttons.addWidget(self.remove_output_button)
         output_buttons.addStretch(1)
         root.addLayout(output_buttons)
+        delivery_form = QFormLayout()
+        self.delivery_path_edit = QLineEdit()
+        self.delivery_path_edit.setPlaceholderText("Optional allow-listed folder; delivered after review gates pass")
+        self.delivery_path_edit.setToolTip("The Project's selected final Outputs are copied here under the Project Run ID.")
+        delivery_form.addRow("Final delivery folder", self.delivery_path_edit)
+        root.addLayout(delivery_form)
 
         root.addWidget(QLabel("<b>Orchestrator</b> (optional)"))
         orch_hint = QLabel(
@@ -640,6 +694,8 @@ class ProjectEditorDialog(QDialog):
         self._populate_nodes(definition.get("nodes") or [])
         self._populate_connections(definition.get("connections") or [])
         self._populate_outputs(definition.get("output_selection") or [])
+        delivery = definition.get("delivery") or {}
+        self.delivery_path_edit.setText(str(delivery.get("path") or "") if isinstance(delivery, dict) else "")
         self._populate_orchestrator(definition.get("orchestrator") or {})
 
     def _populate_orchestrator(self, orchestrator: dict) -> None:
@@ -658,34 +714,40 @@ class ProjectEditorDialog(QDialog):
             row = self.nodes_table.rowCount()
             self.nodes_table.insertRow(row)
             self._set_cell(self.nodes_table, row, 0, str(node.get("node_id") or ""))
-            self.nodes_table.setCellWidget(row, 1, self._build_task_combo(str(node.get("task_id") or "")))
+            task_combo = self._build_task_combo(str(node.get("task_id") or ""))
+            task_combo.currentIndexChanged.connect(self._refresh_all_ports)
+            self.nodes_table.setCellWidget(row, 1, task_combo)
             checkpoint = node.get("checkpoint") or {}
             if isinstance(checkpoint, dict) and checkpoint:
                 self._set_cell(self.nodes_table, row, 2, json.dumps(checkpoint))
             else:
                 self._set_cell(self.nodes_table, row, 2, "")
             self._set_review_button(row)
+            wait = node.get("wait") or {}
+            node_type = str(node.get("type") or "task")
+            type_value = "task"
+            if node_type == "wait":
+                type_value = "wait_duration" if wait.get("mode") == "duration" else "wait_manual"
+            self.nodes_table.setCellWidget(row, 4, self._build_node_type_combo(type_value))
+            self.nodes_table.setCellWidget(row, 5, self._build_wait_seconds_widget(node.get("wait") or {}))
 
     def _populate_connections(self, connections):
         self.connections_table.setRowCount(0)
         for connection in connections:
             row = self.connections_table.rowCount()
             self.connections_table.insertRow(row)
-            self.connections_table.setCellWidget(row, 0, self._build_node_combo(str(connection.get("from_node") or "")))
-            self._set_cell(
-                self.connections_table,
+            from_combo = self._build_node_combo(str(connection.get("from_node") or ""))
+            to_combo = self._build_node_combo(str(connection.get("to_node") or ""))
+            from_combo.currentTextChanged.connect(lambda _text, r=row: self._refresh_connection_row_ports(r))
+            to_combo.currentTextChanged.connect(lambda _text, r=row: self._refresh_connection_row_ports(r))
+            self.connections_table.setCellWidget(row, 0, from_combo)
+            self.connections_table.setCellWidget(row, 2, to_combo)
+            self._set_cell(self.connections_table, row, 1, str(connection.get("from_role") or ""))
+            self._set_cell(self.connections_table, row, 3, str(connection.get("to_alias") or ""))
+            self._refresh_connection_row_ports(
                 row,
-                1,
-                str(connection.get("from_role") or ""),
-                tooltip="Artifact role produced by the from-node's Task.",
-            )
-            self.connections_table.setCellWidget(row, 2, self._build_node_combo(str(connection.get("to_node") or "")))
-            self._set_cell(
-                self.connections_table,
-                row,
-                3,
-                str(connection.get("to_alias") or ""),
-                tooltip="Matches ^A[1-9][0-9]*$, e.g. A1, A2.",
+                from_output=str(connection.get("from_output") or connection.get("from_role") or ""),
+                to_input=str(connection.get("to_input") or ""),
             )
 
     def _populate_outputs(self, outputs):
@@ -693,7 +755,10 @@ class ProjectEditorDialog(QDialog):
         for output in outputs:
             row = self.outputs_table.rowCount()
             self.outputs_table.insertRow(row)
-            self.outputs_table.setCellWidget(row, 0, self._build_node_combo(str(output.get("node_id") or "")))
+            node_id = str(output.get("node_id") or "")
+            node_combo = self._build_node_combo(node_id)
+            node_combo.currentTextChanged.connect(lambda _text, r=row: self._refresh_output_row_role(r))
+            self.outputs_table.setCellWidget(row, 0, node_combo)
             self._set_cell(
                 self.outputs_table,
                 row,
@@ -701,6 +766,7 @@ class ProjectEditorDialog(QDialog):
                 str(output.get("role") or ""),
                 tooltip="Artifact role this final output must match.",
             )
+            self._refresh_output_row_role(row, str(output.get("role") or ""))
 
     def _current_node_ids(self) -> list[str]:
         seen: list[str] = []
@@ -736,6 +802,27 @@ class ProjectEditorDialog(QDialog):
         combo.setToolTip(combo.currentData(Qt.ToolTipRole) or "")
         return combo
 
+    @staticmethod
+    def _build_node_type_combo(selected: str = "task") -> QComboBox:
+        combo = _PickerComboBox()
+        combo.setFixedHeight(METRICS["controlHeight"])
+        combo.addItem("Task", "task")
+        combo.addItem("Wait · manual", "wait_manual")
+        combo.addItem("Wait · timed", "wait_duration")
+        index = combo.findData(selected)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        return combo
+
+    @staticmethod
+    def _build_wait_seconds_widget(wait: dict) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(1, 31536000)
+        spin.setValue(int(wait.get("seconds") or 60))
+        spin.setSuffix(" s")
+        spin.setToolTip("Used for a timed Wait node; ignored for manual Wait.")
+        spin.setFixedHeight(METRICS["controlHeight"])
+        return spin
+
     def _build_node_combo(self, selected_node_id: str = "") -> QComboBox:
         """Editable picker over the node_ids already typed in the Nodes table above,
         so a connection/output can't silently reference a node that doesn't exist."""
@@ -747,6 +834,85 @@ class ProjectEditorDialog(QDialog):
         combo.setPlaceholderText("node_id")
         return combo
 
+    def _node_task(self, node_id: str) -> dict | None:
+        for row in range(self.nodes_table.rowCount()):
+            if self._row_text(self.nodes_table, row, 0) != node_id:
+                continue
+            combo = self.nodes_table.cellWidget(row, 1)
+            task_id = combo.currentData() if isinstance(combo, QComboBox) else None
+            return self._tasks_by_id.get(str(task_id)) if task_id else None
+        return None
+
+    def _declared_ports(self, node_id: str, *, output: bool) -> list[str] | None:
+        task = self._node_task(node_id)
+        if not task:
+            return None
+        try:
+            interface = task_interface(task)
+        except (TypeError, ValueError):
+            return None
+        if not interface.declared:
+            return None
+        ports = interface.outputs if output else interface.artifact_inputs
+        return [port.name for port in ports]
+
+    def _port_combo(self, values: list[str], selected: str) -> QComboBox:
+        combo = _PickerComboBox()
+        combo.setFixedHeight(METRICS["controlHeight"])
+        combo.addItem("Choose…", "")
+        for value in values:
+            combo.addItem(value, value)
+        index = combo.findData(selected)
+        if index < 0 and selected:
+            combo.insertItem(0, f"(missing) {selected}", selected)
+            index = 0
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.setToolTip("Choose a declared port; missing values are preserved until corrected.")
+        return combo
+
+    def _refresh_connection_row_ports(self, row: int, *, from_output: str | None = None, to_input: str | None = None):
+        if row < 0 or row >= self.connections_table.rowCount():
+            return
+        source_node = self._combo_text(self.connections_table, row, 0)
+        target_node = self._combo_text(self.connections_table, row, 2)
+        source_value = from_output if from_output is not None else self._row_text(self.connections_table, row, 1)
+        target_value = to_input if to_input is not None else ""
+        current_source = self.connections_table.cellWidget(row, 1)
+        if from_output is None and isinstance(current_source, QComboBox):
+            source_value = current_source.currentData() or current_source.currentText().strip()
+        current_target = self.connections_table.cellWidget(row, 3)
+        if isinstance(current_target, QComboBox):
+            target_value = current_target.currentData() or current_target.currentText().strip()
+        source_ports = self._declared_ports(source_node, output=True)
+        target_ports = self._declared_ports(target_node, output=False)
+        if source_ports is not None:
+            self.connections_table.setCellWidget(row, 1, self._port_combo(source_ports, source_value))
+        else:
+            self._set_cell(self.connections_table, row, 1, source_value, tooltip="Legacy Artifact role.")
+        if target_ports is not None:
+            self.connections_table.setCellWidget(row, 3, self._port_combo(target_ports, target_value))
+        else:
+            alias = self._row_text(self.connections_table, row, 3)
+            self._set_cell(self.connections_table, row, 3, alias, tooltip="Legacy alias A1, A2, …")
+
+    def _refresh_output_row_role(self, row: int, selected: str | None = None):
+        if row < 0 or row >= self.outputs_table.rowCount():
+            return
+        node_id = self._combo_text(self.outputs_table, row, 0)
+        ports = self._declared_ports(node_id, output=True)
+        value = selected if selected is not None else self._row_text(self.outputs_table, row, 1)
+        if ports is not None:
+            self.outputs_table.setCellWidget(row, 1, self._port_combo(ports, value))
+        else:
+            self._set_cell(self.outputs_table, row, 1, value, tooltip="Legacy Artifact role.")
+
+    def _refresh_all_ports(self, *_args):
+        for row in range(self.connections_table.rowCount()):
+            self._refresh_connection_row_ports(row)
+        for row in range(self.outputs_table.rowCount()):
+            self._refresh_output_row_role(row)
+        self._refresh_readiness()
+
     @staticmethod
     def _set_cell(table, row, column, text, *, tooltip: str | None = None):
         item = QTableWidgetItem(text)
@@ -757,9 +923,13 @@ class ProjectEditorDialog(QDialog):
         row = self.nodes_table.rowCount()
         self.nodes_table.insertRow(row)
         self._set_cell(self.nodes_table, row, 0, "", tooltip="Unique within this Project, e.g. research.")
-        self.nodes_table.setCellWidget(row, 1, self._build_task_combo())
+        task_combo = self._build_task_combo()
+        task_combo.currentIndexChanged.connect(self._refresh_all_ports)
+        self.nodes_table.setCellWidget(row, 1, task_combo)
         self._set_cell(self.nodes_table, row, 2, "")
         self._set_review_button(row)
+        self.nodes_table.setCellWidget(row, 4, self._build_node_type_combo())
+        self.nodes_table.setCellWidget(row, 5, self._build_wait_seconds_widget({}))
 
     def _on_remove_node(self):
         rows = sorted({item.row() for item in self.nodes_table.selectedIndexes()}, reverse=True)
@@ -769,10 +939,15 @@ class ProjectEditorDialog(QDialog):
     def _on_add_connection(self):
         row = self.connections_table.rowCount()
         self.connections_table.insertRow(row)
-        self.connections_table.setCellWidget(row, 0, self._build_node_combo())
+        from_combo = self._build_node_combo()
+        to_combo = self._build_node_combo()
+        from_combo.currentTextChanged.connect(lambda _text, r=row: self._refresh_connection_row_ports(r))
+        to_combo.currentTextChanged.connect(lambda _text, r=row: self._refresh_connection_row_ports(r))
+        self.connections_table.setCellWidget(row, 0, from_combo)
         self._set_cell(self.connections_table, row, 1, "", tooltip="Artifact role produced by the from-node's Task.")
-        self.connections_table.setCellWidget(row, 2, self._build_node_combo())
+        self.connections_table.setCellWidget(row, 2, to_combo)
         self._set_cell(self.connections_table, row, 3, "", tooltip="Matches ^A[1-9][0-9]*$, e.g. A1, A2.")
+        self._refresh_connection_row_ports(row)
 
     def _on_remove_connection(self):
         rows = sorted({item.row() for item in self.connections_table.selectedIndexes()}, reverse=True)
@@ -782,8 +957,11 @@ class ProjectEditorDialog(QDialog):
     def _on_add_output(self):
         row = self.outputs_table.rowCount()
         self.outputs_table.insertRow(row)
-        self.outputs_table.setCellWidget(row, 0, self._build_node_combo())
+        node_combo = self._build_node_combo()
+        node_combo.currentTextChanged.connect(lambda _text, r=row: self._refresh_output_row_role(r))
+        self.outputs_table.setCellWidget(row, 0, node_combo)
         self._set_cell(self.outputs_table, row, 1, "", tooltip="Artifact role this final output must match.")
+        self._refresh_output_row_role(row)
 
     def _on_remove_output(self):
         rows = sorted({item.row() for item in self.outputs_table.selectedIndexes()}, reverse=True)
@@ -817,9 +995,21 @@ class ProjectEditorDialog(QDialog):
             if not node_id:
                 raise ValueError(f"Node {row + 1} has an empty node_id.")
             task_id = task_combo.currentData() if isinstance(task_combo, QComboBox) else None
-            if not task_id:
+            node_type_widget = self.nodes_table.cellWidget(row, 4)
+            node_type_value = (
+                node_type_widget.currentData() if isinstance(node_type_widget, QComboBox) else "task"
+            )
+            if node_type_value == "task" and not task_id:
                 raise ValueError(f"Node {row + 1} must select a Task.")
-            node = {"node_id": node_id, "task_id": task_id}
+            node = {"node_id": node_id}
+            if node_type_value == "task":
+                node["task_id"] = task_id
+            else:
+                node["type"] = "wait"
+                wait_mode = "duration" if node_type_value == "wait_duration" else "manual"
+                seconds_widget = self.nodes_table.cellWidget(row, 5)
+                seconds = seconds_widget.value() if isinstance(seconds_widget, QSpinBox) else 60
+                node["wait"] = {"mode": wait_mode, **({"seconds": seconds} if wait_mode == "duration" else {})}
             checkpoint = self._parse_checkpoint(checkpoint_text)
             if checkpoint:
                 node["checkpoint"] = checkpoint
@@ -829,23 +1019,51 @@ class ProjectEditorDialog(QDialog):
         connections = []
         for row in range(self.connections_table.rowCount()):
             from_node = self._combo_text(self.connections_table, row, 0)
-            from_role = self._row_text(self.connections_table, row, 1)
             to_node = self._combo_text(self.connections_table, row, 2)
-            to_alias = self._row_text(self.connections_table, row, 3)
-            if not (from_node and from_role and to_node and to_alias):
-                continue
-            connections.append(
-                {
-                    "from_node": from_node,
-                    "from_role": from_role,
-                    "to_node": to_node,
-                    "to_alias": to_alias,
-                }
+            from_port = self.connections_table.cellWidget(row, 1)
+            to_port = self.connections_table.cellWidget(row, 3)
+            from_role = (
+                from_port.currentData() or from_port.currentText().strip()
+                if isinstance(from_port, QComboBox)
+                else self._row_text(self.connections_table, row, 1)
             )
+            to_input = (
+                to_port.currentData() or to_port.currentText().strip()
+                if isinstance(to_port, QComboBox)
+                else ""
+            )
+            to_alias = self._row_text(self.connections_table, row, 3)
+            if not (from_node and from_role and to_node):
+                continue
+            if isinstance(from_port, QComboBox) or isinstance(to_port, QComboBox):
+                if not to_input:
+                    continue
+                connections.append(
+                    {
+                        "from_node": from_node,
+                        "from_output": from_role,
+                        "to_node": to_node,
+                        "to_input": to_input,
+                    }
+                )
+            elif to_alias:
+                connections.append(
+                    {
+                        "from_node": from_node,
+                        "from_role": from_role,
+                        "to_node": to_node,
+                        "to_alias": to_alias,
+                    }
+                )
         output_selection = []
         for row in range(self.outputs_table.rowCount()):
             node_id = self._combo_text(self.outputs_table, row, 0)
-            role = self._row_text(self.outputs_table, row, 1)
+            role_widget = self.outputs_table.cellWidget(row, 1)
+            role = (
+                role_widget.currentData() or role_widget.currentText().strip()
+                if isinstance(role_widget, QComboBox)
+                else self._row_text(self.outputs_table, row, 1)
+            )
             if not (node_id and role):
                 continue
             output_selection.append({"node_id": node_id, "role": role})
@@ -857,10 +1075,80 @@ class ProjectEditorDialog(QDialog):
             "connections": connections,
             "output_selection": output_selection,
         }
+        delivery_path = self.delivery_path_edit.text().strip()
+        if delivery_path:
+            result["delivery"] = {"kind": "folder", "path": delivery_path}
         orchestrator = self._orchestrator_payload()
         if orchestrator is not None:
             result["orchestrator"] = orchestrator
+        self._refresh_readiness(result)
         return result
+
+    def _refresh_readiness(self, definition: dict | None = None) -> None:
+        if definition is None:
+            try:
+                definition = self._draft_definition_for_diagnostics()
+            except (TypeError, ValueError):
+                return
+        report = diagnose_project_interfaces(
+            definition,
+            lambda task_id: self._tasks_by_id.get(task_id),
+        )
+        if report.errors:
+            self.readiness_label.setText(
+                f"Interface readiness: {len(report.errors)} issue(s) need attention before saving. "
+                + report.errors[0].message
+            )
+            self.readiness_label.setObjectName("errorText")
+        elif report.warnings:
+            self.readiness_label.setText(
+                f"Interface readiness: ready with {len(report.warnings)} legacy warning(s). "
+                "Existing A1/A2 bindings remain supported."
+            )
+            self.readiness_label.setObjectName("mutedText")
+        else:
+            self.readiness_label.setText("Interface readiness: all declared connections are compatible.")
+            self.readiness_label.setObjectName("successText")
+        self.readiness_label.style().unpolish(self.readiness_label)
+        self.readiness_label.style().polish(self.readiness_label)
+
+    def _draft_definition_for_diagnostics(self) -> dict:
+        connections = []
+        for row in range(self.connections_table.rowCount()):
+            source = self._combo_text(self.connections_table, row, 0)
+            target = self._combo_text(self.connections_table, row, 2)
+            source_widget = self.connections_table.cellWidget(row, 1)
+            target_widget = self.connections_table.cellWidget(row, 3)
+            source_port = (
+                source_widget.currentData() or source_widget.currentText().strip()
+                if isinstance(source_widget, QComboBox)
+                else self._row_text(self.connections_table, row, 1)
+            )
+            target_port = (
+                target_widget.currentData() or target_widget.currentText().strip()
+                if isinstance(target_widget, QComboBox)
+                else ""
+            )
+            alias = self._row_text(self.connections_table, row, 3)
+            if source and target and source_port:
+                item = {"from_node": source, "to_node": target}
+                if isinstance(source_widget, QComboBox) or isinstance(target_widget, QComboBox):
+                    item.update({"from_output": source_port, "to_input": target_port})
+                else:
+                    item.update({"from_role": source_port, "to_alias": alias})
+                connections.append(item)
+        nodes = []
+        for row in range(self.nodes_table.rowCount()):
+            node_id = self._row_text(self.nodes_table, row, 0)
+            combo = self.nodes_table.cellWidget(row, 1)
+            task_id = combo.currentData() if isinstance(combo, QComboBox) else ""
+            node_type_widget = self.nodes_table.cellWidget(row, 4)
+            node_type_value = node_type_widget.currentData() if isinstance(node_type_widget, QComboBox) else "task"
+            if node_id and node_type_value == "task" and task_id:
+                nodes.append({"node_id": node_id, "task_id": task_id})
+            elif node_id and node_type_value != "task":
+                nodes.append({"node_id": node_id, "type": "wait", "wait": {"mode": "manual"}})
+        return {"nodes": nodes, "connections": connections}
 
     def _set_review_button(self, row: int) -> None:
         button = QPushButton("Configure…")
@@ -1035,14 +1323,14 @@ class ProjectRunMonitorDialog(QDialog):
             key=lambda step: (node_order.get(step.get("node_id"), 99), step.get("node_id") or ""),
         )
         if not ordered:
-            self.steps_browser.setHtml("<i>No step telemetry yet for this Project Run.</i>")
+            set_html(self.steps_browser, "<i>No step telemetry yet for this Project Run.</i>")
             return
         rows = "".join(
             f"<tr>{_td(step.get('node_id') or '-')}{_td(step.get('task_id') or '-')}"
             f"{_td(step.get('status') or '-')}{_td(step.get('error_code') or '-')}</tr>"
             for step in ordered
         )
-        self.steps_browser.setHtml(f"<table>{_th_row(['Node', 'Task', 'Status', 'Error'])}{rows}</table>")
+        set_html(self.steps_browser, f"<table>{_th_row(['Node', 'Task', 'Status', 'Error'])}{rows}</table>")
 
     def _submit_reexec(self):
         node_id = self.reexec_node_edit.text().strip()

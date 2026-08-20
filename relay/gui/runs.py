@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QTreeWidget,
@@ -23,7 +24,9 @@ from PySide6.QtWidgets import (
 )
 
 from .design_tokens import COLORS
+from .design_widgets import SegmentedControl
 from .job_detail import TaskRunDetailView
+from .scroll_state import preserve_scroll
 
 
 class RunsView(QWidget):
@@ -38,6 +41,7 @@ class RunsView(QWidget):
         self.jobs: dict[str, dict] = {}
         self.selected_run_id: str | None = None
         self._tree_expanded: dict[str, bool] = {}
+        self._group_mode = "date"
 
         # No section heading here: the top bar names the section.
         root = QVBoxLayout(self)
@@ -58,6 +62,13 @@ class RunsView(QWidget):
 
         body = QHBoxLayout()
         left = QVBoxLayout()
+        grouping = QHBoxLayout()
+        grouping.addWidget(QLabel("Group by"))
+        self.group_mode = SegmentedControl([("date", "Date"), ("task", "Task")], current="date")
+        self.group_mode.value_changed.connect(self._set_group_mode)
+        grouping.addWidget(self.group_mode)
+        grouping.addStretch(1)
+        left.addLayout(grouping)
         self.run_list = QTreeWidget()
         self.run_list.setHeaderLabels(["Task Run", "Status"])
         self.run_list.setColumnWidth(0, 260)
@@ -67,6 +78,12 @@ class RunsView(QWidget):
         self.run_list.itemExpanded.connect(lambda item: self._remember_tree_state(item, True))
         self.run_list.itemCollapsed.connect(lambda item: self._remember_tree_state(item, False))
         left.addWidget(self.run_list, 1)
+        self.empty_hint = QLabel("No Task Runs yet.\nRun a registered Task to create the first traceable execution.")
+        self.empty_hint.setObjectName("emptyHint")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        self.empty_hint.setWordWrap(True)
+        left.addWidget(self.empty_hint, 1)
+        self.run_list.hide()
         self.load_more_button = QPushButton("Load more")
         self.load_more_button.clicked.connect(self.load_more_requested.emit)
         self.load_more_button.setEnabled(False)
@@ -97,12 +114,20 @@ class RunsView(QWidget):
         }
 
     def set_runs(self, jobs: dict[str, dict], *, selected_run_id: str | None, has_more: bool = False) -> None:
+        if (
+            self.jobs == jobs
+            and self.selected_run_id == selected_run_id
+            and self.load_more_button.isEnabled() == has_more
+        ):
+            return
         self.jobs = dict(jobs)
         self.selected_run_id = selected_run_id
         self.load_more_button.setEnabled(has_more)
         self._render()
 
     def select_run(self, job_id: str) -> None:
+        if self.selected_run_id == job_id:
+            return
         self.selected_run_id = job_id
         self._render()
 
@@ -115,12 +140,25 @@ class RunsView(QWidget):
         self._render()
         self.filters_changed.emit()
 
+    def _set_group_mode(self, mode: str) -> None:
+        if mode not in {"date", "task"} or mode == self._group_mode:
+            return
+        self._group_mode = mode
+        self._render()
+
     def _remember_tree_state(self, item: QTreeWidgetItem, expanded: bool) -> None:
         state_key = item.data(0, Qt.UserRole + 1)
         if state_key:
             self._tree_expanded[str(state_key)] = expanded
 
     def _render(self) -> None:
+        with preserve_scroll(self.run_list):
+            self._render_content()
+        empty = self.run_list.topLevelItemCount() == 0
+        self.run_list.setVisible(not empty)
+        self.empty_hint.setVisible(empty)
+
+    def _render_content(self) -> None:
         for index in range(self.run_list.topLevelItemCount()):
             group = self.run_list.topLevelItem(index)
             state_key = group.data(0, Qt.UserRole + 1)
@@ -132,6 +170,10 @@ class RunsView(QWidget):
                 if state_key:
                     self._tree_expanded[str(state_key)] = child.isExpanded()
         self.run_list.clear()
+
+        if self._group_mode == "task":
+            self._render_by_task()
+            return
 
         groups = (
             ("Waiting", {"CREATED", "QUEUED"}, "created_at"),
@@ -162,20 +204,56 @@ class RunsView(QWidget):
                     parent.setFlags(Qt.ItemIsEnabled)
                     header.addChild(parent)
                 for job in date_rows:
-                    job_id = str(job.get("job_id") or job.get("task_run_id") or "")
-                    title = job.get("title") or job_id[:8] or "Task Run"
-                    status = str(job.get("status") or "UNKNOWN")
-                    item = QTreeWidgetItem([str(title), self._status_text(status)])
-                    item.setData(0, Qt.UserRole, job_id)
-                    item.setToolTip(0, str(job.get("task_preview") or job_id))
-                    item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-                    self._apply_status_colors(item, status)
-                    parent.addChild(item)
-                    if job_id == self.selected_run_id:
-                        self.run_list.setCurrentItem(item)
+                    self._append_run_row(parent, job)
                 if group_name == "Finished":
                     parent.setExpanded(self._tree_expanded.get(date_group_key, True))
             header.setExpanded(self._tree_expanded.get(group_key, True))
+
+    def _render_by_task(self) -> None:
+        grouped: dict[str, list[dict]] = {}
+        labels: dict[str, str] = {}
+        for job in self.jobs.values():
+            if not self._matches_filters(job):
+                continue
+            task_id = str(job.get("task_id") or "").strip()
+            title = str(job.get("title") or "").strip()
+            key = task_id or (f"title:{title.casefold()}" if title else "unregistered")
+            labels.setdefault(key, title or "Unregistered task")
+            grouped.setdefault(key, []).append(job)
+        for key in sorted(grouped, key=lambda item: labels[item].casefold()):
+            rows = grouped[key]
+            rows.sort(key=lambda job: self._run_timestamp(job) or "", reverse=True)
+            state_key = f"task:{key}"
+            header = QTreeWidgetItem([f"{labels[key]} · {len(rows)}", ""])
+            header.setData(0, Qt.UserRole + 1, state_key)
+            header.setFlags(Qt.ItemIsEnabled)
+            self.run_list.addTopLevelItem(header)
+            date_counts: dict[str, int] = {}
+            for job in rows:
+                date_label = self._local_date(self._run_timestamp(job))
+                date_counts[date_label] = date_counts.get(date_label, 0) + 1
+                occurrence = date_counts[date_label]
+                row_label = date_label if occurrence == 1 else f"{date_label} ({occurrence})"
+                self._append_run_row(header, job, label=row_label)
+            header.setExpanded(self._tree_expanded.get(state_key, True))
+
+    def _append_run_row(self, parent: QTreeWidgetItem, job: dict, *, label: str | None = None) -> None:
+        job_id = str(job.get("job_id") or job.get("task_run_id") or "")
+        title = label or str(job.get("title") or job_id[:8] or "Task Run")
+        status = str(job.get("status") or "UNKNOWN")
+        item = QTreeWidgetItem([title, self._status_text(status)])
+        item.setData(0, Qt.UserRole, job_id)
+        timestamp = self._run_timestamp(job)
+        item.setToolTip(0, "\n".join(part for part in (str(job.get("task_preview") or job_id), timestamp) if part))
+        item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+        self._apply_status_colors(item, status)
+        parent.addChild(item)
+        if job_id == self.selected_run_id:
+            self.run_list.setCurrentItem(item)
+
+    @staticmethod
+    def _run_timestamp(job: dict) -> str:
+        return str(job.get("started_at") or job.get("created_at") or "")
 
     def _matches_filters(self, job: dict) -> bool:
         filters = self.filters()

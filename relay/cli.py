@@ -57,6 +57,25 @@ def _read_input_schema(inline: str | None, path: str | None) -> str | None:
     return json.dumps(parsed, ensure_ascii=False)
 
 
+def _read_output_contract(inline: str | None, path: str | None) -> str | None:
+    """Return a canonical Task Interface contract from CLI JSON input."""
+    from .task_interface import normalize_interface
+
+    if inline and path:
+        raise RelayError("INVALID_REQUEST", "Use either --output-contract or --output-contract-file, not both.")
+    raw = inline
+    if path:
+        raw = Path(path).read_text(encoding="utf-8")
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+        normalized = normalize_interface(value)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RelayError("TASK_INTERFACE_INVALID", str(exc)) from exc
+    return json.dumps(normalized, ensure_ascii=False)
+
+
 COMMANDS = {
     "run",
     "submit",
@@ -261,6 +280,8 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     create.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
     create.add_argument("--input-schema", help=_INPUT_SCHEMA_HELP)
     create.add_argument("--input-schema-file", help="Path to a UTF-8 file containing the input JSON Schema")
+    create.add_argument("--output-contract", help="Inline JSON Task Interface contract")
+    create.add_argument("--output-contract-file", help="Path to a UTF-8 JSON Task Interface contract")
     create.add_argument("--machine", action="store_true")
 
     list_p = task_sub.add_parser("list", help="List registered Tasks")
@@ -271,6 +292,15 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     show_p = task_sub.add_parser("show", help="Show a Task definition")
     show_p.add_argument("task_id")
     show_p.add_argument("--machine", action="store_true")
+
+    interface_p = task_sub.add_parser("interface", help="Show the normalized Task Interface")
+    interface_p.add_argument("task_id")
+    interface_p.add_argument("--machine", action="store_true")
+
+    health_p = task_sub.add_parser("interface-health", help="Show recent Task Interface compliance")
+    health_p.add_argument("task_id")
+    health_p.add_argument("--limit", type=int, default=50)
+    health_p.add_argument("--machine", action="store_true")
 
     update = task_sub.add_parser("update", help="Update a Task definition")
     update.add_argument("task_id")
@@ -289,6 +319,8 @@ def _add_task_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--summary", dest="task_summary", help="Short bounded description used in Task catalog")
     update.add_argument("--input-schema", help=_INPUT_SCHEMA_HELP)
     update.add_argument("--input-schema-file", help="Path to a UTF-8 file containing the input JSON Schema")
+    update.add_argument("--output-contract", help="Inline JSON Task Interface contract")
+    update.add_argument("--output-contract-file", help="Path to a UTF-8 JSON Task Interface contract")
     update.add_argument("--machine", action="store_true")
 
     delete_p = task_sub.add_parser("delete", help="Delete a Task definition")
@@ -333,6 +365,9 @@ def _task_cli_request(args, config: Config) -> Any:
         input_schema = _read_input_schema(args.input_schema, args.input_schema_file)
         if input_schema is not None:
             payload["input_schema"] = input_schema
+        output_contract = _read_output_contract(args.output_contract, args.output_contract_file)
+        if output_contract is not None:
+            payload["output_contract"] = output_contract
         return client.request("POST", "/v1/tasks", payload)
     if cmd == "list":
         path = "/v1/tasks"
@@ -341,6 +376,10 @@ def _task_cli_request(args, config: Config) -> Any:
         return client.request("GET", path)
     if cmd == "show":
         return client.request("GET", f"/v1/tasks/{args.task_id}")
+    if cmd == "interface":
+        return client.request("GET", f"/v1/tasks/{args.task_id}/interface")
+    if cmd == "interface-health":
+        return client.request("GET", f"/v1/tasks/{args.task_id}/interface-health?limit={args.limit}")
     if cmd == "update":
         instructions = args.instructions
         if args.task_file:
@@ -369,6 +408,9 @@ def _task_cli_request(args, config: Config) -> Any:
         input_schema = _read_input_schema(args.input_schema, args.input_schema_file)
         if input_schema is not None:
             payload["input_schema"] = input_schema
+        output_contract = _read_output_contract(args.output_contract, args.output_contract_file)
+        if output_contract is not None:
+            payload["output_contract"] = output_contract
         return client.request("POST", f"/v1/tasks/{args.task_id}", payload)
     if cmd == "delete":
         return client.request("DELETE", f"/v1/tasks/{args.task_id}")
@@ -411,6 +453,15 @@ def _add_project_parsers(sub: argparse._SubParsersAction) -> None:
         description="Emit the JSON Schema for a Project definition plus the rules the engine enforces at run time.",
     )
     schema_p.add_argument("--machine", action="store_true")
+
+    validate_p = proj_sub.add_parser(
+        "validate",
+        help="Validate a Project definition without saving it",
+        description="Run the same structural and Task Interface checks used before Project creation or update.",
+    )
+    validate_p.add_argument("--file", help="Path to a UTF-8 JSON file with the Project definition")
+    validate_p.add_argument("--json", help="Inline JSON string (alternative to --file)")
+    validate_p.add_argument("--machine", action="store_true")
 
     list_p = proj_sub.add_parser("list", help="List registered Projects")
     list_p.add_argument("--name")
@@ -508,6 +559,11 @@ def _add_project_run_parsers(run_sub: argparse._SubParsersAction) -> None:
     steps.add_argument("project_run_id")
     steps.add_argument("--machine", action="store_true")
 
+    wait_continue = run_sub.add_parser("continue-wait", help="Continue a manual Wait node")
+    wait_continue.add_argument("project_run_id")
+    wait_continue.add_argument("--node", required=True)
+    wait_continue.add_argument("--machine", action="store_true")
+
     reviews = run_sub.add_parser("reviews", help="List result reviews for a Project Run")
     reviews.add_argument("project_run_id")
     reviews.add_argument("--machine", action="store_true")
@@ -542,6 +598,9 @@ def _project_cli_request(args, config: Config) -> Any:
 
         return {"ok": True, "schema": PROJECT_DEFINITION_SCHEMA, "rules": PROJECT_DEFINITION_RULES}
     client = _ensure_daemon(config)
+    if cmd == "validate":
+        payload = _load_project_payload(args)
+        return client.request("POST", "/v1/projects/validate", payload)
     if cmd == "create":
         payload = _load_project_payload(args)
         if "name" not in payload:
@@ -640,6 +699,8 @@ def _project_run_cli_request(args, config: Config) -> Any:
         return client.request("GET", f"/v1/project-runs/{prid}")
     if cmd == "steps":
         return client.request("GET", f"/v1/project-runs/{prid}/steps")
+    if cmd == "continue-wait":
+        return client.request("POST", f"/v1/project-runs/{prid}/wait/{args.node}/continue", {})
     if cmd == "reviews":
         return client.request("GET", f"/v1/project-runs/{prid}/reviews")
     if cmd == "receipt":
@@ -666,13 +727,16 @@ def _project_run_cli_request(args, config: Config) -> Any:
 
 
 def _load_project_payload(args) -> dict[str, Any]:
-    if args.file:
-        return json.loads(Path(args.file).read_text(encoding="utf-8"))
-    if args.json:
-        return json.loads(args.json)
+    file_path = getattr(args, "file", None)
+    inline_json = getattr(args, "json", None)
+    if file_path:
+        return json.loads(Path(file_path).read_text(encoding="utf-8"))
+    if inline_json:
+        return json.loads(inline_json)
     payload = {}
-    if args.name:
-        payload["name"] = args.name
+    name = getattr(args, "name", None)
+    if name:
+        payload["name"] = name
     return payload
 
 

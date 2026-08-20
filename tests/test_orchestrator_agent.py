@@ -75,6 +75,28 @@ class OrchestratorAgentDispatchTests(unittest.TestCase):
         decision = agent.decide(evidence, state_digest="")
         self.assertEqual(decision.strategy, "give_up")
 
+    def test_review_reads_decision_from_relay_json_answer_envelope(self):
+        result_path = self._result_file(
+            {
+                "schema_version": "1.0",
+                "status": "complete",
+                "answer": json.dumps(
+                    {"decision": "rerun", "reason": "missing sources", "comment": "Add source URLs."}
+                ),
+                "sources": [],
+                "uncertainties": [],
+                "missing_items": [],
+                "artifacts": [],
+            }
+        )
+        engine = _StubEngine({"ok": True, "status": "completed", "result_path": result_path})
+        agent = OrchestratorAgent(engine)
+
+        decision = agent.review(node_id="a", guidelines="Check sources.", evidence={"result": "report"})
+
+        self.assertEqual(decision["decision"], "rerun")
+        self.assertEqual(decision["comment"], "Add source URLs.")
+
     def test_decide_raises_on_incomplete_task_run(self):
         engine = _StubEngine({"ok": False, "status": "failed", "error_code": "ALL_WORKERS_FAILED"})
         agent = OrchestratorAgent(engine)

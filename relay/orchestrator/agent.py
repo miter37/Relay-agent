@@ -183,4 +183,15 @@ class OrchestratorAgent:
             raise RelayError("ORCHESTRATOR_DECISION_INVALID", f"Orchestrator result was not valid JSON: {exc}") from exc
         if isinstance(decoded, dict) and isinstance(decoded.get("content"), dict):
             return decoded["content"]
+        if isinstance(decoded, dict) and decoded.get("schema_version") == "1.0":
+            answer = decoded.get("answer")
+            if isinstance(answer, dict):
+                return answer
+            if isinstance(answer, str):
+                try:
+                    answer_payload = json.loads(answer)
+                except ValueError:
+                    answer_payload = None
+                if isinstance(answer_payload, dict):
+                    return answer_payload
         return decoded

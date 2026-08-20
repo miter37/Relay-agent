@@ -10,8 +10,9 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QEventLoop, QTimer
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QEventLoop, Qt, QTimer
+    from PySide6.QtGui import QTextCursor
+    from PySide6.QtWidgets import QApplication, QTextEdit
 except ModuleNotFoundError as exc:  # GUI extra is installed by the GUI smoke job.
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
 
@@ -52,6 +53,16 @@ class G1GuiTests(unittest.TestCase):
     def test_runs_is_a_master_detail_view(self):
         self.assertIs(self.window.runs_view.detail, self.window.job_detail_view)
         self.assertIs(self.window.detail_stack.currentWidget(), self.window.runs_view)
+
+    def test_global_navigation_is_top_aligned_and_content_uses_full_splitter(self):
+        self.assertFalse(self.window.sidebar.isVisible())
+        self.assertEqual(self.window.splitter.count(), 1)
+        self.assertFalse(self.window.page_title_label.isVisible())
+        self.assertEqual(self.window.runs_button.property("placement"), "top")
+        self.assertEqual(self.window.settings_button.property("placement"), "top")
+        self.assertEqual(self.window.schedules_button.property("placement"), "top")
+        self.assertIs(self.window.navigation_scroll.widget(), self.window.navigation_host)
+        self.assertGreaterEqual(self.window.navigation_scroll.minimumHeight(), 32)
 
     def test_health_status_is_visible_and_uses_manual_refresh(self):
         self.window._set_connection(
@@ -222,20 +233,102 @@ class G1GuiTests(unittest.TestCase):
         self.assertTrue(self.window.runs_view.run_list.topLevelItem(0).isExpanded())
         self.assertTrue(self.window.runs_view.run_list.topLevelItem(0).child(0).isExpanded())
 
-    def test_result_response_populates_answer_and_raw_result_tabs(self):
+    def test_result_response_populates_answer_and_artifact_explorer(self):
         self.window.selected_job_id = "job-1"
         self.window.active_section = "runs"
         self.window.pending[1] = ("result", "job-1")
         payload = {
             "job_id": "job-1",
             "available": True,
+            "path": "/tmp/result.json",
+            "format": "json",
+            "text": '{"available": true}',
             "data": {"answer": "## Summary\n\nReadable answer"},
         }
 
         self.window._handle_response(1, payload, None)
 
         self.assertIn("Readable answer", self.window.job_detail_view.answer_browser.toPlainText())
-        self.assertIn("available", self.window.job_detail_view._browsers["Result"].toPlainText())
+        self.assertEqual(self.window.job_detail_view.artifacts_view.selected_record().role, "result")
+        self.assertIn("available", self.window.job_detail_view.artifacts_view.json_preview.topLevelItem(0).text(0))
+
+    def test_log_polling_keeps_existing_output_when_eof_returns_empty_chunk(self):
+        self.window.current_mode = "normal"
+        self.window.selected_job_id = "job-log"
+        self.window.current_detail = {"job_id": "job-log", "status": "RUNNING"}
+        self.window.job_detail_view.set_job(
+            {
+                "job_id": "job-log",
+                "status": "RUNNING",
+                "attempts": [{"attempt_id": 7, "worker": "codex"}],
+            }
+        )
+        self.window.job_detail_view.tabs.setCurrentIndex(self.window.job_detail_view.TAB_NAMES.index("Logs"))
+        self.window.log_attempt_id = 7
+        self.window._log_buffer_key = ("job-log", 7, "stdout", False)
+
+        self.window.pending[1] = "logs"
+        self.window._handle_response(1, {"text": "first line\n", "next_offset": 11}, None)
+        self.assertIn("first line", self.window.job_detail_view._browsers["Logs"].toPlainText())
+
+        self.window.pending[2] = "logs"
+        self.window._handle_response(2, {"text": "", "next_offset": 11, "eof": True}, None)
+        self.assertIn("first line", self.window.job_detail_view._browsers["Logs"].toPlainText())
+
+        self.window.pending[3] = "logs"
+        self.window._handle_response(3, {"text": "second line\n", "next_offset": 23}, None)
+        log_text = self.window.job_detail_view._browsers["Logs"].toPlainText()
+        self.assertIn("first line", log_text)
+        self.assertIn("second line", log_text)
+
+    def test_run_overview_is_copyable_and_wraps_requested_task(self):
+        requested_task = "Investigate this Task and produce a detailed result " * 12
+        self.window.job_detail_view.set_job(
+            {
+                "job_id": "job-overview",
+                "status": "COMPLETED",
+                "title": "Overview test",
+                "request": {"task": requested_task},
+            }
+        )
+
+        overview = self.window.job_detail_view._browsers["Overview"]
+        self.assertTrue(overview.textInteractionFlags() & Qt.TextSelectableByMouse)
+        self.assertTrue(overview.textInteractionFlags() & Qt.TextSelectableByKeyboard)
+        self.assertEqual(overview.lineWrapMode(), QTextEdit.WidgetWidth)
+        self.assertEqual(overview.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+        self.assertIn("Requested Task", overview.toPlainText())
+        self.assertIn("Investigate this Task", overview.toPlainText())
+        self.assertNotIn("<pre>", overview.toHtml().lower())
+
+    def test_run_overview_defers_poll_refresh_while_text_is_selected(self):
+        self.window.job_detail_view.set_job(
+            {
+                "job_id": "job-copy",
+                "status": "RUNNING",
+                "title": "Copy test",
+                "request": {"task": "Original requested task"},
+            }
+        )
+        overview = self.window.job_detail_view._browsers["Overview"]
+        overview.selectAll()
+        self.assertTrue(overview.textCursor().hasSelection())
+        original_text = overview.toPlainText()
+
+        self.window.job_detail_view.set_job(
+            {
+                "job_id": "job-copy",
+                "status": "COMPLETED",
+                "title": "Copy test updated",
+                "request": {"task": "Updated requested task"},
+            }
+        )
+
+        self.assertEqual(overview.toPlainText(), original_text)
+        self.assertTrue(overview.textCursor().hasSelection())
+        overview.moveCursor(QTextCursor.End)
+        QApplication.processEvents()
+        self.assertIn("Updated requested task", overview.toPlainText())
 
     def test_progress_check_opens_logs_and_renders_persisted_check_events(self):
         self.window.current_mode = "normal"

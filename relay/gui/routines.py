@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,6 +31,8 @@ from .design_html import kv_row, td, td_html, th_row
 from .design_tokens import COLORS
 from .design_typography import apply_type
 from .design_widgets import IconButton, LabeledButton
+from .json_display import render_json_html
+from .scroll_state import preserve_scroll, set_html
 
 
 def _format_fields(payload):
@@ -89,7 +92,7 @@ class RoutinesListView(QWidget):
         self.search_edit.textChanged.connect(self._rerender)
         layout.addWidget(self.search_edit)
         self.list_widget = QListWidget()
-        self.list_widget.itemActivated.connect(self._item_activated)
+        self.list_widget.currentItemChanged.connect(self._item_changed)
         layout.addWidget(self.list_widget, 1)
 
     def set_routines(self, routines):
@@ -102,6 +105,10 @@ class RoutinesListView(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def _rerender(self):
+        with preserve_scroll(self.list_widget):
+            self._rerender_content()
+
+    def _rerender_content(self):
         query = self.search_edit.text().strip().casefold()
         self.list_widget.clear()
         visible = 0
@@ -132,6 +139,10 @@ class RoutinesListView(QWidget):
         routine_id = item.data(Qt.UserRole)
         if routine_id:
             self.select_routine_requested.emit(str(routine_id))
+
+    def _item_changed(self, item, _previous):
+        if item is not None:
+            self._item_activated(item)
 
 
 class RoutineDetailView(QWidget):
@@ -190,7 +201,8 @@ class RoutineDetailView(QWidget):
         self.status_label.setText(f"{state} - target {target}")
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(self.routine_id is not None)
-        self.overview_browser.setHtml(
+        set_html(
+            self.overview_browser,
             _format_fields(
                 {
                     "Routine ID": routine.get("routine_id"),
@@ -209,31 +221,31 @@ class RoutineDetailView(QWidget):
                     "Next run (UTC)": routine.get("next_run_at_utc"),
                     "Enabled": enabled,
                 }
-            )
+            ),
         )
-        self.definition_browser.setHtml(_format_fields(routine))
-        self.runs_browser.setHtml(self._format_runs(runs or []))
-        self.receipt_browser.clear()
+        set_html(self.definition_browser, _format_fields(routine))
+        set_html(self.runs_browser, self._format_runs(runs or []))
+        with preserve_scroll(self.receipt_browser):
+            self.receipt_browser.clear()
 
     def clear(self):
         self.routine_id = None
         self.title_label.setText("Routine")
         self.status_label.setText("")
         for browser in (self.overview_browser, self.definition_browser, self.runs_browser, self.receipt_browser):
-            browser.clear()
+            with preserve_scroll(browser):
+                browser.clear()
         for button in (self.refresh_button, self.run_button, self.edit_button, self.delete_button):
             button.setEnabled(False)
 
     def set_runs(self, runs):
-        self.runs_browser.setHtml(self._format_runs(runs))
+        set_html(self.runs_browser, self._format_runs(runs))
 
     def set_receipt(self, receipt):
         if not receipt:
-            self.receipt_browser.setHtml("<i>No receipt available.</i>")
+            set_html(self.receipt_browser, "<i>No receipt available.</i>")
             return
-        self.receipt_browser.setHtml(
-            f"<pre>{escape(json.dumps(receipt, ensure_ascii=False, indent=2, default=str))}</pre>"
-        )
+        set_html(self.receipt_browser, render_json_html(receipt))
 
     @staticmethod
     def _format_runs(runs):
@@ -302,6 +314,8 @@ class RoutineEditorDialog(QDialog):
         self.setWindowTitle("Edit Routine" if routine else "New Routine")
         self.resize(720, 720)
         self._routine_id = str(routine.get("routine_id") or "") if routine else ""
+        self._saving = False
+        self._guided_dirty = False
         self._tasks_by_label: dict[str, str] = {}
         self._projects_by_label: dict[str, str] = {}
         self._task_id_by_label: dict[str, str] = {}
@@ -361,11 +375,54 @@ class RoutineEditorDialog(QDialog):
 
         root.addLayout(form)
 
-        root.addWidget(QLabel("<b>Rule (JSON)</b>"))
+        quick_box = QGroupBox("Schedule")
+        quick_form = QFormLayout(quick_box)
+        self.rule_type_combo = QComboBox()
+        for value, label in (("daily", "Every day"), ("weekly", "Selected weekdays"), ("monthly", "Selected month days"), ("n_days", "Every N days"), ("once", "Once")):
+            self.rule_type_combo.addItem(label, value)
+        quick_form.addRow("Repeat", self.rule_type_combo)
+        self.schedule_time_edit = QLineEdit("09:00")
+        self.schedule_time_edit.setPlaceholderText("HH:MM")
+        quick_form.addRow("Time", self.schedule_time_edit)
+        self.weekdays_edit = QLineEdit()
+        self.weekdays_edit.setPlaceholderText("1,2,3,4,5 (ISO weekdays)")
+        quick_form.addRow("Weekdays", self.weekdays_edit)
+        self.month_days_edit = QLineEdit()
+        self.month_days_edit.setPlaceholderText("1,15,28")
+        quick_form.addRow("Month days", self.month_days_edit)
+        self.interval_days_spin = QSpinBox()
+        self.interval_days_spin.setRange(1, 3650)
+        self.interval_days_spin.setValue(1)
+        quick_form.addRow("Interval days", self.interval_days_spin)
+        self.anchor_date_edit = QLineEdit()
+        self.anchor_date_edit.setPlaceholderText("YYYY-MM-DD")
+        quick_form.addRow("Anchor date", self.anchor_date_edit)
+        self.once_local_edit = QLineEdit()
+        self.once_local_edit.setPlaceholderText("YYYY-MM-DD HH:MM")
+        quick_form.addRow("Run once at", self.once_local_edit)
+        self.rule_type_combo.currentIndexChanged.connect(lambda _index: self._mark_guided_dirty())
+        for edit in (
+            self.schedule_time_edit,
+            self.weekdays_edit,
+            self.month_days_edit,
+            self.anchor_date_edit,
+            self.once_local_edit,
+        ):
+            edit.textChanged.connect(self._mark_guided_dirty)
+        self.interval_days_spin.valueChanged.connect(lambda _value: self._mark_guided_dirty())
+        root.addWidget(quick_box)
+
+        self.advanced_rule_checkbox = QCheckBox("Advanced: edit schedule JSON")
+        self.advanced_rule_checkbox.toggled.connect(self._toggle_advanced_rule)
+        root.addWidget(self.advanced_rule_checkbox)
+        self.rule_json_label = QLabel("<b>Rule JSON</b>")
+        self.rule_json_label.setVisible(False)
+        root.addWidget(self.rule_json_label)
         self.rule_edit = QTextEdit()
         self.rule_edit.setAcceptRichText(False)
         self.rule_edit.setPlaceholderText('{"type": "daily", "times": ["09:00"], "timezone": "UTC"}')
         self.rule_edit.setMinimumHeight(100)
+        self.rule_edit.setVisible(False)
         root.addWidget(self.rule_edit, 2)
 
         preview_row = QHBoxLayout()
@@ -395,10 +452,12 @@ class RoutineEditorDialog(QDialog):
         self.error_label.setObjectName("errorText")
         root.addWidget(self.error_label)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
-        buttons.accepted.connect(self._on_save)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+        self.save_button = self.buttons.button(QDialogButtonBox.Save)
+        self.cancel_button = self.buttons.button(QDialogButtonBox.Cancel)
+        self.buttons.accepted.connect(self._on_save)
+        self.buttons.rejected.connect(self.reject)
+        root.addWidget(self.buttons)
 
         self.set_available_choices(tasks=available_tasks or [], projects=available_projects or [])
         if routine:
@@ -429,14 +488,58 @@ class RoutineEditorDialog(QDialog):
     def show_error(self, message):
         self.error_label.setText(message)
 
-    def _on_preview(self):
-        try:
-            rule_text = self.rule_edit.toPlainText().strip()
-            if not rule_text:
+    def _toggle_advanced_rule(self, enabled: bool) -> None:
+        self.rule_json_label.setVisible(enabled)
+        self.rule_edit.setVisible(enabled)
+
+    def _mark_guided_dirty(self, *_args) -> None:
+        self._guided_dirty = True
+
+    def _guided_rule(self) -> dict:
+        rule_type = str(self.rule_type_combo.currentData() or "daily")
+        timezone = self.timezone_edit.text().strip() or "UTC"
+        if rule_type == "once":
+            return {"type": "once", "run_at_local": self.once_local_edit.text().strip(), "timezone": timezone}
+        rule = {"type": rule_type, "times": [self.schedule_time_edit.text().strip()], "timezone": timezone}
+        if rule_type == "weekly":
+            rule["weekdays"] = [int(value.strip()) for value in self.weekdays_edit.text().split(",") if value.strip()]
+        elif rule_type == "monthly":
+            rule["month_days"] = [int(value.strip()) for value in self.month_days_edit.text().split(",") if value.strip()]
+        elif rule_type == "n_days":
+            rule["interval_days"] = int(self.interval_days_spin.value())
+            rule["anchor_date"] = self.anchor_date_edit.text().strip()
+        return rule
+
+    def _rule_payload(self) -> dict:
+        raw = self.rule_edit.toPlainText().strip()
+        if self.advanced_rule_checkbox.isChecked() or (raw and not self._guided_dirty):
+            if not raw:
                 raise ValueError("Rule JSON is required.")
-            rule = json.loads(rule_text)
+            try:
+                rule = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Rule must be valid JSON: {exc}") from exc
             if not isinstance(rule, dict):
                 raise ValueError("Rule must be a JSON object.")
+            return rule
+        return self._guided_rule()
+
+    def set_saving(self, saving: bool) -> None:
+        self._saving = saving
+        self.save_button.setEnabled(not saving)
+        self.save_button.setText("Saving..." if saving else "Save")
+        self.cancel_button.setEnabled(not saving)
+
+    def report_save_error(self, message: str) -> None:
+        self.set_saving(False)
+        self.show_error(message)
+
+    def close_after_save(self) -> None:
+        self.accept()
+
+    def _on_preview(self):
+        try:
+            rule = self._rule_payload()
             timezone = self.timezone_edit.text().strip() or "UTC"
             rule.setdefault("timezone", timezone)
             payload = {"rule": rule, "timezone": timezone, "limit": 5}
@@ -453,16 +556,16 @@ class RoutineEditorDialog(QDialog):
 
     def set_preview(self, occurrences):
         if not occurrences:
-            self.preview_browser.setHtml("<i>No occurrences in the configured active range.</i>")
+            set_html(self.preview_browser, "<i>No occurrences in the configured active range.</i>")
             return
         rows = "".join(
             f"<li>{escape(str(item.get('local_time') or '-'))} ({escape(str(item.get('instant_utc') or '-'))})</li>"
             for item in occurrences
         )
-        self.preview_browser.setHtml(f"<b>Next occurrences</b><ul>{rows}</ul>")
+        set_html(self.preview_browser, f"<b>Next occurrences</b><ul>{rows}</ul>")
 
     def set_preview_error(self, message):
-        self.preview_browser.setHtml(f"<span style='color:{COLORS['state.danger']}'>{escape(str(message))}</span>")
+        set_html(self.preview_browser, f"<span style='color:{COLORS['state.danger']}'>{escape(str(message))}</span>")
 
     def _populate(self, routine):
         self.name_edit.setText(str(routine.get("name") or ""))
@@ -492,6 +595,15 @@ class RoutineEditorDialog(QDialog):
         rule_json = _parse_json_or_none(routine.get("rule_json")) or routine.get("rule")
         if rule_json is not None:
             self.rule_edit.setPlainText(json.dumps(rule_json, indent=2))
+            if isinstance(rule_json, dict):
+                self.rule_type_combo.setCurrentIndex(max(0, self.rule_type_combo.findData(rule_json.get("type"))))
+                self.schedule_time_edit.setText(str((rule_json.get("times") or ["09:00"])[0]))
+                self.weekdays_edit.setText(",".join(str(value) for value in rule_json.get("weekdays") or []))
+                self.month_days_edit.setText(",".join(str(value) for value in rule_json.get("month_days") or []))
+                self.interval_days_spin.setValue(int(rule_json.get("interval_days") or 1))
+                self.anchor_date_edit.setText(str(rule_json.get("anchor_date") or ""))
+                self.once_local_edit.setText(str(rule_json.get("run_at_local") or ""))
+                self._guided_dirty = False
         input_policy = _parse_json_or_none(routine.get("input_policy_json")) or routine.get("input_policy")
         if input_policy is not None:
             self.input_policy_edit.setPlainText(json.dumps(input_policy, indent=2))
@@ -502,13 +614,16 @@ class RoutineEditorDialog(QDialog):
             self.notification_policy_edit.setPlainText(json.dumps(notification_policy, indent=2))
 
     def _on_save(self):
+        if self._saving:
+            return
         try:
             payload = self.payload()
         except ValueError as exc:
             self.show_error(str(exc))
             return
+        self.show_error("")
+        self.set_saving(True)
         self.accepted_payload.emit(payload)
-        self.accept()
 
     def payload(self):
         name = self.name_edit.text().strip()
@@ -524,15 +639,7 @@ class RoutineEditorDialog(QDialog):
         if target_label not in mapping:
             raise ValueError(f"Target not in {target_type} list.")
         target_id = mapping[target_label]
-        rule_text = self.rule_edit.toPlainText().strip()
-        if not rule_text:
-            raise ValueError("Rule JSON is required.")
-        try:
-            rule = json.loads(rule_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Rule must be valid JSON: {exc}") from exc
-        if not isinstance(rule, dict):
-            raise ValueError("Rule must be a JSON object.")
+        rule = self._rule_payload()
         rule.setdefault("timezone", self.timezone_edit.text().strip() or "UTC")
         payload = {
             "name": name,

@@ -25,6 +25,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QInputDialog, QLabel, QScrollArea
 except ModuleNotFoundError as exc:  # pragma: no cover - CI without GUI extra
     raise unittest.SkipTest(f"GUI extra is not installed: {exc}") from exc
@@ -44,9 +45,11 @@ from relay.gui.project_runs import (
     ProjectRunsView,
     ProjectRunTimelineCanvas,
     ProjectRunTimelineView,
+    ProjectRunWorkspaceView,
     _artifact_kind,
     _humanize_error,
     _level_for_nodes,
+    _local_date,
     _merge_project_run_artifacts,
     _verdict,
 )
@@ -140,6 +143,33 @@ class ProjectRunsWidgetTests(unittest.TestCase):
         # blocked child because the design hides it from the top-level list intentionally
         # (it lives in the detail).
 
+    def test_group_by_project_toggle_lists_run_dates_with_occurrence_suffixes(self):
+        view = ProjectRunsView()
+        first = _catalog_item("pr-a1", status="completed", project_name="AAA project")
+        second = _catalog_item("pr-a2", status="failed", project_name="AAA project")
+        second["project_id"] = first["project_id"]
+        third = _catalog_item("pr-b1", status="completed", project_name="BBB project")
+        third["created_at"] = "2026-08-06T08:00:00+00:00"
+        view.set_runs([first, second, third], selected_run_id="pr-a2")
+
+        self.assertEqual(view.group_mode.value(), "date")
+        project_button = view.group_mode.button("project")
+        self.assertTrue(project_button.isCheckable())
+        project_button.click()
+
+        self.assertEqual(view.group_mode.value(), "project")
+        self.assertTrue(project_button.isChecked())
+        self.assertEqual(view.run_list.topLevelItemCount(), 2)
+        aaa = view.run_list.topLevelItem(0)
+        self.assertEqual(aaa.text(0), "AAA project · 2")
+        date = _local_date(first["created_at"])
+        self.assertEqual(aaa.child(0).text(0), date)
+        self.assertEqual(aaa.child(1).text(0), f"{date} (2)")
+        self.assertEqual(view.run_list.currentItem().data(0, Qt.UserRole), "pr-a2")
+
+        view.group_mode.button("date").click()
+        self.assertEqual(view.group_mode.value(), "date")
+
     def test_status_filter_narrows_needs_action(self):
         view = ProjectRunsView()
         view.set_runs(
@@ -156,6 +186,26 @@ class ProjectRunsWidgetTests(unittest.TestCase):
         }
         # Only the failed run remains, surfaced under the "Needs action" group label.
         self.assertEqual(sum(groups.values()), 1)
+
+    def test_refresh_keeps_project_run_list_scroll_position(self):
+        view = ProjectRunsView()
+        runs = [
+            _catalog_item(f"pr-{index}", status="completed", project_name=f"Project {index}") for index in range(40)
+        ]
+        view.resize(760, 240)
+        view.show()
+        self.app.processEvents()
+        view.set_runs(runs)
+        self.app.processEvents()
+
+        scrollbar = view.run_list.verticalScrollBar()
+        self.assertGreater(scrollbar.maximum(), 0)
+        position = min(40, scrollbar.maximum())
+        scrollbar.setValue(position)
+        view.set_runs(runs, selected_run_id=None)
+        self.app.processEvents()
+
+        self.assertEqual(scrollbar.value(), position)
 
     def test_select_run_signal_and_detail_render(self):
         view = ProjectRunsView()
@@ -188,6 +238,7 @@ class ProjectRunsWidgetTests(unittest.TestCase):
         # Detail must report the failed node, blocked count, and humanized error.
         detail = view.detail
         self.assertEqual(detail.steps_table.columnCount(), 10)
+        self.assertTrue(detail.steps_table.isHidden())
         self.assertFalse(detail.retry_button.isHidden())
         self.assertTrue(detail.cancel_button.isHidden())
         self.assertIn("Failed at step image", detail.verdict_label.text())
@@ -697,11 +748,15 @@ class ProjectRunInspectorWidgetTests(unittest.TestCase):
 
         logs_calls: list[str] = []
         answer_calls: list[str] = []
+        open_task_calls: list[str] = []
+        view_result_calls: list[str] = []
         reexec_calls: list[str] = []
         comment_calls: list[tuple[str, str]] = []
         edit_task_calls: list[str] = []
         inspector.open_run_logs_requested.connect(logs_calls.append)
         inspector.open_run_answer_requested.connect(answer_calls.append)
+        inspector.open_task_requested.connect(open_task_calls.append)
+        inspector.view_result_requested.connect(view_result_calls.append)
         inspector.reexecute_from_node_requested.connect(reexec_calls.append)
         inspector.reexecute_with_comment_requested.connect(
             lambda node_id, comment: comment_calls.append((node_id, comment))
@@ -710,6 +765,8 @@ class ProjectRunInspectorWidgetTests(unittest.TestCase):
 
         inspector._emit_open_logs()
         inspector._emit_open_answer()
+        inspector._emit_open_task()
+        inspector._emit_view_result()
         inspector._emit_reexec()
         inspector._emit_edit_task()
         with unittest.mock.patch.object(QInputDialog, "getMultiLineText", return_value=("please fix the title", True)):
@@ -719,6 +776,8 @@ class ProjectRunInspectorWidgetTests(unittest.TestCase):
 
         self.assertEqual(logs_calls, ["tr-2"])
         self.assertEqual(answer_calls, ["tr-2"])
+        self.assertEqual(open_task_calls, ["task-image"])
+        self.assertEqual(view_result_calls, ["image"])
         self.assertEqual(reexec_calls, ["image"])
         self.assertEqual(edit_task_calls, ["task-image"])
         self.assertEqual(comment_calls, [("image", "please fix the title")])
@@ -1072,6 +1131,18 @@ class ProjectRunInspectorMainWindowRoutingTests(unittest.TestCase):
             window.close()
             tmp.cleanup()
 
+    def test_open_task_from_node_opens_task_detail_without_editing(self):
+        window, tmp = self._build()
+        try:
+            window._open_task_from_project_run_node("task-image")
+            self.assertEqual(window.active_section, "tasks")
+            self.assertEqual(window.selected_task_id, "task-image")
+            self.assertTrue(any(request[0] == ("task_detail", "task-image") for request in self.requests))
+            self.assertIsNone(window._pending_task_edit_id)
+        finally:
+            window.close()
+            tmp.cleanup()
+
 
 def _linear_snapshot(nodes: list[dict], connections: list[dict]) -> dict:
     return {
@@ -1140,6 +1211,52 @@ class ProjectRunPipelineWidgetTests(unittest.TestCase):
         self.assertEqual(blocked.property("pipelineState"), "blocked")
         failed = next(card for card in cards if card.node_id == "image")
         self.assertEqual(failed.property("pipelineState"), "failed")
+
+    def test_pipeline_artifact_arrival_updates_only_the_matching_card(self):
+        view = ProjectRunPipelineView()
+        nodes = [_node("research", "t-research"), _node("report", "t-report")]
+        snapshot = _linear_snapshot(nodes, [_connection("research", "result", "report")])
+        view.set_run("pr-1", snapshot, [_step_row("research"), _step_row("report")])
+        cards_before = {
+            card.node_id: card for card in view.cards_container.findChildren(ProjectRunNodeCard)
+        }
+
+        view.update_node_artifacts(
+            "research",
+            [{"artifact_uid": "a-research", "role": "research", "relative_path": "research.json"}],
+        )
+
+        cards_after = {
+            card.node_id: card for card in view.cards_container.findChildren(ProjectRunNodeCard)
+        }
+        self.assertIs(cards_after["research"], cards_before["research"])
+        self.assertIs(cards_after["report"], cards_before["report"])
+        self.assertEqual(len(cards_after["research"].artifacts_host.findChildren(ProjectRunArtifactChip)), 1)
+
+    def test_pipeline_identical_snapshot_does_not_rebuild_cards(self):
+        view = ProjectRunPipelineView()
+        nodes = [_node("research", "t-research")]
+        snapshot = _linear_snapshot(nodes, [])
+        steps = [_step_row("research")]
+        view.set_run("pr-1", snapshot, steps)
+        card = view.cards_container.findChildren(ProjectRunNodeCard)[0]
+
+        with unittest.mock.patch.object(view, "_render", wraps=view._render) as render:
+            view.set_run("pr-1", snapshot, steps)
+
+        render.assert_not_called()
+        self.assertIs(view.cards_container.findChildren(ProjectRunNodeCard)[0], card)
+
+    def test_pipeline_legend_uses_semantic_status_states(self):
+        view = ProjectRunPipelineView()
+        legend = {
+            label.text(): label.property("state")
+            for label in view.findChildren(QLabel)
+            if label.objectName() == "statusBadge"
+        }
+        self.assertEqual(legend["Awaiting review"], "needs_review")
+        self.assertEqual(legend["Awaiting approval"], "needs_approval")
+        self.assertEqual(legend["Running"], "running")
 
     def test_pipeline_cards_are_inside_a_scroll_area(self):
         view = ProjectRunPipelineView()
@@ -1341,7 +1458,7 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_artifacts_tab_lists_final_group_then_task_groups_without_selection(self):
+    def test_artifacts_tab_lists_final_group_then_task_groups_and_selects_primary(self):
         view = ProjectRunArtifactsView()
         view.set_run(
             "pr-1",
@@ -1356,8 +1473,31 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
 
         groups = [view.artifact_tree.topLevelItem(i).text(0) for i in range(view.artifact_tree.topLevelItemCount())]
         self.assertEqual(groups, ["Final Artifacts", "research", "render"])
-        self.assertIsNone(view._selected_artifact_uid)
-        self.assertTrue(view.empty_preview.isVisibleTo(view))
+        self.assertEqual(view._selected_artifact_uid, "a-final")
+        self.assertFalse(view.empty_preview.isVisibleTo(view))
+        self.assertEqual(view.artifact_tree.topLevelItem(0).text(1), "")
+        self.assertFalse(view.artifact_tree.topLevelItem(0).icon(1).isNull())
+
+    def test_artifact_sidebar_uses_task_state_icons_instead_of_counts_or_publication_words(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [],
+            {
+                "research": [{"artifact_uid": "a-ok", "relative_path": "notes.md"}],
+                "render": [{"artifact_uid": "a-failed", "relative_path": "image.svg", "publication_status": "published"}],
+            },
+            task_statuses={"research": "completed", "render": "failed"},
+        )
+
+        research = view.artifact_tree.topLevelItem(0)
+        render = view.artifact_tree.topLevelItem(1)
+        self.assertEqual(research.text(1), "")
+        self.assertEqual(render.text(1), "")
+        self.assertFalse(research.icon(1).isNull())
+        self.assertFalse(render.icon(1).isNull())
+        self.assertEqual(render.child(0).text(1), "")
+        self.assertEqual(render.child(0).toolTip(1), "Ready")
 
     def test_json_artifact_renders_as_expandable_structure(self):
         view = ProjectRunArtifactsView()
@@ -1372,6 +1512,8 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
         view.cache_artifact_content("a-json", {"available": True, "text": '{"headline": "Relay", "items": [1, 2]}'})
         view.select_artifact("a-json")
 
+        self.assertEqual(view.preview_stack.currentWidget(), view.json_outline_preview)
+        view.json_mode_button.click()
         self.assertEqual(view.preview_stack.currentWidget(), view.json_preview)
         names = [view.json_preview.topLevelItem(i).text(0) for i in range(view.json_preview.topLevelItemCount())]
         self.assertEqual(names, ["headline", "items"])
@@ -1409,6 +1551,29 @@ class ProjectRunArtifactsWidgetTests(unittest.TestCase):
 
         self.assertEqual(view.preview_stack.currentWidget(), view.metadata_preview)
         self.assertIn("Loading", view.metadata_preview.text())
+
+    def test_awaiting_review_puts_candidate_artifacts_first_and_selects_them(self):
+        view = ProjectRunArtifactsView()
+        view.set_run(
+            "pr-1",
+            [{"artifact_uid": "published", "role": "output", "relative_path": "published.md"}],
+            {},
+            [
+                {
+                    "review_id": "review-1",
+                    "node_id": "review-node",
+                    "artifact_uid": "candidate",
+                    "role": "candidate",
+                    "relative_path": "candidate.md",
+                    "publication_status": "candidate",
+                }
+            ],
+        )
+
+        groups = [view.artifact_tree.topLevelItem(i).text(0) for i in range(view.artifact_tree.topLevelItemCount())]
+        self.assertEqual(groups[0], "Review candidate · review-node")
+        self.assertEqual(view._selected_artifact_uid, "candidate")
+        self.assertEqual(view.selected_record().review_id, "review-1")
 
 
 class ProjectRunTimelineWidgetTests(unittest.TestCase):
@@ -1490,14 +1655,110 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_detail_view_has_pipeline_artifacts_timeline_and_orchestrator_tabs(self):
+    def test_detail_view_has_pipeline_timeline_and_orchestrator_tabs(self):
         view = ProjectRunDetailView()
         self.assertEqual(view.run_tabs.count(), 4)
         labels = [view.run_tabs.tabText(i) for i in range(view.run_tabs.count())]
-        self.assertEqual(labels, ["Pipeline", "Artifacts", "Timeline", "Orchestrator"])
+        self.assertEqual(labels, ["Workspace", "Pipeline", "Timeline", "Orchestrator"])
         self.assertNotIn("Steps", labels)
 
-    def test_pipeline_artifact_selection_enters_artifacts_tab(self):
+    def test_workspace_is_default_and_preserves_existing_detail_tabs(self):
+        view = ProjectRunDetailView()
+        view.set_run(_catalog_item("pr-1", status="completed"))
+        self.assertIs(view.run_tabs.currentWidget(), view.workspace_view)
+        self.assertIsNotNone(view.workspace_view.artifacts_view)
+        self.assertEqual(view.run_tabs.indexOf(view.pipeline_view), 1)
+
+    def test_workspace_review_panel_emits_feedback_action(self):
+        view = ProjectRunDetailView()
+        view.set_run(_catalog_item("pr-1", status="awaiting_review"))
+        view.cache_review_detail(
+            "review-1",
+            {"review": {"review_id": "review-1", "status": "pending_human", "guidelines": "Check output"}},
+        )
+        seen = []
+        view.review_rerun_requested.connect(lambda review_id, comment: seen.append((review_id, comment)))
+        panel = view.workspace_view
+        panel.review_comment.setPlainText("Add the missing evidence")
+        panel._emit_rerun()
+        self.assertEqual(seen, [("review-1", "Add the missing evidence")])
+        self.assertFalse(panel.review_rerun.isEnabled())
+
+    def test_workspace_buffers_changed_run_until_user_applies_update(self):
+        view = ProjectRunWorkspaceView()
+        initial = _catalog_item("pr-1", status="running")
+        initial["steps"] = [_step_row("a", status="running")]
+        view.set_run(initial, {}, {})
+        view.review_comment.setPlainText("I am reading this result")
+
+        updated = dict(initial, status="completed", workflow_status="completed")
+        updated["steps"] = [_step_row("a", status="completed")]
+        view.set_run(updated, {}, {})
+
+        self.assertFalse(view.update_notice.isHidden())
+        self.assertIn("실행 중", view.next_action_label.text())
+        view.acknowledge_updates()
+        self.assertTrue(view.update_notice.isHidden())
+        self.assertIn("완료", view.next_action_label.text())
+
+    def test_workspace_shows_orchestrator_evaluation_handoff_and_round_history(self):
+        view = ProjectRunWorkspaceView()
+        run = _catalog_item("pr-1", status="awaiting_review")
+        run["workflow_status"] = "needs_review"
+        view.set_run(
+            run,
+            {},
+            {
+                "review-1": {
+                    "review": {
+                        "review_id": "review-1",
+                        "status": "needs_human",
+                        "reviewer": "orchestrator",
+                        "comment": "Human must verify the unsupported claim.",
+                        "guidelines": "Check source support",
+                        "evaluation_json": '{"decision":"human_review","reason":"Unsupported claim"}',
+                        "reruns_used": 2,
+                        "max_reruns": 2,
+                    },
+                    "rounds": [
+                        {
+                            "round_no": 1,
+                            "status": "needs_human",
+                            "task_run_id": "job-1",
+                            "evaluation_json": '{"decision":"human_review","reason":"Unsupported claim"}',
+                        }
+                    ],
+                }
+            },
+        )
+        self.assertIn("Unsupported claim", view.review_evaluation.text())
+        self.assertIn("Human handoff", view.review_handoff.text())
+        self.assertEqual(view.review_rounds.topLevelItemCount(), 1)
+
+    def test_workspace_clears_review_controls_after_action_completes(self):
+        view = ProjectRunWorkspaceView()
+        view.set_run(
+            _catalog_item("pr-1", status="awaiting_review"),
+            {},
+            {"review-1": {"review": {"review_id": "review-1", "status": "pending_human"}}},
+        )
+        view.review_comment.setPlainText("Please rerun with this correction")
+        self.assertTrue(view.review_rerun.isEnabled())
+        view.review_action_completed("review-1")
+        self.assertTrue(view.review_comment.toPlainText() == "")
+        self.assertFalse(view.review_confirm.isEnabled())
+        self.assertFalse(view.review_rerun.isEnabled())
+
+    def test_project_run_catalog_skips_identical_poll_render(self):
+        view = ProjectRunsView()
+        runs = [_catalog_item("pr-1", status="completed")]
+        view.set_runs(runs)
+        render = unittest.mock.patch.object(view, "_render", wraps=view._render)
+        with render as mocked:
+            view.set_runs(runs, selected_run_id=None)
+        mocked.assert_not_called()
+
+    def test_pipeline_artifact_selection_enters_workspace(self):
         view = ProjectRunDetailView()
         run = _catalog_item("pr-1", status="completed", completed=1)
         run["final_artifact_ids"] = [
@@ -1507,8 +1768,45 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
         view.set_run(run)
         view.pipeline_view.artifact_selected.emit("a-final")
 
-        self.assertIs(view.run_tabs.currentWidget(), view.artifacts_view)
-        self.assertEqual(view.artifacts_view._selected_artifact_uid, "a-final")
+        self.assertIs(view.run_tabs.currentWidget(), view.workspace_view)
+        self.assertEqual(view.workspace_view.artifacts_view._selected_artifact_uid, "a-final")
+
+    def test_inspector_view_result_enters_workspace_and_focuses_node(self):
+        view = ProjectRunDetailView()
+        run = _catalog_item("pr-result", status="completed", completed=1)
+        run["final_artifact_ids"] = [
+            {"artifact_uid": "a-final", "node_id": "render", "role": "final_report", "relative_path": "report.html"}
+        ]
+        run["steps"] = [_step_row("render")]
+        view.set_run(run)
+        view.pipeline_view.node_selected.emit("render")
+        view.inspector._emit_view_result()
+
+        self.assertIs(view.run_tabs.currentWidget(), view.workspace_view)
+        self.assertEqual(view.workspace_view._focused_node_id, "render")
+
+    def test_run_detail_exposes_pending_review_actions(self):
+        view = ProjectRunDetailView()
+        view.set_run(_catalog_item("pr-1", status="awaiting_review"))
+        view.cache_review_detail(
+            "review-1",
+            {
+                "review": {
+                    "review_id": "review-1",
+                    "status": "pending_human",
+                    "reviewer": "human",
+                    "guidelines": "Check the sources",
+                    "reruns_used": 1,
+                    "max_reruns": 2,
+                }
+            },
+        )
+        seen = []
+        view.review_confirm_requested.connect(seen.append)
+        self.assertTrue(view.review_confirm_button.isVisibleTo(view))
+        view._emit_review_confirm()
+        self.assertEqual(seen, ["review-1"])
+        self.assertFalse(view.review_confirm_button.isEnabled())
 
     def test_pipeline_node_selection_syncs_steps_table(self):
         view = ProjectRunDetailView()
@@ -1556,6 +1854,7 @@ class ProjectRunDetailTabsTests(unittest.TestCase):
         run["steps"] = [_step_row("a", status="completed"), _step_row("b", status="completed")]
         view.set_run(run)
 
+        view.run_tabs.setCurrentWidget(view.pipeline_view)
         view.pipeline_view.node_selected.emit("b")
         self.assertTrue(view.inspector.isVisibleTo(view))
         self.assertEqual(view.inspector._node_id, "b")

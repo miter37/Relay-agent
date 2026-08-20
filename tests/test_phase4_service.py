@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +69,43 @@ class ProjectServiceTests(unittest.TestCase):
         self.service.soft_delete_project(pid)
         with self.assertRaisesRegex(RelayError, "PROJECT_NOT_FOUND"):
             self.service.get_project(pid)
+
+    def test_declared_interface_error_is_blocked_before_project_save(self):
+        source = self.engine.create_task(
+            TaskSpec(
+                name="Source",
+                instructions="source",
+                output_contract=json.dumps({"outputs": [{"role": "report", "produces": ["text/plain"]}]}),
+            )
+        )
+        target = self.engine.create_task(
+            TaskSpec(
+                name="Target",
+                instructions="target",
+                output_contract=json.dumps(
+                    {"artifact_inputs": [{"name": "image", "accepts": ["image/png"]}]}
+                ),
+            )
+        )
+        definition = {
+            "name": "Invalid binding",
+            "nodes": [
+                {"node_id": "source", "task_id": source["task_id"]},
+                {"node_id": "target", "task_id": target["task_id"]},
+            ],
+            "connections": [
+                {
+                    "from_node": "source",
+                    "from_output": "report",
+                    "to_node": "target",
+                    "to_input": "image",
+                }
+            ],
+            "output_selection": [],
+        }
+        with self.assertRaisesRegex(RelayError, "PROJECT_INTERFACE_INVALID") as ctx:
+            self.service.create_project(definition)
+        self.assertEqual(ctx.exception.details["errors"][0]["code"], "CONNECTION_FORMAT_INCOMPATIBLE")
 
 
 if __name__ == "__main__":

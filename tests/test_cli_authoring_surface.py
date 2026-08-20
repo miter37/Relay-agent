@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from relay.cli import _project_cli_request, _read_input_schema, build_parser
+from relay.cli import _project_cli_request, _read_input_schema, _read_output_contract, build_parser
 from relay.config import Config
 from relay.errors import RelayError
 from relay.profiles import BUILTIN_PROFILES
@@ -60,6 +60,18 @@ class TaskInputSchemaFlagTests(unittest.TestCase):
             _read_input_schema("{}", "schema.json")
         self.assertEqual(ctx.exception.code, "INVALID_REQUEST")
 
+    def test_output_contract_is_normalized_and_reserved_result_is_rejected(self):
+        result = _read_output_contract(
+            json.dumps({"artifact_inputs": [], "outputs": [{"role": "report", "produces": "text/plain"}]}),
+            None,
+        )
+        value = json.loads(result)
+        self.assertEqual(value["interface_version"], 1)
+        self.assertEqual(value["outputs"][0]["role"], "report")
+        with self.assertRaises(RelayError) as ctx:
+            _read_output_contract(json.dumps({"outputs": [{"role": "result"}]}), None)
+        self.assertEqual(ctx.exception.code, "TASK_INTERFACE_INVALID")
+
 
 class ProfileHelpTests(unittest.TestCase):
     @staticmethod
@@ -98,6 +110,21 @@ class ProjectSchemaCommandTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["project", "schema", "--machine"])
         self.assertEqual(args.project_command, "schema")
+
+    def test_interface_and_project_validate_subcommands_are_registered(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["task", "interface", "task-1"]).task_command, "interface")
+        self.assertEqual(parser.parse_args(["task", "interface-health", "task-1"]).task_command, "interface-health")
+        self.assertEqual(parser.parse_args(["project", "validate", "--json", "{}"]).project_command, "validate")
+
+    def test_project_validate_uses_the_non_mutating_api(self):
+        parser = build_parser()
+        args = parser.parse_args(["project", "validate", "--json", '{"name":"draft"}'])
+        client = Mock()
+        client.request.return_value = {"ok": True, "valid": True}
+        with patch("relay.cli._ensure_daemon", return_value=client):
+            _project_cli_request(args, Config())
+        client.request.assert_called_once_with("POST", "/v1/projects/validate", {"name": "draft"})
 
     def test_review_config_subcommand_exposes_node_review_controls(self):
         parser = build_parser()
@@ -192,7 +219,7 @@ class ProjectSchemaCommandTests(unittest.TestCase):
         for field in ("nodes", "connections", "output_selection", "failure_policy"):
             self.assertIn(field, properties)
         node = properties["nodes"]["items"]
-        self.assertEqual(sorted(node["required"]), ["node_id", "task_id"])
+        self.assertEqual(sorted(node["required"]), ["node_id"])
 
     def test_rules_state_the_run_time_constraints_registration_cannot_catch(self):
         self.assertIn("PROJECT_ARTIFACT_AMBIGUOUS", PROJECT_DEFINITION_RULES["exactly_one_match"])

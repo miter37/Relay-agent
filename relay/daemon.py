@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .agent_apps import AgentAppService
+from .agent_registry import AgentRegistry
 from .api import (
     approve_checkpoint,
     artifact_content,
@@ -25,6 +27,7 @@ from .api import (
     check_job_progress,
     compare_runs,
     confirm_review,
+    continue_project_wait,
     create_profile,
     create_project,
     create_routine,
@@ -76,6 +79,7 @@ from .api import (
     reject_review,
     rerun_review,
     retry_review_delivery,
+    review_artifact_content,
     routine_receipt,
     run_artifacts,
     run_detail,
@@ -93,11 +97,14 @@ from .api import (
     search_artifacts,
     search_runs,
     semantic_search_api,
+    task_interface,
+    task_interface_health,
     task_run_review,
     update_profile,
     update_project,
     update_routine,
     update_task,
+    validate_project,
 )
 from .autostart import AutoStartManager
 from .cleanup import CleanupManager
@@ -123,6 +130,8 @@ from .security import (
     set_full_access_mode,
 )
 from .util import ensure_dir, json_dump, random_token, utc_now
+
+logger = logging.getLogger(__name__)
 
 
 class Scheduler:
@@ -224,6 +233,66 @@ class MaintenanceLoop:
         self.stop_event.set()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
+
+
+class StartupAuditLoop:
+    """Runs each enabled worker's deep capability audit once per daemon process.
+
+    Workers already verified (require_verified() succeeds) are skipped. A worker
+    whose shallow audit fails is not retried, since a deep probe would be
+    meaningless. A worker whose shallow audit passes but deep audit fails is
+    retried up to startup_audit_max_attempts times before moving on.
+    """
+
+    def __init__(self, config: Config, db: Database):
+        self.config = config
+        self.db = db
+        self.max_attempts = max(1, int(config.get("startup_audit_max_attempts", 3)))
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not bool(self.config.get("startup_audit_enabled", True)):
+            return
+        self.thread = threading.Thread(target=self.loop, name="relay-startup-audit", daemon=True)
+        self.thread.start()
+
+    def loop(self) -> None:
+        try:
+            doctor = Doctor(self.config, self.db)
+            registry = AgentRegistry(self.config, doctor.spec_root)
+            for agent in registry.list_enabled_agents():
+                if self.stop_event.is_set():
+                    return
+                self._audit_worker(doctor, registry, agent["agent_id"])
+        except Exception:
+            logger.exception("startup worker audit crashed")
+
+    def _audit_worker(self, doctor: Doctor, registry: AgentRegistry, worker: str) -> None:
+        adapter = registry.get_adapter(worker)
+        try:
+            adapter.require_verified()
+            logger.info("startup audit: %s already verified, skipping", worker)
+            return
+        except RelayError:
+            pass
+        for attempt in range(1, self.max_attempts + 1):
+            if self.stop_event.is_set():
+                return
+            spec = doctor.audit_adapter(adapter, deep=True)
+            if not spec.shallow_ok:
+                logger.info("startup audit: %s shallow audit failed, not retrying", worker)
+                return
+            if spec.deep_ok:
+                logger.info("startup audit: %s verified on attempt %d/%d", worker, attempt, self.max_attempts)
+                return
+            logger.warning("startup audit: %s deep audit failed on attempt %d/%d", worker, attempt, self.max_attempts)
+        logger.warning("startup audit: %s still unverified after %d attempts", worker, self.max_attempts)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
 
 
 class RelayRequestHandler(BaseHTTPRequestHandler):
@@ -392,9 +461,25 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 self._api_error(HTTPStatus.BAD_REQUEST, code, message)
             return
         if path.startswith("/v1/reviews/"):
-            review_id = path[len("/v1/reviews/") :]
+            parts = path.strip("/").split("/")
             try:
-                self._json(HTTPStatus.OK, get_review(self.daemon.engine, review_id))
+                if len(parts) == 6 and parts[3] == "artifacts" and parts[5] == "content":
+                    review_id, artifact_uid = parts[2], parts[4]
+                    limit = int(params.get("max_bytes", ["65536"])[0])
+                    self._json(
+                        HTTPStatus.OK,
+                        review_artifact_content(
+                            self.daemon.engine,
+                            review_id,
+                            artifact_uid,
+                            max_bytes=limit,
+                        ),
+                    )
+                else:
+                    review_id = path[len("/v1/reviews/") :]
+                    self._json(HTTPStatus.OK, get_review(self.daemon.engine, review_id))
+            except ValueError as err:
+                self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", str(err))
             except RelayError as err:
                 self._api_error(HTTPStatus.NOT_FOUND, err.code, err.message, details=err.details)
             return
@@ -411,7 +496,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/v1/tasks/"):
             suffix = path[len("/v1/tasks/") :]
             try:
-                if suffix.endswith("/runs"):
+                if suffix.endswith("/interface-health"):
+                    values = parse_qs(parsed.query, keep_blank_values=True)
+                    limit = int((values.get("limit") or ["50"])[0])
+                    self._json(
+                        HTTPStatus.OK,
+                        task_interface_health(self.daemon.engine, suffix[: -len("/interface-health")], limit=limit),
+                    )
+                elif suffix.endswith("/interface"):
+                    self._json(HTTPStatus.OK, task_interface(self.daemon.engine, suffix[: -len("/interface")]))
+                elif suffix.endswith("/runs"):
                     limit = int(params.get("limit", ["50"])[0])
                     self._json(HTTPStatus.OK, runs_for_task(self.daemon.engine, suffix[: -len("/runs")], limit=limit))
                 else:
@@ -861,6 +955,9 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             if path == "/v1/projects":
                 self._json(HTTPStatus.OK, create_project(self.daemon.engine, self._body()))
                 return
+            if path == "/v1/projects/validate":
+                self._json(HTTPStatus.OK, validate_project(self.daemon.engine, self._body()))
+                return
             if path == "/v1/routines":
                 self._json(HTTPStatus.OK, create_routine(self.daemon.engine, self._body()))
                 return
@@ -921,6 +1018,22 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                     elif action == "edit":
                         self._json(HTTPStatus.OK, edit_checkpoint(self.daemon.engine, prid, token, self._body()))
                         return
+            wait_parts = path.split("/")
+            if (
+                path.startswith("/v1/project-runs/")
+                and len(wait_parts) == 7
+                and wait_parts[4] == "wait"
+                and wait_parts[6] == "continue"
+            ):
+                project_run_id, node_id = wait_parts[3], wait_parts[5]
+                if not project_run_id or not node_id:
+                    self._api_error(HTTPStatus.BAD_REQUEST, "INVALID_REQUEST", "node_id is required.")
+                    return
+                try:
+                    self._json(HTTPStatus.OK, continue_project_wait(self.daemon.engine, project_run_id, node_id))
+                except RelayError as err:
+                    self._api_error(HTTPStatus.BAD_REQUEST, err.code, err.message, details=err.details)
+                return
             if path.startswith("/v1/project-runs/") and path.endswith("/steps"):
                 # Mirror GET /steps for clients that send POST; the underlying call is read-only.
                 prid = path[len("/v1/project-runs/") : -len("/steps")]
@@ -1193,6 +1306,7 @@ class RelayDaemon:
             self.schedule_runtime, float(self.config.get("schedule_poll_interval_seconds", 1))
         )
         self.maintenance = MaintenanceLoop(config, self.db)
+        self.startup_audit = StartupAuditLoop(config, self.db)
         self.runtime = config.path_value("runtime_root")
         ensure_dir(self.runtime)
         self.token_path = self.runtime / "daemon.token"
@@ -1226,11 +1340,13 @@ class RelayDaemon:
         self.scheduler.start()
         self.schedule_loop.start()
         self.maintenance.start()
+        self.startup_audit.start()
         self.project_runtime.start()
         self.routine_runtime.start()
         try:
             self.server.serve_forever(poll_interval=0.5)
         finally:
+            self.startup_audit.stop()
             self.maintenance.stop()
             self.project_runtime.stop()
             self.routine_runtime.stop()

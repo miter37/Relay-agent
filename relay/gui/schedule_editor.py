@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .design_typography import apply_type
+from .scroll_state import preserve_scroll
 
 
 class ScheduleEditorDialog(QDialog):
@@ -214,14 +215,16 @@ class ScheduleEditorDialog(QDialog):
         self.preview_requested.emit(self.payload())
 
     def set_preview(self, occurrences: list[dict]) -> None:
-        self.preview_list.clear()
-        for item in occurrences:
-            self.preview_list.addItem(str(item.get("local") or item.get("utc") or "—"))
+        with preserve_scroll(self.preview_list):
+            self.preview_list.clear()
+            for item in occurrences:
+                self.preview_list.addItem(str(item.get("local") or item.get("utc") or "—"))
         self.preview_error.clear()
         self.save_button.setEnabled(bool(occurrences))
 
     def set_preview_error(self, message: str) -> None:
-        self.preview_list.clear()
+        with preserve_scroll(self.preview_list):
+            self.preview_list.clear()
         self.preview_error.setText(message)
         self.save_button.setEnabled(False)
 

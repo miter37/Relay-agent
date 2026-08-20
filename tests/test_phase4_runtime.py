@@ -210,6 +210,43 @@ class ProjectRuntimeTests(unittest.TestCase):
         step_runs = self.db.list_project_step_runs(project_run["project_run_id"], "a")
         self.assertEqual(len(step_runs), 1)
 
+    def test_manual_wait_persists_and_can_continue_after_runtime_restart(self):
+        project = self.service.create_project(
+            {
+                "name": "Manual pause",
+                "nodes": [{"node_id": "pause", "type": "wait", "wait": {"mode": "manual"}}],
+                "connections": [],
+                "output_selection": [],
+            }
+        )
+        project_run = self.service.create_project_run(project["project_id"])
+        project_run_id = project_run["project_run_id"]
+        self.runtime.tick_once()
+        self.assertEqual(self.db.get_project_step(project_run_id, "pause")["status"], "waiting")
+        runtime2 = ProjectRuntime(self.db, self.engine, self.service)
+        runtime2.continue_wait(project_run_id, "pause")
+        runtime2.tick_once()
+        self.assertEqual(self.db.get_project_run(project_run_id)["status"], "completed")
+
+    def test_final_outputs_are_delivered_after_project_completion(self):
+        delivery_root = self.home / "deliveries"
+        self.config.set("allowed_delivery_roots", [str(delivery_root)])
+        task = _task(self.engine, "Final")
+        project = self.service.create_project(
+            {
+                "name": "Delivered",
+                "delivery": {"kind": "folder", "path": str(delivery_root)},
+                "nodes": [{"node_id": "final", "task_id": task["task_id"]}],
+                "connections": [],
+                "output_selection": [{"node_id": "final", "role": "report"}],
+            }
+        )
+        project_run_id = self.service.create_project_run(project["project_id"])["project_run_id"]
+        self.runtime.tick_once()
+        self._complete_step_with_artifact(project_run_id, "final", "report")
+        self.runtime.tick_once()
+        self.assertTrue((delivery_root / project_run_id / "result.txt").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
